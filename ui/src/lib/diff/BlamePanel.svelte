@@ -22,7 +22,8 @@
     path: string;
     /** Revision to blame; the daemon defaults to HEAD. */
     rev?: string;
-    onclose: () => void;
+    /** Omitted where the host draws its own Close (Git History's Detail pane). */
+    onclose?: () => void;
     onfocuscommit?: (sha: string) => void;
   }
   let { repoId, path, rev, onclose, onfocuscommit }: Props = $props();
@@ -167,9 +168,11 @@
         <Icon name="undo" size={12} /> Back
       </button>
     {/if}
-    <button type="button" class="icon-btn" onclick={onclose} aria-label="Close blame" title="Close blame">
-      <Icon name="x" size={14} />
-    </button>
+    {#if onclose}
+      <button type="button" class="icon-btn" onclick={onclose} aria-label="Close blame" title="Close blame">
+        <Icon name="x" size={14} />
+      </button>
+    {/if}
   </header>
 
   <div class="bl-body" bind:this={bodyEl} bind:clientHeight={tw.viewH} onscroll={tw.onscroll}>

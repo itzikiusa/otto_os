@@ -21,10 +21,11 @@ export function resolveFrameworkDevDebugLaunch(
   return null;
 }
 
-/** Runners the Node inspector cannot debug (Karma tests run in a browser, Playwright tests in
- *  worker processes): the daemon's own refusal (`unsupported_js_runner_error`, BUG-30). */
-export function runOnlyDebugRefusal(runner: string | undefined): string | null {
-  if (runner === 'playwright') return "Debug is not supported for Playwright under the Node inspector bridge (Playwright runs tests inside a separate worker process). Use Run or the Playwright Inspector (`PWDEBUG=1`).";
-  if (runner === 'karma') return 'Debug is not supported for Karma/Angular browser tests under the Node inspector bridge. Use Run or attach a Chrome CDP session.';
+/** Plain Karma (`karma start`, no Angular CLI) stays Run-only: Playwright and Angular
+ *  Karma debug through js-debug (the daemon's own `PLAIN_KARMA` text, BUG-30). */
+export function runOnlyDebugRefusal(cfg: Pick<IdeRunConfig, 'runner' | 'args'> | undefined): string | null {
+  if (cfg?.runner === 'karma' && (cfg.args ?? []).slice(0, 2).includes('karma')) {
+    return 'Debug supports Karma in Angular CLI projects. For this Karma config, use Run, or start karma with --no-single-run and use Browser attach.';
+  }
   return null;
 }

@@ -116,7 +116,7 @@ test('Recovery Refresh replaces stale first page and retains it on a later error
 function environmentEditor(saveEnvironment: (...args: any[]) => Promise<any>) {
   const env = { id: 'A', name: 'A', variables: { base_url: 'before' }, secret_keys: [] };
   const c = component('../src/modules/api/EnvironmentsView.svelte', {
-    selected: env, selectedId: 'A', loadedFor: null, rows: [], dirty: false, saving: false, canEdit: true,
+    selected: env, selectedId: 'A', loadedFor: null, rows: [], dirty: false, saving: false, canEdit: true, phoneOpen: false,
     apiClient: { saveEnvironment }, ws: { currentId: 'workspace-A' }, confirmer: { ask: async () => true, choose: async () => ({ value: 'discard' }) },
   });
   c.seed(env);

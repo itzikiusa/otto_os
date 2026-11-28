@@ -47,12 +47,9 @@ test('Database RTL arrows follow the visual order of sidebar, query and main tab
 test('Phone schema selection exposes one keyboard reachable selected tab', async ({page}) => {
   await setup(page,'database');
   await page.setViewportSize({width:375,height:812});
-  // A phone keeps Tables / History in a sheet from the header.
-  // Tables is kept in the phone header. (Branching on isVisible() raced the
-  // header's re-fit after the resize: it read "visible" one frame before the
-  // button folded into the ⋯, and the click then waited on a hidden button.)
-  await page.getByTestId('page-header').getByRole('button',{name:'Tables',exact:true}).click();
-  const sidebar = page.getByRole('dialog',{name:'Tables'}).getByRole('tablist',{name:'Sidebar view'});
+  // A phone pushes back to the Tables list page; its views are the page header.
+  await page.getByTestId('page-header').getByRole('button',{name:'Back to Tables',exact:true}).click();
+  const sidebar = page.getByTestId('page-header').getByRole('tablist',{name:'Sidebar view'});
   await expect(sidebar.getByRole('tab',{name:'Tables',exact:true})).toBeVisible();
   await expect(sidebar.getByRole('tab',{name:'Tables',exact:true})).toHaveAttribute('tabindex','0');
   await expect(sidebar.getByRole('tab', { selected: true })).toHaveCount(1);
@@ -94,20 +91,25 @@ test('Consumer groups adapt to their available width and resize using RTL keyboa
   await setup(page,'broker');
   await page.locator('.tabs button',{hasText:'Groups'}).click();
   await expect(page.locator('.detail .gid.big')).toBeVisible();
-  const groups = page.locator('.groups');
-  const separator = groups.getByRole('separator');
+  const groups = page.locator('.groups-container');
+  const list = page.getByTestId('brokers-groups-list');
+  const separator = groups.getByRole('separator', { name: 'Resize Groups' });
   await expect.soft(separator).toHaveAttribute('tabindex','0');
-  const before = await groups.locator('.list').evaluate(e=>e.getBoundingClientRect().width);
+  const before = await list.evaluate(e=>e.getBoundingClientRect().width);
   if (await separator.getAttribute('tabindex') === '0') {
     await separator.focus(); await separator.press('ArrowLeft');
-    await expect.poll(()=>groups.locator('.list').evaluate(e=>e.getBoundingClientRect().width)).toBeGreaterThan(before);
+    await expect.poll(()=>list.evaluate(e=>e.getBoundingClientRect().width)).toBeGreaterThan(before);
   }
-  // Same desktop viewport, narrowed content as in an app split pane.
+  // Same desktop viewport, narrowed content as in an app split pane: no room
+  // for the list beside the group, so the list is the content and a group is
+  // pushed over it (Back in the page header).
   await groups.evaluate(e => {e.parentElement!.style.width='620px';});
-  const listBox = await groups.locator('.list').boundingBox();
-  const detailBox = await groups.locator('.detail').boundingBox();
-  expect(detailBox!.y).toBeGreaterThanOrEqual(listBox!.y + listBox!.height - 1);
+  await expect(groups.locator('.detail')).toBeHidden();
+  await expect(list).toBeVisible();
   await expect(separator).toBeHidden();
+  await list.locator('.grow-row').first().click();
+  await expect(groups.locator('.detail .gid.big')).toBeVisible();
+  await expect(page.getByRole('button',{name:'Back to Groups',exact:true})).toBeVisible();
   await expectNoHorizontalOverflow(page);
   mkdirSync('/tmp/otto-ux-r3-data-screenshots',{recursive:true});
   await page.screenshot({animations:'disabled',path:'/tmp/otto-ux-r3-data-screenshots/groups-narrow-rtl.png'});
@@ -197,7 +199,7 @@ test('Saved query retry cannot replace the next workspace list', async ({page}) 
   await setup(page,'database');
   await page.getByRole('tablist',{name:'Sidebar view'}).getByRole('tab',{name:'Saved',exact:true}).click();
   phase='hold';
-  await page.locator('.side-body').getByRole('button',{name:'Retry',exact:true}).click();
+  await page.getByTestId('db-side').getByRole('button',{name:'Retry',exact:true}).click();
   await page.getByRole('button',{name:'E2E WS',exact:true}).first().click();
   await page.getByRole('tablist',{name:'Sidebar view'}).getByRole('tab',{name:'Saved',exact:true}).click();
   await expect(page.getByRole('button',{name:'Current workspace query',exact:true})).toBeVisible();
@@ -223,7 +225,7 @@ test('History retry ignores the connection left behind', async ({page}) => {
   await setup(page,'database');
   const sidebar=page.getByRole('tablist',{name:'Sidebar view'});
   await sidebar.getByRole('tab',{name:'History',exact:true}).click();
-  phase='hold'; await page.locator('.side-body').getByRole('button',{name:'Retry',exact:true}).click();
+  phase='hold'; await page.getByTestId('db-side').getByRole('button',{name:'Retry',exact:true}).click();
   await page.getByRole('button',{name:'All connections',exact:true}).click();
   // Every profile was seeded into this disposable daemon by this suite.
   await page.locator('.conn-list .tr-title').filter({hasText:alternate}).click();
@@ -241,7 +243,7 @@ test('Large schema search opens the matching structure without page overflow', a
   await page.route('**/db/schema**',r=>r.fulfill({json:objects}));
   await page.route('**/db/search-objects',r=>r.fulfill({json:{hits:[{schema:'reporting',name:'customer_reporting_119',path:'reporting.customer_reporting_119',kind:'table'}],truncated:false,scanned:1,supported:true}}));
   await page.route('**/db/object',r=>r.fulfill({json:{name:'customer_reporting_119',kind:'table',columns:[{name:'customer_reference_identifier',data_type:'VARCHAR(255)',nullable:false}],indexes:[],foreign_keys:[],primary_key:[]}}));
-  await page.getByRole('button',{name:'Refresh schema',exact:true}).click();
+  await page.getByTestId('db-side-more').click();await page.getByRole('menuitem',{name:'Refresh schema',exact:true}).click();
   await expect(page.getByRole('tree',{name:'Schema'}).getByRole('treeitem')).toHaveCount(120);
   await page.getByRole('textbox',{name:'Find an object'}).fill('customer_reporting_119');
   await page.locator('.hit').filter({hasText:'customer_reporting_119'}).click();
@@ -251,7 +253,7 @@ test('Large schema search opens the matching structure without page overflow', a
   expect((await page.locator('.structure').boundingBox())!.width).toBeGreaterThan(500);
   await expectNoHorizontalOverflow(page);
   await page.screenshot({animations:'disabled',path:'/tmp/otto-ux-r3-data-screenshots/schema-tablet.png'});
-  await page.getByTestId('page-header').getByRole('button',{name:'Tables',exact:true}).click();
+  await page.getByTestId('page-header').getByRole('button',{name:'Show Tables',exact:true}).click();
   await expect(page.getByRole('textbox',{name:'Find an object'})).toHaveValue('customer_reporting_119');
   await expect(page.locator('.hit').filter({hasText:'customer_reporting_119'})).toBeFocused();
   await setDbView(page,'Query');

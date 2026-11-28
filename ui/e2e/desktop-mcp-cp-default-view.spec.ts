@@ -145,7 +145,7 @@ test('pending badge reads the pending requests and the audit log pages', async (
     } });
   });
   await page.goto('/#/mcp/activity');
-  await expect(page.locator('[data-testid="mcp-pending-badge"]')).toHaveText('4', { timeout: 30_000 });
+  await expect(page.getByTestId('mcp-nav-home').locator('.otab-count')).toHaveText('4', { timeout: 30_000 });
   const audit = page.locator('[data-testid="mcp-audit"]');
   await expect(audit.locator('.count')).toHaveText('200+ rows');
   await expect(audit.locator('.arow')).toHaveCount(200);

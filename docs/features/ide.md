@@ -27,7 +27,7 @@ zero-rebuild **runtime IDE plugins**.
     (`GET/PUT /ide/environments`) and minting a collab share room
     (`POST /ide/collab/rooms`) carry `RouteClass::Secret` (human credentials only);
     and subprocess-spawning workspace mutations (`python-venv`, `deps/action`,
-    `POST /ide/runs`, `POST /ide/debug/sessions`, `POST /ide/notebooks/{execute,interrupt,restart,shutdown}`) carry `RouteClass::Admin`
+    `POST /ide/runs`, `POST /ide/debug/sessions`, `POST /ide/notebooks/{execute,input,interrupt,restart,shutdown}`) carry `RouteClass::Admin`
     (human credentials only; local execution/restart also requires root authority).
   - Public guest routes (`/api/v1/ide/collab/guest/*`) sit outside the bearer
     chokepoint and authenticate each request with the room's capability share
@@ -263,13 +263,13 @@ global system directories:
 | Ecosystem | Components |
 |-----------|------------|
 | **Java / JVM** | Adoptium Temurin JDK (17, 21 LTS), Maven, Gradle, Eclipse `jdtls`, `java-debug-adapter` |
-| **Kotlin** | Kotlin Compiler (`kotlinc` / `KOTLIN_HOME`, SDKMAN / Homebrew / official archive), `kotlin-language-server`, `ktfmt` / `ktlint`, Gradle Kotlin DSL (`build.gradle.kts`) & Version Catalog (`gradle/libs.versions.toml`), mixed Java/Kotlin Maven & Gradle modules, JUnit 5 (incl. backtick names) gutter runs & Kotest spec-class gutter runs (one Suite item per spec; leaf DSL tests have no gutter item), JVM JDWP debugging via `java-debug` |
+| **Kotlin** | Kotlin Compiler (`kotlinc` / `KOTLIN_HOME`, SDKMAN / Homebrew / official archive), `kotlin-language-server`, `ktfmt` / `ktlint`, Gradle Kotlin DSL (`build.gradle.kts`) & Version Catalog (`gradle/libs.versions.toml`), mixed Java/Kotlin Maven & Gradle modules, JUnit 5 (incl. backtick names) gutter runs; Kotest gutter Run / Debug on every spec, container and test whose name is a fixed string (all ten spec styles; Gradle `--tests 'pkg.Spec.a -- b'`, Maven `-Dtest=Spec` + `KOTEST_INCLUDE_PATTERN`; Debug through the build tool's own debug switch with the JDWP bridge attached; needs Kotest 6.1+, older projects keep spec items with a note; names with templates, dots or ` -- ` and `withData` rows run through their container), JVM JDWP debugging via `java-debug` |
 | **Spring Boot** | Auto-detected from `@SpringBootApplication`, `pom.xml`, and `build.gradle*` (including multi-module sub-projects); Spring Boot run/debug configs & gutter icons with profile activation (`SPRING_PROFILES_ACTIVE` / `-Dspring-boot.run.profiles`), `application*.{properties,yml}` completion, hover, diagnostics (with deprecated-property Quick Fixes in `.properties`), bidirectional `@Value` / `@ConfigurationProperties` ↔ config navigation, loopback-only Actuator inspector (Health incl. 503 DOWN/OUT_OF_SERVICE, Endpoints/Mappings, Beans, redacted Env), and DevTools classpath trigger touch |
 | **Python** | `uv`, standalone CPython (3.11 / 3.12 / 3.13), `pyright`, `ruff`, `debugpy` |
 | **Rust** | `rustup` (`rustc` + `cargo`), `rust-analyzer`, `CodeLLDB` (`codelldb`) |
-| **Zig** | Official Zig SDK tarball (`ziglang.org/download/index.json`, SHA-256 verified), local SDK registration, `zls` (Zig-version-matched), `CodeLLDB` (`codelldb`) / `lldb-dap` / built-in `otto-lldb-dap` with Zig LLDB type formatters |
-| **C / C++ & Unreal Engine** | Clang / GCC / LLVM toolchain discovery & local registration (Otto does not download compilers: install them with Xcode Command Line Tools, Homebrew or `apt` / `dnf`), `clangd` (auto `--compile-commands-dir` including CMake/Meson/Unreal `Intermediate/ProjectFiles` + `textDocument/switchSourceHeader` `⌥O`), `clang-format`, CMake (Presets & CTest), Meson, Make, `vcpkg.json` / `conanfile.txt` / `.uproject` deps, `CodeLLDB` / `lldb-dap` / built-in `otto-lldb-dap` with C++ STL & Unreal pretty-printers, PID/process-name attach, and core-dump debugging |
-| **.NET (C# / F# / Unity / Unreal)** | Official .NET SDK tarball (`dotnetcli.azureedge.net` / `builds.dotnet.microsoft.com`, LTS 8.0 / 9.0), local SDK registration (`DOTNET_ROOT`), SDK-matched `csharp-ls` + `fsautocomplete` (with OmniSharp / Roslyn fallback), NuGet inspector & OSV vulnerabilities, `netcoredbg` (and `vsdbg` fallback) with `VSTEST_HOST_DEBUG` test debugging (one test project per session) & explicit PID attach (Unity Editor attach is not supported) |
+| **Zig** | Official Zig SDK tarball (`ziglang.org/download/index.json`, SHA-256 verified; 0.16.0 by default, 0.14.0 and 0.13.0 offered), local SDK registration, `zls` (Zig-version-matched), `CodeLLDB` (`codelldb`) / `lldb-dap` / built-in `otto-lldb-dap` with Zig LLDB type formatters |
+| **C / C++ & Unreal Engine** | Clang / GCC / LLVM toolchain discovery & local registration, a managed **LLVM** download on the Mac (see below), `clangd` 23.1.0 (SHA-256 verified) (auto `--compile-commands-dir` including CMake/Meson/Unreal `Intermediate/ProjectFiles` + `textDocument/switchSourceHeader` `⌥O`), `clang-format`, CMake (Presets & CTest), Meson, Make, `vcpkg.json` / `conanfile.txt` / `.uproject` deps, `CodeLLDB` / `lldb-dap` / built-in `otto-lldb-dap` with C++ STL & Unreal pretty-printers, PID/process-name attach, and core-dump debugging |
+| **.NET (C# / F# / Unity / Unreal)** | Official .NET SDK tarball (`builds.dotnet.microsoft.com`, 10.0 LTS by default and 11.0 STS; 8.0 and 9.0 are end of life), local SDK registration (`DOTNET_ROOT`), SDK-matched `csharp-ls` + `fsautocomplete` (with OmniSharp / Roslyn fallback), NuGet inspector & OSV vulnerabilities, `netcoredbg` (and `vsdbg` fallback) with `VSTEST_HOST_DEBUG` test debugging (several test projects or frameworks run as Debug All steps) & explicit PID attach, and **Unity Editor attach** through DotRush's Mono debugger (`monodbg` 2026.11, installed on request from the .NET page; see §6) |
 | **Go** | Official Go SDK tarball, local SDK registration (`POST /ide/toolchains/local`), `gopls`, Delve (`dlv`), `gofumpt` |
 | **Node / TypeScript & Web Frameworks** | Node LTS (22), `pnpm`, `typescript-language-server`, `svelteserver` (Svelte/SvelteKit, untrusted mode), `vue-language-server` (Vue/Nuxt standalone mode), `ngserver` (Angular with `--tsProbeLocations`/`--ngProbeLocations`), `vscode-langservers-extracted`, `prettier`, `js-debug` & built-in `otto-node-cdp` (Node + Browser CDP attach with Vite/webpack URL mapping) |
 | **Shell (Bash / Zsh)** | `bash-language-server`, `shellcheck`, `shfmt`, built-in `otto-sh-dap` (`DEBUG` trap DAP debugger) |
@@ -282,6 +282,38 @@ them with the project's own Go (`POST /ide/toolchains/install` with `go_root`).
 A debug launch Delve refuses ("too old for Go 1.25") shows an **Update Delve**
 action that rebuilds it and starts the same session again. A Python debugger
 without the `debugpy` module is listed as the built-in bdb bridge.
+
+**Managed LLVM (C / C++).** **Download LLVM 23.1.5…** (the C/C++ toolchain's
+**+** menu in Settings → Languages → C / C++, or Download in Project SDKs and
+the Toolchains window) installs one pinned upstream archive: LLVM 23.1.5 on Apple
+Silicon (`LLVM-23.1.5-macOS-ARM64.tar.zst`, 871 MB) and LLVM 20.1.7 on Intel
+Macs (`LLVM-20.1.7-macOS-X64.tar.xz`, the last LLVM with a macOS x64 build). The
+exact file name, byte size and SHA-256 are compiled into Otto
+(`crates/otto-ide/src/toolchains/llvm_manifest.rs`); nothing is derived from a
+version string. The confirm names the release, the file and its sizes. Before
+downloading, Otto checks Apple's Command Line Tools (`xcrun --show-sdk-path`)
+and the free disk (download + install + 10 %); the download is capped at the
+pinned size and refused on a hash mismatch ("The downloaded LLVM archive does not
+match the expected file (SHA-256 mismatch). Nothing was installed."). Only
+`clang`, `clang++`, `clangd`, `clang-format`, `clang-tidy`,
+`clang-apply-replacements`, `llvm-symbolizer` and clang's resource headers are
+unpacked into `<data_dir>/toolchains/cpp/sdks/llvm-<ver>` (≈ 444 MB); before the
+install is accepted each tool runs and `clang++ -std=c++20` compiles and runs a
+test program. The upstream `.tar.zst` uses a 1 GiB zstd window, so the daemon
+holds about 1 GiB more memory while it unpacks. When the job ends the project's
+C/C++ toolchain is set to it (with Undo). Linux pins (23.1.5 x64 / arm64) are in
+the manifest, but SSH hosts are not offered the download yet (a direct request
+fails the job with "Managed LLVM downloads install on this Mac only…"). Verified
+end to end on Apple Silicon only: the Intel Mac and Linux entries are pinned
+(name, size, SHA-256 checked against upstream) but have not been installed.
+
+The project's selected C/C++ toolchain decides what runs: `CC` / `CXX` and
+`PATH` (so `clang-format` / `clang-tidy`) come from its `bin/`, clangd is
+`<toolchain>/bin/clangd` when it has one (else the managed or system clangd),
+and for the managed LLVM `SDKROOT` is set to `xcrun --show-sdk-path`. Choosing
+another toolchain restarts clangd for that project (`otto/lspEvicted`
+`toolchain_changed`). Debugging on macOS keeps Apple's `lldb-dap`. **Remove**
+on the SDK deletes the folder.
 
 Installed `<data_dir>/toolchains/**/bin` directories and custom registered local
 SDKs (`POST /ide/toolchains/local`) are automatically prepended to `PATH` (setting
@@ -415,16 +447,97 @@ or built-in `otto-node-cdp` (`node --inspect-brk=0` CDP), `codelldb` /
 `lldb-dap` or built-in `otto-lldb-dap` (`/usr/bin/lldb` for Rust, Zig, and C/C++ / Unreal, with Zig, C++ STL, and Unreal LLDB pretty-printers, PID/process-name attach, post-mortem core-dump loading, `POST /ide/debug/sessions/{id}/set-variable`, and Zig panic / C++ `__cxa_throw` exception breakpoints), and
 `otto-sh-dap` (`DEBUG` trap for Bash/Zsh), plus a deterministic mock adapter.
 
-Some starts are refused with a message instead of opening a session: Debug of
-a Playwright or Karma / Angular test run (Playwright runs tests in a separate
-worker process, Karma in a browser; use Run, `PWDEBUG=1` or a Chrome CDP
-attach), a .NET Debug of all tests (local or SSH) in a folder or solution with
-more than one test project (a session attaches to one test host; debug one test
-from the gutter, or a ".NET Test" configuration that targets one project; add it
-in Launch settings when discovery lists none, as for solutions of more than 6
-projects), and
-`unity://attach`. Debug All Tests on a Zig project with several test suites
-debugs one suite and names the others.
+**Stop** on an attach session (a PID, port or gdb-remote attach) detaches: Otto
+sends `disconnect` with `terminateDebuggee: false` and never `terminate`, and
+the built-in Java bridge sends JDWP `Dispose` instead of `Exit`, so the process
+keeps running. Only Otto's own processes (the adapter, a `dotnet test` it
+started) are ended.
+
+**Debug All Tests** of a .NET solution or folder with several test projects (or
+one multi-targeted project), and of a `build.zig` project with several test
+suites, is one session that debugs one step at a time: one step per (test
+project, target framework), or per Zig test suite. The debugger panel shows
+"Step 2 of 4 · Api.Tests (net10.0)" and a chip per finished step (✓ passed, ✗
+failed with counts, – no tests, ! couldn't start); **Skip to next step** is under
+⋯, Stop ends the whole run (the rest is skipped) and Restart starts again from
+step 1 with a fresh build. Breakpoints edited during a step apply to the next.
+The run ends with its summary and up to 5 failed tests, each with Debug (a
+single-test session on the same project and framework). The exit code decides a
+step's result: VSTest `dotnet test` 0 / 1, Microsoft.Testing.Platform 0 / 2 / 8
+(no tests), Zig 0 / 1. .NET builds once (`dotnet build -c Debug`), then reads
+each project's frameworks and, per framework, `IsTestingPlatformApplication`:
+a VSTest step runs `dotnet test --no-build -f <tfm>` with `VSTEST_HOST_DEBUG=1`
+and attaches to its one test host (60 s for the host to start), an MTP step
+launches the built test app. Zig compiles every suite once through Otto's
+no-exec build runner (Zig 0.14 and 0.16; 0.15 and 0.17 are not supported — the
+message says which are, and Run works for every version), with `src/main.zig`'s
+suite last. SSH targets use the same steps (not verified live on SSH).
+
+**Playwright and Karma / Angular tests** debug through Microsoft's js-debug
+(installed from Toolchains, 1.2 MB, its pinned SHA-256 checked; a Debug without
+it fails with "Debugging tests needs js-debug" and offers the install). js-debug
+debugs every process of the run as a child target: Otto opens one more DAP
+connection to js-debug per process it announces (`startDebugging`), sends it
+the breakpoints, and lists the processes above the Frames ("Playwright worker
+[pid]", "Karma: Chrome"). One process is in focus; a stop of another while the
+focus is paused waits and takes the focus when the focused one resumes or ends.
+A breakpoint turns solid once any process has bound it (through the TypeScript
+source maps); one that never binds stays hollow with js-debug's reason.
+
+- **Playwright** (gutter ▶ on a `test(` / `test.describe(` line, or toolbar Debug
+  on a Playwright configuration): js-debug runs
+  `node_modules/@playwright/test/cli.js test <file>:<line> --workers=1
+  --timeout=0 --reporter=list --headed` from the package root (the toolbar keeps
+  the configuration's files, `--project` and `-g`, and drops `--workers`,
+  `--timeout`, `--ui`, `--debug`). `PWDEBUG` is removed, Playwright's own
+  frames are skipped, and the reporter output goes to the Debug console.
+- **Karma in an Angular CLI project** (gutter ▶ on `describe(` / `it(`, or toolbar
+  Debug on "Karma / Angular Test"): Otto starts `ng test --watch
+  [--include=<spec>]`, waits up to 5 minutes for Karma's URL, then js-debug opens
+  `debug.html?spec=<Jasmine full name>` (the suites' titles and the spec's,
+  joined by spaces; none for a suite file or the toolbar) in Chrome with a
+  temporary profile and pipe debugging (no CDP port). Karma's `/base/` maps to
+  the `angular.json` folder, which binds breakpoints in the spec and in the code
+  it tests. With `@angular/build:karma` and `@angular-devkit/build-angular:karma`
+  Karma starts no browser (`--browsers=false`); `@angular/build:unit-test` with
+  `runner: "karma"` rejects that flag, so its configured browser runs the tests
+  too (the Debug console says so). Chrome is `CHROME_PATH`, else the installed
+  Google Chrome. **Stop** ends `ng test`, the debug browser and js-debug.
+- Not supported: plain Karma without `angular.json` (Run-only: "Debug supports
+  Karma in Angular CLI projects…"), and Playwright / Karma Debug on SSH targets
+  (use Run there).
+
+**Unity Editor attach** (this Mac; *verified against a Mono stand-in, not a
+real Unity Editor*). A Unity project folder (`Assets/` + `ProjectSettings/`)
+gets the launch target **Attach to Unity Editor**, which reads "· 6000.0.23f1 ·
+running" or "· not running" when the target menu opens (from the project's
+`Library/EditorInstance.json`: the PID must be alive and run an executable
+inside the Editor's `app_path`). It is debug-only: Run is disabled ("Attach
+targets can only be debugged"); **Debug** (⌃D) attaches to the Editor's Mono
+soft debugger on `127.0.0.1:56000 + pid % 1000` (Unity's formula) through
+DotRush's open-source Mono debug adapter `monodbg` (MIT), run as `dotnet
+monodbg.dll`. The adapter is not bundled: its release also carries Microsoft's
+`VSCodeDebugProtocol` library under Microsoft's own terms, so **Toolchains →
+.NET → Unity debugger** (or **Install Unity debugger** on the debugger's error
+card) downloads the pinned DotRush `2026.11` bundle (8.7 MB, SHA-256 checked)
+into `toolchains/dotnet/monodbg/2026.11/`, and the .NET 10 SDK too when no .NET
+10+ runtime is found (`monodbg` is `net10.0`); that SDK sits beside the others
+in `toolchains/dotnet/sdks/` and does not become the current .NET. The symbols come from every
+`Library/ScriptAssemblies/*.dll` with a `.pdb` except Unity's own
+(`Unity.*`, `UnityEngine.*`, `UnityEditor.*`), so `.asmdef` assemblies count.
+Breakpoints, stepping, locals, watches, evaluate (method calls included),
+conditional breakpoints, logpoints and exception breakpoints work as in any
+session. **Stop detaches**: the Editor keeps running. Messages: no Editor has
+the project open ("No Unity Editor has this project open. Open it in Unity,
+then attach."), and a refused attach ("Couldn't attach to the Unity Editor on
+port N. Set Code Optimization to Debug (bug icon, bottom right of the Editor)
+and try again."). Attach to a local process needs a root caller, like PID
+attach. **Not verified** (no Unity Editor was available when this shipped):
+the real Editor's script reload (domain reload) while attached, Play mode, the
+Release code-optimization message against a real Editor, and `Vector3`-style
+engine types. **Out of scope:** players (on this Mac or other devices),
+iOS/Android/console players, IL2CPP builds and SSH targets. The old raw
+`unity://attach` is still refused.
 
 A Java Debug (or `java_main` Run) of a file in a Maven module takes the classpath
 from Maven itself (run from the reactor root with `-pl <module> -am`, using
@@ -846,6 +959,43 @@ IDE and `⌘K` opens the app's command bar, so a `⌘K V` chord can't exist.
 - Code: `ui/src/lib/components/cm-md-assist.ts`,
   `ui/src/modules/ide/editor/IdeMarkdownBar.svelte`. Headings are in Structure;
   Split and Preview are section 12.
+
+### 14. Jupyter notebooks
+
+Open a `.ipynb` file: the notebook view runs its cells on a real Jupyter kernel
+over the Jupyter messaging protocol (Otto's own Rust client, no `jupyter`
+install needed).
+
+1. **Pick the kernel** in the toolbar select. *Jupyter kernels* lists every
+   kernelspec found by reading `kernel.json` files (the user dir
+   `~/Library/Jupyter/kernels`, each Python env's `share/jupyter/kernels`,
+   `/usr/local/share` and `/usr/share/jupyter/kernels`, `JUPYTER_PATH` from the
+   project environment) plus ipykernel for any Python env that has it. *Built-in*
+   lists Otto's zero-install Python kernel, only for envs without ipykernel (no
+   IPython; **⋯ → Install ipykernel…** installs it with pip, or `uv pip` in a uv env,
+   in the Run panel). The notebook's `metadata.kernelspec` picks the default (same
+   name, else the same language); a choice is written back to the metadata. The
+   select's tooltip shows the kernel's full command.
+2. **Run** a cell (⇧⏎ / ⌘⏎) or **Run All**. Outputs stream while the cell runs;
+   `%matplotlib inline`, `%timeit`, `!cmd` and `?obj` work because the kernel does
+   them. `input()` shows a field under the cell (a password field for `getpass`).
+   The chip next to the select shows starting / idle / busy / dead.
+3. **Interrupt** stops the running cell (`SIGINT` to the kernel's process group,
+   or `interrupt_request` for `interrupt_mode: message` kernels). **Restart** starts
+   a fresh kernel and keeps the outputs; **⋯ → Restart & Run All** reruns everything.
+4. A kernelspec stored **inside the project** asks once before its first start
+   ("Start kernel 'x' from this project? It runs: …"); the answer is remembered for
+   that project and spec contents. Specs outside the project and the project venv's
+   own ipykernel don't ask.
+
+Limits: local workspaces only (no Jupyter Server URLs, no SSH kernels); one
+kernel per open notebook, stopped when the tab closes or the daemon stops; 12 at
+most — a 13th notebook stops the least recently used idle kernel, and is refused
+("12 kernels are running…") only while all 12 run a cell; widgets and JavaScript outputs are never run (their text form shows);
+HTML outputs render in a script-less sandboxed iframe. **Debug Cell** runs the cell
+in an isolated Python process on the built-in kernel; on Jupyter kernels it is
+not available yet. The kernel env is the project's run environment only (the
+spec's `env` expands `${VAR}` from it, never from the daemon).
 
 ## API & WebSocket summary
 

@@ -42,6 +42,9 @@ pub struct JavaJdwpBridgeSpec {
     pub attach_port: Option<u16>,
     pub source_roots: Vec<String>,
     pub source_map: HashMap<String, String>,
+    /// The build that started the JVM this attaches to (Kotest Debug): its output goes to
+    /// the console and it lives as long as the session.
+    pub companion: Option<Arc<BridgeGuard>>,
 }
 
 /// Infer the fully qualified Java or Kotlin JVM class name for `path`.
@@ -121,195 +124,24 @@ pub(crate) fn infer_kotlin_class_stem(file_stem: &str, src: &str) -> String {
     }
 }
 
-/// Lexical scanner for Kotlin source that skips `//` line comments, nested `/* ... */`
-/// block comments, `"""..."""` raw strings, `"..."` strings (respecting `\"` / `\$` escapes
-/// AND nested `${ ... }` string template expressions that themselves contain strings/braces),
-/// and `'...'` char literals before tracking `{`/`}` nesting and detecting top-level
-/// `fun main(` or `suspend fun main(`.
+/// Whether `src` declares a top-level `fun main(` (`suspend` / visibility modifiers
+/// allowed), reading tokens from the shared Kotlin lexer so braces in strings, templates,
+/// comments and char literals never shift the depth.
 fn kotlin_has_top_level_main(src: &str) -> bool {
-    #[derive(Clone, Copy, PartialEq, Eq)]
-    enum LexMode {
-        /// Outer code (`interp_depth = None`) or interpolated `${ ... }` expression
-        /// (`interp_depth = Some(d)` where `d` counts nested `{` inside the template).
-        Code {
-            interp_depth: Option<usize>,
-        },
-        String,
-        RawString,
-    }
-
-    let bytes = src.as_bytes();
-    let len = bytes.len();
-    let mut i = 0usize;
-    let mut brace_depth: i32 = 0;
-    let mut block_comment_depth: usize = 0;
-    let mut in_char = false;
-    let mut stack: Vec<LexMode> = vec![LexMode::Code { interp_depth: None }];
-    let mut top_level_buf = String::new();
-
-    while i < len {
-        let b = bytes[i];
-        if block_comment_depth > 0 {
-            if b == b'/' && i + 1 < len && bytes[i + 1] == b'*' {
-                block_comment_depth += 1;
-                i += 2;
-            } else if b == b'*' && i + 1 < len && bytes[i + 1] == b'/' {
-                block_comment_depth -= 1;
-                i += 2;
-            } else {
-                if b == b'\n' && stack.len() == 1 && brace_depth == 0 {
-                    top_level_buf.push('\n');
-                }
-                i += 1;
-            }
-            continue;
+    use crate::gutter::kotlin_lex::{lex, Tok};
+    let t = lex(src);
+    let mut depth = 0usize;
+    t.iter().enumerate().any(|(i, tok)| {
+        match tok.tok {
+            Tok::LBrace => depth += 1,
+            Tok::RBrace => depth = depth.saturating_sub(1),
+            _ => {}
         }
-        if in_char {
-            if b == b'\\' && i + 1 < len {
-                i += 2;
-            } else if b == b'\'' || b == b'\n' {
-                in_char = false;
-                if b == b'\n' && stack.len() == 1 && brace_depth == 0 {
-                    top_level_buf.push('\n');
-                }
-                i += 1;
-            } else {
-                i += 1;
-            }
-            continue;
-        }
-
-        let mode = *stack
-            .last()
-            .unwrap_or(&LexMode::Code { interp_depth: None });
-        match mode {
-            LexMode::RawString => {
-                if b == b'$' && i + 1 < len && bytes[i + 1] == b'{' {
-                    stack.push(LexMode::Code {
-                        interp_depth: Some(0),
-                    });
-                    i += 2;
-                } else if b == b'"' && i + 2 < len && bytes[i + 1] == b'"' && bytes[i + 2] == b'"' {
-                    while i + 3 < len && bytes[i + 3] == b'"' {
-                        i += 1;
-                    }
-                    stack.pop();
-                    i += 3;
-                } else {
-                    if b == b'\n' && stack.len() == 2 && brace_depth == 0 {
-                        top_level_buf.push('\n');
-                    }
-                    i += 1;
-                }
-            }
-            LexMode::String => {
-                if b == b'\\' && i + 1 < len {
-                    i += 2;
-                } else if b == b'$' && i + 1 < len && bytes[i + 1] == b'{' {
-                    stack.push(LexMode::Code {
-                        interp_depth: Some(0),
-                    });
-                    i += 2;
-                } else if b == b'"' {
-                    stack.pop();
-                    i += 1;
-                } else if b == b'\n' {
-                    stack.pop();
-                    if stack.len() == 1 && brace_depth == 0 {
-                        top_level_buf.push('\n');
-                    }
-                    i += 1;
-                } else {
-                    i += 1;
-                }
-            }
-            LexMode::Code { interp_depth } => {
-                if b == b'/' && i + 1 < len && bytes[i + 1] == b'/' {
-                    while i < len && bytes[i] != b'\n' {
-                        i += 1;
-                    }
-                    continue;
-                }
-                if b == b'/' && i + 1 < len && bytes[i + 1] == b'*' {
-                    block_comment_depth = 1;
-                    i += 2;
-                    continue;
-                }
-                if b == b'"' && i + 2 < len && bytes[i + 1] == b'"' && bytes[i + 2] == b'"' {
-                    stack.push(LexMode::RawString);
-                    i += 3;
-                    continue;
-                }
-                if b == b'"' {
-                    stack.push(LexMode::String);
-                    i += 1;
-                    continue;
-                }
-                if b == b'\'' {
-                    in_char = true;
-                    i += 1;
-                    continue;
-                }
-                if let Some(d) = interp_depth {
-                    if b == b'{' {
-                        if let Some(LexMode::Code {
-                            interp_depth: Some(ref mut cur_d),
-                        }) = stack.last_mut()
-                        {
-                            *cur_d = d + 1;
-                        }
-                    } else if b == b'}' {
-                        if d == 0 {
-                            stack.pop();
-                        } else if let Some(LexMode::Code {
-                            interp_depth: Some(ref mut cur_d),
-                        }) = stack.last_mut()
-                        {
-                            *cur_d = d - 1;
-                        }
-                    }
-                    i += 1;
-                    continue;
-                }
-                if b == b'{' {
-                    if brace_depth == 0 {
-                        top_level_buf.push(' ');
-                    }
-                    brace_depth += 1;
-                    i += 1;
-                    continue;
-                }
-                if b == b'}' {
-                    brace_depth = (brace_depth - 1).max(0);
-                    if brace_depth == 0 {
-                        top_level_buf.push('\n');
-                    }
-                    i += 1;
-                    continue;
-                }
-                if brace_depth == 0 {
-                    let ch = src[i..].chars().next().unwrap_or(' ');
-                    top_level_buf.push(ch);
-                    i += ch.len_utf8();
-                } else {
-                    if b == b'\n' {
-                        top_level_buf.push('\n');
-                    }
-                    i += 1;
-                }
-            }
-        }
-    }
-
-    top_level_buf.lines().any(|line| {
-        let t = line.trim();
-        let rest = t
-            .strip_prefix("public ")
-            .or_else(|| t.strip_prefix("internal "))
-            .unwrap_or(t)
-            .trim_start();
-        let rest = rest.strip_prefix("suspend ").unwrap_or(rest).trim_start();
-        rest.starts_with("fun main(") || rest.starts_with("fun main (")
+        let is = |k: usize, want: &Tok| t.get(k).is_some_and(|x| &x.tok == want);
+        depth == 0
+            && is(i, &Tok::Ident("fun".into()))
+            && is(i + 1, &Tok::Ident("main".into()))
+            && is(i + 2, &Tok::LParen)
     })
 }
 
@@ -321,6 +153,17 @@ pub(crate) async fn spawn_java_jdwp_bridge(
     let guard = BridgeGuard::new();
     let (out_tx, mut out_rx) = mpsc::unbounded_channel::<(String, String)>();
 
+    if let Some(companion) = &spec.companion {
+        if let Some(mut lines) = companion.take_output() {
+            let tx = out_tx.clone();
+            tokio::spawn(async move {
+                while let Some(l) = lines.recv().await {
+                    let _ = tx.send(("stdout".into(), format!("{l}\n")));
+                }
+            });
+        }
+        guard.push_companion(Arc::clone(companion));
+    }
     let remote_port = if let Some(port) = spec.attach_port {
         port
     } else {
@@ -478,6 +321,8 @@ struct JdwpBridgeState {
     config_done: bool,
     initial_resumed: bool,
     is_attach: bool,
+    /// The JVM waits in its VMStart event (`suspend=y`): an attach must resume it too.
+    start_suspended: bool,
     frames: HashMap<i64, CachedFrame>,
     ordered_frames: Vec<Value>,
     var_refs: HashMap<i64, VarExpansion>,
@@ -499,6 +344,7 @@ impl JdwpBridgeState {
             config_done: false,
             initial_resumed: false,
             is_attach,
+            start_suspended: false,
             frames: HashMap::new(),
             ordered_frames: Vec::new(),
             var_refs: HashMap::new(),
@@ -600,7 +446,7 @@ async fn handle_jdwp_composite<W: AsyncWrite + Unpin>(
     st: &mut JdwpBridgeState,
     dap_w: &mut DapWriter<W>,
 ) -> io::Result<bool> {
-    let Ok((_policy, events)) = client.parse_composite(pkt) else {
+    let Ok((policy, events)) = client.parse_composite(pkt) else {
         return Ok(false);
     };
     let mut stop_info: Option<(&'static str, u64, Option<i32>)> = None;
@@ -610,7 +456,8 @@ async fn handle_jdwp_composite<W: AsyncWrite + Unpin>(
         match ev {
             JdwpEvent::VmStart => {
                 st.vm_started = true;
-                if st.config_done && !st.initial_resumed {
+                st.start_suspended |= policy == SUSPEND_ALL;
+                if st.config_done && !st.initial_resumed && (!st.is_attach || st.start_suspended) {
                     st.initial_resumed = true;
                     let _ = client.vm_resume().await;
                 }
@@ -835,7 +682,7 @@ async fn handle_dap_request<W: AsyncWrite + Unpin>(
         }
         "configurationDone" => {
             st.config_done = true;
-            if st.vm_started && !st.initial_resumed && !st.is_attach {
+            if st.vm_started && !st.initial_resumed && (!st.is_attach || st.start_suspended) {
                 st.initial_resumed = true;
                 let _ = client.vm_resume().await;
             }
@@ -985,7 +832,12 @@ async fn handle_dap_request<W: AsyncWrite + Unpin>(
                 .await?;
         }
         "disconnect" | "terminate" => {
-            client.vm_exit(0).await;
+            // An attached JVM is not Otto's: detach (Dispose) and leave it running.
+            if st.is_attach {
+                client.vm_dispose().await;
+            } else {
+                client.vm_exit(0).await;
+            }
             guard.kill_all();
             dap_w
                 .send_response(req.seq, &req.command, Ok(Some(json!({}))))

@@ -13,6 +13,7 @@
   import LoadState from '../../lib/components/LoadState.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import Skeleton from '../../lib/components/Skeleton.svelte';
+  import ListDetail from '../../lib/components/side/ListDetail.svelte';
   import ContainersList from './ContainersList.svelte';
   import ContainerDetail from './ContainerDetail.svelte';
   import ImagesTab from './ImagesTab.svelte';
@@ -47,9 +48,9 @@
       !ctrl.containersError &&
       ctrl.containers.length === 0,
   );
-  const showPhoneDetail = $derived(
-    viewport.isPhone && ctrl.activeTab === 'containers' && ctrl.phoneDetailOpen && !!selectedContainer,
-  );
+  // Phone: the list is the page; a tapped container is pushed ("‹ Containers").
+  const phoneOpen = $derived(ctrl.phoneDetailOpen && !!selectedContainer);
+  const showPhoneDetail = $derived(viewport.navDrawer && ctrl.activeTab === 'containers' && phoneOpen);
 
   function openRunModal(initialImage = ''): void {
     runInitialImage = initialImage;
@@ -64,7 +65,7 @@
   function onRunCreated(resp: RunContainerResp): void {
     closeRunModal();
     ctrl.activeTab = 'containers';
-    ctrl.selectContainer(resp.id, viewport.isPhone);
+    ctrl.selectContainer(resp.id, viewport.navDrawer);
     void Promise.all([ctrl.loadStatusAndContexts(), ctrl.loadContainers()]);
   }
 
@@ -157,7 +158,7 @@
         openTab: (tab) => ctrl.switchTab(tab),
         selectContainer: (id, dt) => {
           ctrl.activeTab = 'containers';
-          ctrl.selectContainer(id, viewport.isPhone, dt);
+          ctrl.selectContainer(id, viewport.navDrawer, dt);
         },
         openRunModal: () => openRunModal(),
         pullImage: () => void ctrl.pullImagePrompt(),
@@ -282,20 +283,6 @@
       subtitle={showPhoneDetail ? undefined : ctrl.status.active_context}
       more={moreItems}
     >
-      {#snippet leading()}
-        {#if showPhoneDetail}
-          <button
-            type="button"
-            class="icon-btn"
-            aria-label="Back to containers list"
-            title="Back to containers list"
-            onclick={() => (ctrl.phoneDetailOpen = false)}
-          >
-            <Icon name="chevronLeft" size={16} />
-          </button>
-        {/if}
-      {/snippet}
-
       {#snippet badge()}
         {#if !showPhoneDetail && ctrl.status}
           <Badge
@@ -360,18 +347,19 @@
       {/snippet}
 
       {#snippet actions()}
-        <button
-          type="button"
-          class="icon-btn"
-          data-overflow="-1"
-          data-icon="refresh"
-          aria-label="Refresh"
-          title="Refresh"
-          onclick={() => void ctrl.refreshActiveTab()}
-        >
-          <Icon name="refresh" size={14} />
-        </button>
-        {#if !emptyContainersPage}
+        <!-- The Containers tab's list pane carries Run and Refresh (one place each). -->
+        {#if ctrl.activeTab !== 'containers'}
+          <button
+            type="button"
+            class="icon-btn"
+            data-overflow="-1"
+            data-icon="refresh"
+            aria-label="Refresh"
+            title="Refresh"
+            onclick={() => void ctrl.refreshActiveTab()}
+          >
+            <Icon name="refresh" size={14} />
+          </button>
           <button type="button" class="btn small primary" onclick={() => openRunModal()}>
             <Icon name="play" size={12} /> Run…
           </button>
@@ -401,21 +389,22 @@
             />
           {/snippet}
 
-          <div class="ct-split">
-            {#if !showPhoneDetail}
+          <ListDetail module="containers" name="Containers" open={phoneOpen} onback={() => (ctrl.phoneDetailOpen = false)}>
+            {#snippet list()}
               <ContainersList
                 containers={ctrl.containers}
                 selectedId={ctrl.selectedId}
                 busyIds={ctrl.busyIds}
                 busyStacks={ctrl.busyStacks}
-                onselect={(id) => ctrl.selectContainer(id, viewport.isPhone)}
+                onselect={(id) => ctrl.selectContainer(id, viewport.navDrawer)}
                 onaction={(c, act) => void ctrl.handleContainerAction(c, act)}
                 onstackaction={(proj, act) => void ctrl.handleStackAction(proj, act)}
                 onopenrun={() => openRunModal()}
+                onrefresh={() => void ctrl.refreshActiveTab()}
               />
-            {/if}
+            {/snippet}
 
-            {#if (!viewport.isPhone || showPhoneDetail) && selectedContainer}
+            {#if selectedContainer}
               <ContainerDetail
                 container={selectedContainer}
                 tab={ctrl.detailTab}
@@ -426,7 +415,7 @@
                 onaction={(c, act) => void ctrl.handleContainerAction(c, act)}
               />
             {/if}
-          </div>
+          </ListDetail>
         </LoadState>
       </PageBody>
     {:else}
@@ -481,12 +470,5 @@
   }
   .ct-boot {
     padding: 18px 20px;
-  }
-  .ct-split {
-    flex: 1;
-    min-block-size: 0;
-    min-inline-size: 0;
-    display: flex;
-    overflow: hidden;
   }
 </style>

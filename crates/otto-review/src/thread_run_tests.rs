@@ -19,6 +19,9 @@ struct Act {
     events: Vec<StepEvent>,
     /// Wait for the cancel signal, then end `canceled`.
     hang: bool,
+    /// Played only by the turn with this title, whatever order concurrent
+    /// rows reach the runner in; untitled acts go by turn order.
+    title: Option<&'static str>,
 }
 
 #[derive(Default)]
@@ -45,7 +48,12 @@ impl Fake {
         };
         let act = {
             let acts = self.acts.lock().unwrap();
-            acts.get(n - 1).or(acts.last()).cloned().unwrap_or_default()
+            acts.iter()
+                .find(|a| a.title == Some(t.title.as_str()))
+                .or(acts.get(n - 1))
+                .or(acts.last())
+                .cloned()
+                .unwrap_or_default()
         };
         let thread_id: Id = resume.unwrap_or_else(|| format!("thread-{n}"));
         let _ = ev.send(StepEvent::Started {
@@ -639,13 +647,16 @@ async fn after_a_restart_a_held_reviewer_is_awaited_and_only_the_lost_one_re_run
 #[tokio::test]
 async fn stopping_a_resumed_reviewer_keeps_it_stopped_and_never_re_runs_it() {
     use otto_core::cancel::{CancelRegistry, CancelRegistryExt};
+    // Rows resume concurrently, so each act is bound to its row by title.
     let r = rig(vec![
         Act {
             hang: true,
+            title: Some("Stopped"),
             ..Default::default()
         },
         Act {
             write: Some(FINDINGS.into()),
+            title: Some("Sibling"),
             ..Default::default()
         },
     ])

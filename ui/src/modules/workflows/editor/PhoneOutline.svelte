@@ -1,12 +1,11 @@
 <script lang="ts">
   // The editor on a phone (ux.md §10): the steps as a read-only outline in
-  // layout order (parallel steps indented), and a step's settings in a bottom
-  // sheet whose Done saves that step. The graph itself — adding, deleting or
-  // connecting steps — is edited on a larger screen.
+  // layout order (parallel steps indented); a tap opens the step in the
+  // editor's inspector (a full-width sheet whose Done saves that step). The
+  // graph itself — adding, deleting or connecting steps — is edited on a
+  // larger screen.
   import Icon from '../../../lib/components/Icon.svelte';
-  import Modal from '../../../lib/components/Modal.svelte';
   import type { WorkflowGraph, WorkflowTrigger } from '../../../lib/api/types';
-  import type { Snippet } from 'svelte';
   import { autoLayout } from './autoLayout';
   import { nodeIcon, nodeSummary } from './nodeSummary';
 
@@ -14,17 +13,9 @@
     graph: WorkflowGraph;
     triggers?: readonly WorkflowTrigger[];
     defaultProvider: string;
-    /** The open step (its sheet), or null. */
-    openId: string | null;
     onopen: (id: string) => void;
-    /** Cancel: put the step back as it was. */
-    oncancel: () => void;
-    /** Done: save the workflow with this step's changes. */
-    ondone: () => void;
-    saving?: boolean;
-    sheet: Snippet<[string]>;
   }
-  let { graph, triggers = [], defaultProvider, openId, onopen, oncancel, ondone, saving = false, sheet }: Props = $props();
+  let { graph, triggers = [], defaultProvider, onopen }: Props = $props();
   const layout = $derived(autoLayout(graph));
   const byId = $derived(new Map(graph.nodes.map((n) => [n.id, n])));
   const ctx = $derived({ nodes: graph.nodes, defaultProvider, triggerKinds: triggers.map((t) => t.kind) });
@@ -32,7 +23,6 @@
     ...layout.layers.flatMap((l) => l.map((id) => ({ id, nested: l.length > 1 }))),
     ...layout.loose.map((id) => ({ id, nested: false })),
   ]);
-  const open = $derived(openId ? byId.get(openId) : undefined);
 </script>
 
 <div class="po" data-testid="wf-phone-outline">
@@ -55,16 +45,6 @@
     {/each}
   </ol>
 </div>
-
-{#if open}
-  <Modal title={open.name || open.kind} bottom width={520} dismissable={!saving} onclose={oncancel}>
-    <div data-testid="wf-step-sheet">{@render sheet(open.id)}</div>
-    {#snippet footer()}
-      <button type="button" class="btn" onclick={oncancel} disabled={saving}>Cancel</button>
-      <button type="button" class="btn primary" onclick={ondone} disabled={saving}>{saving ? 'Saving…' : 'Done'}</button>
-    {/snippet}
-  </Modal>
-{/if}
 
 <style>
   .po {

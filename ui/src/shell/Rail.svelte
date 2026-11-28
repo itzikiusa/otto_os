@@ -25,6 +25,7 @@
     type SidebarModule,
   } from '../lib/sidebar';
   import SidebarMore from './SidebarMore.svelte';
+  import { listNav } from '../lib/components/side/listNav';
   import UpdateRow from './UpdateRow.svelte';
   import { navUsage } from '../lib/stores/navUsage.svelte';
 
@@ -140,7 +141,7 @@
   </button>
 {/snippet}
 
-<nav class="rail sidebar-material" aria-label="Modules">
+<nav class="rail sidebar-material" aria-label="Modules" use:listNav={{ rows: '.rail-btn' }}>
   <button
     class="rail-btn"
     onclick={() => (viewport.isTablet ? viewport.toggleTabletRail(true) : ui.toggleRail())}

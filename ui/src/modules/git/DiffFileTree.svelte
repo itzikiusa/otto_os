@@ -1,7 +1,7 @@
 <script lang="ts">
-  // The changed-files tree of a PR — one component, two hosts: the diff's own
-  // navigator rail (DiffNav) and the PR workspace's Files panel under the PR
-  // list (PrFilesPanel). Directories are collapsible (single-child chains
+  // The changed-files tree of a PR — one component, two hosts: the PR
+  // workspace's Files panel under the PR list (PrFilesPanel) and the phone's
+  // Files picker (DiffFileStepper). Directories are collapsible (single-child chains
   // compressed, see buildNavTree) and show how much of them is viewed; a file
   // row is the Viewed checkbox beside a real button that jumps to the file.
   // Rows are windowed (ListWindow, against the nearest scrolling ancestor), so

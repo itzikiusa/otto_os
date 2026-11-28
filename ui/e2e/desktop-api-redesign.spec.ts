@@ -103,7 +103,7 @@ test('phone: no horizontal scroll, and the list is one tap away', async ({ page 
   await page.addInitScript((id) => localStorage.setItem('otto_workspace', id), wsFull);
   await openApiEditor(page);
   await expectNoHorizontalOverflow(page);
-  await page.getByRole('button', { name: 'Show saved requests' }).click();
+  await page.getByRole('button', { name: 'Back to Collections', exact: true }).click();
   await expect(page.locator('.req-open', { hasText: 'Get invoice' })).toBeVisible();
   await expectNoHorizontalOverflow(page);
   await page.locator('.req-open', { hasText: 'Get invoice' }).click();

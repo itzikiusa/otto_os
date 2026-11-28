@@ -31,9 +31,9 @@
   import { lineWords, markWords, type WordRange } from '../../lib/diff/diff-words';
   import { fileNavDelta, lineTapRow, revealComposer, stageErrorToast } from './diff-dom';
   import { lazyComponent } from '../../lib/lazy-component.svelte';
-  import { PREF_HIDE_TESTS, PREF_SPLIT, PREF_TREE, PREF_WRAP, buildNavTree, fileStatus, readPref, writePref } from './diff-pr';
+  import { PREF_HIDE_TESTS, PREF_SPLIT, PREF_WRAP, fileStatus, readPref, writePref } from './diff-pr';
   const DiffPrToolbarLazy = lazyComponent(() => import('./DiffPrToolbar.svelte'));
-  const DiffNavLazy = lazyComponent(() => import('./DiffNav.svelte'));
+  import { viewport } from '../../lib/stores/viewport.svelte';
   import './diff-pr.css';
   import type { DiffResp, FileDiff, DiffLine, Hunk, HunkOp, PrComment, StageHunkResp } from '../../lib/api/types';
   import { refocusRow } from '../../lib/diff/diffRowFocus';
@@ -76,7 +76,6 @@
   interface Props {
     diff: DiffResp;
     prMode?: boolean;
-    showNav?: boolean;
     comments?: PrComment[];
     /** Post an inline comment. `side` is the diff side `line` counts on
      *  (`old` for a deleted row); `oldLine` is the row's old number when it
@@ -128,7 +127,6 @@
   let {
     diff,
     prMode = false,
-    showNav = false,
     comments = [],
     onAddComment,
     onReplyComment,
@@ -150,20 +148,15 @@
   const commentActions = prCommentActions();
 
   // ── PR-mode view preferences (persisted; helpers in diff-pr.ts) ──────────
-  /** File tree (the nav sidebar) shown — PR mode, hidden by default. */
-  let treeOpen = $state(readPref(PREF_TREE, false));
   /** Test files filtered out of rows, tree and counts — PR mode. */
   let hideTests = $state(readPref(PREF_HIDE_TESTS, false));
   /** Soft-wrap long code lines (desktop; ≤1024 always wraps). */
   let wrapLines = $state(readPref(PREF_WRAP, true));
-  function toggleTree(): void { treeOpen = !treeOpen; writePref(PREF_TREE, treeOpen); }
   function toggleHideTests(): void { hideTests = !hideTests; writePref(PREF_HIDE_TESTS, hideTests); }
   function toggleWrap(): void { wrapLines = !wrapLines; writePref(PREF_WRAP, wrapLines); }
   /** Whitespace-only changes left out (diff-load.ts; the host re-reads its diff). */
   let ignoreWs = $state(prIgnoreWhitespace());
   function toggleWs(): void { ignoreWs = !ignoreWs; setPrIgnoreWhitespace(ignoreWs); }
-  /** The nav sidebar is on screen (host asked for it AND, in PR mode, the tree toggle is on). */
-  const navShown = $derived(showNav && prMode && treeOpen);
   /** The files this view shows: everything, minus test files when hidden (PR mode). */
   const visibleFiles = $derived(prMode && hideTests ? diff.files.filter((f) => !isTestPath(f.path)) : diff.files);
   const hiddenTests = $derived(diff.files.length - visibleFiles.length);
@@ -184,14 +177,7 @@
   // code columns + 140-char lines either clip off-screen or wrap into an
   // unreadable mess), so we force the unified renderer and hide the toggle.
   // `mode` is left untouched so the user's choice is restored on a wider screen.
-  let isMobile = $state(false);
-  $effect(() => {
-    const mq = window.matchMedia('(max-width: 1024px)');
-    const sync = () => (isMobile = mq.matches);
-    sync();
-    mq.addEventListener('change', sync);
-    return () => mq.removeEventListener('change', sync);
-  });
+  const isMobile = $derived(viewport.isMobile);
   const effMode = $derived<'unified' | 'split'>(isMobile ? 'unified' : mode);
 
   // ── Per-diff view state ─────────────────────────────────────────────────
@@ -271,9 +257,6 @@
   let composerText = $state('');
   let composerBusy = $state(false);
 
-  // ── Nav tree (diff-pr.ts): directories collapsible, files keep the viewed
-  // checkbox / stats / comment badge.
-  const navTree = $derived(buildNavTree(visibleFiles));
   // ── Search: one debounced pass per term ──────────────────────────────────
   let rawSearch = $state('');
   let search = $state('');
@@ -1087,7 +1070,6 @@
 
 <div
   class="diff-root"
-  class:with-nav={navShown}
   class:pr={prMode}
   class:nowrap={prMode && !wrapLines}
   bind:this={rootEl}
@@ -1117,23 +1099,6 @@
       <span data-find-skip class="gut {side}">{n ?? ''}</span>
     {/if}
   {/snippet}
-
-  {#if navShown && DiffNavLazy.component}{@const DiffNav = DiffNavLazy.component}
-    <DiffNav
-      tree={navTree}
-      {matchSet}
-      {viewed}
-      {commentCounts}
-      {totalFiles}
-      {viewedCount}
-      {matchCount}
-      searching={!!search}
-      maxH={view.h}
-      bind:rawSearch
-      onjump={(path) => void scrollToFile(path)}
-      ontoggleviewed={toggleViewed}
-    />
-  {/if}
 
   {#snippet composerBox()}
     <div class="composer">
@@ -1362,15 +1327,11 @@
         del={totals.del}
         largeNote={!!diff.truncated || (lazyCount > 0 && !loadFile)}
         bind:rawSearch
-        showSearch={!navShown}
-        canTree={showNav}
-        {treeOpen}
         {isMobile}
         bind:mode
         {wrapLines}
         canFold={visibleFiles.length > 1}
         {allCollapsed}
-        ontoggletree={toggleTree}
         ontogglewrap={toggleWrap}
         ontoggletests={toggleHideTests}
         onfold={() => setAllCollapsed(!allCollapsed)}
@@ -1397,9 +1358,7 @@
         {/if}
       </span>
       <span class="grow"></span>
-      {#if !showNav || !prMode}
-        <!-- Inline search bar when no nav sidebar -->
-        <div class="toolbar-search-wrap">
+      <div class="toolbar-search-wrap">
           <input dir="auto"
             class="toolbar-search input"
             type="text"
@@ -1411,7 +1370,6 @@
             <span class="toolbar-match-count">{matchCount} match{matchCount === 1 ? '' : 'es'}</span>
           {/if}
         </div>
-      {/if}
       {#if diff.files.length > 1}
         <button
           class="btn small ghost"
@@ -1473,13 +1431,7 @@
     flex-direction: column;
     min-height: 0;
   }
-  .diff-root.with-nav {
-    flex-direction: row;
-    align-items: flex-start;
-    gap: 0;
-  }
-
-  /* ── Toolbar search (no-nav mode) ── */
+  /* ── Toolbar search ── */
   .toolbar-search-wrap {
     position: relative;
     display: flex;
@@ -1507,9 +1459,6 @@
     gap: 10px;
     flex: 1;
     min-width: 0;
-  }
-  .diff-root.with-nav .diff {
-    padding-inline-start: 12px;
   }
   .diff-toolbar {
     display: flex;
@@ -1772,14 +1721,6 @@
       min-width: 0;
       max-width: 100%;
     }
-    /* Stack nav over diff in PR mode so both fit the narrow viewport. */
-    .diff-root.with-nav {
-      flex-direction: column;
-    }
-    .diff-root.with-nav .diff {
-      padding-inline-start: 0;
-    }
-
     .diff-toolbar { flex-wrap: wrap; gap: 8px; }
     .toolbar-search-wrap { flex: 1; min-width: 120px; }
     .diff-stats { font-size: var(--fs-m); }

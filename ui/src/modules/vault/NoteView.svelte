@@ -67,26 +67,13 @@
   import './ottoRefs.css';
   const ottoRefExt = ottoRefMarkedExtension();
 
-  // -- "Refine with Otto" drawer — open state lives here keyed BY PATH (outside
-  // the note data), so reloading the note after the agent edits it does not
-  // close the drawer or drop its terminal.
-  let refineOpen = $state<Record<string, boolean>>({});
-  const refineShown = $derived(!!(vault.notePath && refineOpen[vault.notePath]));
-
-  function toggleRefine(): void {
-    const p = vault.notePath;
-    if (!p) return;
-    refineOpen = { ...refineOpen, [p]: !refineOpen[p] };
+  // "Refine with Otto" is a view of the page's Detail pane (VaultPage): the
+  // toolbar button shows / hides it there.
+  interface Props {
+    refineShown: boolean;
+    ontogglerefine: () => void;
   }
-
-  // "Review + fix" (tree context menu) queues a pending refine — force the
-  // drawer open for that note; the drawer itself consumes it (the user presses Send).
-  $effect(() => {
-    const pending = vault.pendingRefine;
-    if (pending && vault.notePath === pending.path && !refineOpen[pending.path]) {
-      refineOpen = { ...refineOpen, [pending.path]: true };
-    }
-  });
+  let { refineShown, ontogglerefine }: Props = $props();
 
   // -- attachments: authed blob URLs, patched into the live <img> -------------
   // The renderer emits `<img data-asset="path">` with no src (lazyAssets); an
@@ -380,8 +367,6 @@
     }
   });
 
-  // Refine (an agent terminal) opens on request: its chunk loads then.
-  const RefineLazy = lazyComponent(() => import('./RefineDrawer.svelte'));
 
   // -- editor: paste / drop files → vault attachment + embed at the cursor --------
   let editor = $state<ReturnType<typeof LazyCodeEditor> | null>(null);
@@ -485,7 +470,7 @@
         {/if}
         {#if vault.current && vault.notePath}<CreateStoryFromNoteButton vaultId={vault.current.id} notePath={vault.notePath} raw={vault.draft} metaTitle={vault.note.meta.title} />{/if}
         <button class="mode-btn" title="Note edit history" aria-label="Note edit history" onclick={() => void vault.openHistory(vault.notePath ?? '')}><Icon name="clock" size={14} /></button>
-        <button class="mode-btn" class:refine-on={refineShown} title="Refine with Otto" aria-label="Refine with Otto" aria-pressed={refineShown} onclick={toggleRefine}><Icon name="sparkle" size={14} /></button>
+        <button class="mode-btn" class:refine-on={refineShown} title="Refine with Otto" aria-label="Refine with Otto" aria-pressed={refineShown} onclick={ontogglerefine}><Icon name="sparkle" size={14} /></button>
         <button class="mode-btn labelled" title={vault.editing ? 'Reading view (⌘E)' : 'Edit (⌘E)'} onclick={() => vault.setView(!vault.editing)}><Icon name={vault.editing ? 'eye' : 'edit'} size={13} />{vault.editing ? 'Read' : 'Edit'}</button>
       </div>
     </header>
@@ -532,14 +517,6 @@
 
     <LinkPreview />
 
-    {#if refineShown && vault.notePath}
-      <!-- Keyed by path (NOT by note content): reloading the same note after
-           the agent’s edit keeps the drawer + terminal mounted; opening a
-           different note resets the drawer to that note’s refine session. -->
-      {#key `${vault.wsId}:${vault.current?.id}:${vault.notePath}`}
-        <LazyMount lazy={RefineLazy} what="refine" variant="panel" props={{ path: vault.notePath }} />
-      {/key}
-    {/if}
   </div>
 {/if}
 

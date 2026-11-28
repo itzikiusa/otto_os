@@ -3,7 +3,8 @@ import { expectNoHorizontalOverflow, openPage } from './helpers';
 import { expectWipFirst, remoteSubject, seedCardRepo, stubForge, type CardRepo } from './git-commit-card-fixture';
 
 // The commit card on a phone (G1/G5): a dirty repository opens on History's
-// WIP row, the card sits on top with 44 px targets, one tap commits and pushes.
+// WIP row (the Detail pane's sheet over the graph), the card sits on
+// top with 44 px targets, one tap commits and pushes.
 
 // The forge is stubbed with page.route: keep the app's service worker out
 // of the way (on WebKit its fetches bypass the routes).
@@ -49,15 +50,17 @@ test('phone: WIP first → one tap commits and pushes', async ({ page }, info) =
   expect(sideways, 'inner horizontal scrollers').toEqual([]);
   // Finger-sized (44 px): the view switch, Fetch, ⋯, a file's include box and the
   // Included header's Unstage all / Discard all (design review 2, H8).
-  for (const t of [page.locator('.git-views .rv-tab').first(), page.locator('.gitpage').getByRole('button', { name: /Fetch/ }), page.locator('.gitpage').getByRole('button', { name: 'More actions', exact: true }), page.locator('.wp-check-hit').first(), ...(await page.locator('.wp-sec-btn').all())]) {
+  for (const t of [page.locator('.git-views [role="tab"]').first(), page.locator('.gitpage').getByRole('button', { name: /Fetch/ }), page.locator('.gitpage').getByRole('button', { name: 'More actions', exact: true }), page.locator('.wp-check-hit').first(), ...(await page.locator('.wp-sec-btn').all())]) {
     const b = (await t.boundingBox())!;
     expect(Math.min(b.width, b.height), await t.evaluate((el) => el.className)).toBeGreaterThanOrEqual(44);
   }
-  // One ✕ on a phone: the section header closes the panel, not a second one inside.
+  // One ✕ on a phone: the sheet's header closes the panel, not a second one inside.
   await expect(page.getByRole('button', { name: 'Close the changes panel' })).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Close Changes' })).toHaveCount(1);
   await primary.tap();
   await expect.poll(() => remoteSubject(repo), { timeout: 20_000 }).toBe('feat: ship the commit card');
   await expect(page.getByTestId('commit-card-primary')).toHaveAttribute('data-kind', 'create-pr', { timeout: 15_000 });
-  await expect(page.locator('.detail-close')).toHaveCount(0);
-  await expect(page.locator('.mob-diff-head')).toBeVisible();
+  // The commit's detail takes the same sheet, with its one Close.
+  await expect(page.getByRole('dialog', { name: 'Commit detail' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Close Commit detail' })).toHaveCount(1);
 });

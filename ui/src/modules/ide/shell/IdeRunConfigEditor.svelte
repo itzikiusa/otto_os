@@ -73,8 +73,10 @@
 
 <script lang="ts">
   import { announceShown } from '../../../lib/announce.svelte';
-  import Badge from '../../../lib/components/Badge.svelte';
   import Icon from '../../../lib/components/Icon.svelte';
+  import ListPane from '../../../lib/components/side/ListPane.svelte';
+  import SideRow from '../../../lib/components/side/SideRow.svelte';
+  import SideSection from '../../../lib/components/side/SideSection.svelte';
   import PathField from '../../../lib/components/PathField.svelte';
   import Switch from '../../../lib/components/Switch.svelte';
   import { plural } from '../../../lib/plural';
@@ -166,57 +168,35 @@
 </script>
 
 <div class="env-cfg-layout" role="tabpanel" id="ide-env-panel-configs" aria-labelledby="ide-env-tab-configs">
-  <aside class="env-cfg-rail" aria-label="Saved run configurations">
-    <div class="env-rail-head">
-      <span class="env-sec-title">Saved ({savedConfigs.length})</span>
-      <div class="env-vars-btns">
-        {#if cfgDraft.name}
-          <button type="button" class="icon-btn" aria-label="Duplicate configuration" title="Duplicate configuration" onclick={onduplicate}>
-            <Icon name="copy" size={12} />
-          </button>
-        {/if}
-        <button type="button" class="btn small" onclick={onnew}>
-          <Icon name="plus" size={12} />
-          New
-        </button>
-      </div>
-    </div>
-
-    {#if savedConfigs.length === 0 && detectedConfigs.length === 0}
-      <div class="env-empty-note">No configurations yet — fill in the form to create your first one.</div>
-    {:else}
-      <div class="env-cfg-list">
+  <!-- The configurations are a list (the shared pane, rows and keyboard walk):
+       New is its one action, Duplicate under its ⋯. -->
+  <div class="env-cfg-rail">
+    <ListPane
+      name="Configurations"
+      count={savedConfigs.length + detectedConfigs.length}
+      primary={{ icon: 'plus', label: 'New configuration', onclick: onnew }}
+      menu={cfgDraft.name ? () => [{ label: 'Duplicate Configuration', icon: 'copy', action: onduplicate }] : undefined}
+    >
+      {#if savedConfigs.length === 0 && detectedConfigs.length === 0}
+        <p class="env-empty-note">No configurations yet — fill in the form to create your first one.</p>
+      {:else}
         {#each savedConfigs as cfg (cfg.id)}
-          <button
-            type="button"
-            class="env-cfg-item"
-            class:is-active={!isNewDraft && cfgDraft.id === cfg.id}
-            aria-pressed={!isNewDraft && cfgDraft.id === cfg.id}
-            onclick={() => onselect(cfg)}
-          >
-            <span class="env-cfg-name">{cfg.name}</span>
-            <Badge tone="neutral" variant="outline" label={runnerShortLabel(cfg.runner)} />
-          </button>
+          <SideRow title={cfg.name} selected={!isNewDraft && cfgDraft.id === cfg.id} onclick={() => onselect(cfg)}>
+            {#snippet trailing()}{runnerShortLabel(cfg.runner)}{/snippet}
+          </SideRow>
         {/each}
-
         {#if detectedConfigs.length > 0}
-          <div class="env-rail-divider">Auto-detected ({detectedConfigs.length})</div>
-          {#each detectedConfigs as cfg (cfg.id)}
-            <button
-              type="button"
-              class="env-cfg-item"
-              class:is-active={ide.selectedConfigId === cfg.id && cfgDraft.autoDetected}
-              aria-pressed={ide.selectedConfigId === cfg.id && cfgDraft.autoDetected}
-              onclick={() => onselect(cfg)}
-            >
-              <span class="env-cfg-name">{cfg.name}</span>
-              <Badge tone="info" variant="outline" label={runnerShortLabel(cfg.runner)} />
-            </button>
-          {/each}
+          <SideSection title="Auto-detected" count={detectedConfigs.length}>
+            {#each detectedConfigs as cfg (cfg.id)}
+              <SideRow title={cfg.name} selected={ide.selectedConfigId === cfg.id && cfgDraft.autoDetected} onclick={() => onselect(cfg)}>
+                {#snippet trailing()}{runnerShortLabel(cfg.runner)}{/snippet}
+              </SideRow>
+            {/each}
+          </SideSection>
         {/if}
-      </div>
-    {/if}
-  </aside>
+      {/if}
+    </ListPane>
+  </div>
 
   <div class="env-cfg-editor">
     <div class="env-sdk-grid">
@@ -381,28 +361,13 @@
 
 <style>
   .env-cfg-layout { display: grid; grid-template-columns: 230px minmax(0, 1fr); gap: 14px; padding-block-start: 4px; min-inline-size: 0; }
-  .env-cfg-rail {
-    display: flex; flex-direction: column; gap: 8px; padding: 10px;
-    border-radius: var(--radius-m); background: var(--surface-2); border: 1px solid var(--border); min-inline-size: 0;
-  }
+  /* The list pane in a card: its edge is the card's border. */
+  .env-cfg-rail { display: flex; flex-direction: column; min-inline-size: 0; max-block-size: 440px; border-radius: var(--radius-m); border: 1px solid var(--border); overflow: hidden; }
+  .env-cfg-rail :global(.side-list) { border-inline-end: 0; }
   .env-rail-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; }
   .env-vars-btns { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
   .env-sec-title { margin: 0; font-size: var(--fs-s); font-weight: 600; color: var(--text); }
-  .env-empty-note { margin: 0; font-size: var(--fs-xs); color: var(--text-dim); }
-  .env-rail-divider {
-    padding-block-start: 6px; margin-block-start: 4px; border-block-start: 1px solid var(--separator);
-    font-size: var(--fs-xs); font-weight: 600; color: var(--text-dim);
-  }
-  .env-cfg-list { display: flex; flex-direction: column; gap: 4px; max-block-size: 380px; overflow-y: auto; }
-  .env-cfg-item {
-    display: flex; align-items: center; justify-content: space-between; gap: 6px;
-    padding: 6px 8px; border-radius: var(--radius-s); border: 1px solid transparent;
-    background: transparent; color: var(--text); text-align: start; cursor: pointer;
-    transition: background var(--dur-fast) var(--ease-out);
-  }
-  .env-cfg-item:hover { background: var(--hover); }
-  .env-cfg-item.is-active { background: var(--accent-soft); border-color: var(--accent-line); color: var(--accent-text); }
-  .env-cfg-name { font-size: var(--fs-s); font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-inline-size: 0; }
+  .env-empty-note { margin: 0; padding: 8px; font-size: var(--fs-xs); color: var(--text-dim); }
   .env-cfg-editor { display: flex; flex-direction: column; gap: 6px; min-inline-size: 0; }
   .env-sdk-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
   .env-inline-bar { display: flex; align-items: center; gap: 8px; }

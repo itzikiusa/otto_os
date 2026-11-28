@@ -26,6 +26,7 @@
   import { rel } from '../../lib/stores/now.svelte';
   import { pollWhileVisible } from '../../lib/poll';
   import DiffViewer from './DiffViewer.svelte';
+  import { viewport } from '../../lib/stores/viewport.svelte';
   import { prCommitViewedKey, prFilesBridge, prFilesKey } from './prFilesBridge.svelte';
   import PrReviewButtons from './PrReviewButtons.svelte';
   import { myGitHandles } from './myGitHandles.svelte';
@@ -64,10 +65,13 @@
     onloaded?: (pr: PrSummary) => void;
     /** The view on show (the workspace shows its Files tree only beside Files). */
     onview?: (tab: PrTabId) => void;
-    /** Controls at the header's start (the workspace's list toggle while it has no tab strip). */
+    /** Controls at the header's start (the workspace's pane toggles while it has no tab strip). */
     lead?: Snippet;
+    /** The details card, handed to the workspace's Detail pane (null on unmount). */
+    ondetails?: (card: Snippet | null) => void;
   }
-  let { repoId, number, onloaded, onview, lead }: Props = $props();
+  let { repoId, number, onloaded, onview, lead, ondetails }: Props = $props();
+  $effect(() => (ondetails?.(sideCard), () => ondetails?.(null)));
   let disposed = false;
   onDestroy(() => { disposed = true; });
 
@@ -99,7 +103,7 @@
     compactInfoOpen = false;
     try { localStorage.setItem(tabKey(), t); } catch { /* not persisted */ }
     // A short screen (a phone in landscape) is filled by the PR header: bring the code into view.
-    if (t === 'code' && matchMedia('(max-height: 500px)').matches) requestAnimationFrame(() => document.querySelector('.prd-code:not([hidden])')?.scrollIntoView({ block: 'start' }));
+    if (t === 'code' && viewport.isShort) requestAnimationFrame(() => document.querySelector('.prd-code:not([hidden])')?.scrollIntoView({ block: 'start' }));
   }
   $effect(() => prFilesBridge.onReveal(prFilesKey(repoId, number), () => selectTab('code'))); // the workspace Files panel
   $effect(() => onPrWhitespaceChange(() => void loadDiff(repoId, number))); // the Code tab's "Hide whitespace"
@@ -627,6 +631,14 @@
   {/if}
 {/snippet}
 
+{#snippet sideCard()}
+  {#if pr}
+    <PrSideColumn {pr} {checks} {commits} {providerName} {repoId} where={prWhere()} onreviewerschanged={() => { invalidatePr(repoId, number); void load(repoId, number, true); }}
+      ontimeline={() => selectTab('timeline')} onreview={() => selectTab('review')}
+      checkingOut={busy === 'checkout'} oncheckout={() => void checkoutBranch()} onpreview={previewUrls.length > 0 ? openPreview : undefined} />
+  {/if}
+{/snippet}
+
 <div class="prd" bind:this={prdEl} data-pr={number} data-diff-head={diffHead || null}>
   {#if !pr && (loading || prError)}
     <div class="prd-pad">
@@ -751,9 +763,6 @@
             onreply={(parentId, body) => postComment(body, undefined, undefined, parentId)} />
         </div>
 
-        <PrSideColumn {pr} {checks} {commits} {providerName} {repoId} where={prWhere()} onreviewerschanged={() => { invalidatePr(repoId, number); void load(repoId, number, true); }}
-          ontimeline={() => selectTab('timeline')} onreview={() => selectTab('review')}
-          checkingOut={busy === 'checkout'} oncheckout={() => void checkoutBranch()} onpreview={previewUrls.length > 0 ? openPreview : undefined} />
       </div>
 
       {#if activeTab === 'timeline'}
@@ -782,7 +791,6 @@
             <DiffViewer
               {diff}
               prMode={true} canIgnoreWs
-              showNav={true}
               comments={inlineComments}
               onAddComment={(path, line, body, anchor) => postComment(body, path, line, undefined, anchor)}
               onReplyComment={(parentId, body) => postComment(body, undefined, undefined, parentId)}
@@ -883,19 +891,9 @@
   .prd-commit-pick { max-width: 340px; gap: 4px; font-weight: 550; }
   .prd-commit-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
-  /* The reading column (760 px, reading type) with the details card beside it
-     from 1200 px of content width, under it below. */
-  .prd-summary {
-    display: grid;
-    grid-template-columns: minmax(0, var(--read-col)) 264px;
-    justify-content: center;
-    gap: 24px;
-    align-items: start;
-  }
+  /* The reading column (760 px, reading type); the details card is the workspace's Detail pane. */
+  .prd-summary { display: grid; grid-template-columns: minmax(0, var(--read-col)); justify-content: center; }
   .prd-summary[hidden] { display: none; }
-  @container (max-width: 1199px) {
-    .prd-summary { grid-template-columns: minmax(0, var(--read-col)); }
-  }
   .prd-body { container-type: inline-size; }
   .prd-main { min-width: 0; display: flex; flex-direction: column; gap: 12px; }
   .prd-desc { position: relative; padding: 12px 16px; }

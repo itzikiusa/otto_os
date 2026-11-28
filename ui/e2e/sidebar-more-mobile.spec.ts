@@ -2,7 +2,7 @@ import { test, expect, type Page } from '@playwright/test';
 
 // Phone: the bottom nav follows the sidebar's "show what he uses" rule
 // (lib/sidebarMore.ts) — the modules he used lately are the tabs, the rest wait
-// in the More sheet. Real taps.
+// in the one drawer behind the "Menu" tab. Real taps.
 
 async function boot(page: Page, route: string, used: string[]): Promise<void> {
   await page.addInitScript((u) => {
@@ -13,7 +13,7 @@ async function boot(page: Page, route: string, used: string[]): Promise<void> {
   await expect(page.locator('.shell')).toBeVisible({ timeout: 30_000 });
 }
 
-test('phone: the tabs are what he used; the rest is in More', async ({ page }) => {
+test('phone: the tabs are what he used; the rest is behind Menu', async ({ page }) => {
   await boot(page, 'agents', ['agents', 'vault', 'kubernetes']);
   test.skip(!(await page.evaluate(() => window.innerWidth <= 640)), 'phone only');
   const bar = page.locator('nav.bottomnav');
@@ -23,10 +23,12 @@ test('phone: the tabs are what he used; the rest is in More', async ({ page }) =
     const box = (await t.boundingBox())!;
     expect(box.height).toBeGreaterThanOrEqual(44);
   }
-  await bar.getByRole('button', { name: /^More/ }).tap();
-  const sheet = page.getByRole('dialog', { name: 'More' });
+  await bar.getByRole('button', { name: /^Menu/ }).tap();
+  const sheet = page.locator('.drawer[aria-label="Navigator"]');
   await expect(sheet).toBeVisible();
-  await sheet.getByRole('button', { name: 'Git', exact: true }).tap();
+  const git = sheet.locator('[data-nav-id="git"]').first();
+  if (!(await git.isVisible())) await sheet.getByTestId('sidebar-more-toggle').tap();
+  await git.tap();
   await expect.poll(() => page.evaluate(() => location.hash)).toMatch(/^#\/git/);
 });
 

@@ -22,13 +22,13 @@ This doc covers:
 │ WORK            │                                                             │
 │  ▌Home          │ PageBody                                                    │
 │   Agents     2  │  (full width, or readable 1200px column, left-aligned)      │
-│    • session    │                                                             │
+│   Threads    1  │                                                             │
 │ AUTOMATE        │                                                             │
 │   Swarm         │                                                             │
 │ BUILD …         │                                                 ┌─────────┐ │
 │ INFRASTRUCTURE… │                                                 │ toasts  │ │
 │ INSIGHT …       │                                                 └─────────┘ │
-│ ⚙ Settings  🔔  │                                                             │
+│ ⚙ Settings      │                                                             │
 ├─────────────────┴─────────────────────────────────────────────────────────────┤
 │ Status bar 24px: ● 2 working · live · ⎇ main · loopback                       │
 └────────────────────────────────────────────────────────────────────────────────┘
@@ -43,17 +43,33 @@ The parts of the shell:
   is opaque `--bg`. See
   [foundations.md §7](./foundations.md#7-translucency-vibrancy-and-the-ambient-backdrop).
 - **Page chrome.** `PageHeader` plus `PageBody` on every module page. The one
-  exception is **Agents**, whose session `TabBar` is its top row; it has a
-  **Session panel** (⌘J; Git, Files, Notes, Activity, Outputs, Browser and similar).
+  exception is **Agents**, whose session `TabBar` is its top row.
+- **Side surfaces.** Four, and only four (§4.1): the **Navigator** (this
+  sidebar; the Rail when collapsed; the phone drawer), a page's **list pane**,
+  a page's **Detail pane**, and the shell's **Side panel** (⌘J; Git, Files,
+  Notes, Activity, Outputs, Browser and a page's own tabs) — on every page.
 - **Overlays.** The floating bar (§7, ⌘K on desktop), the `Palette` sheet
   (phone/tablet, ⌘I), the `?` `ShortcutsOverlay`, `Modal` sheets, the
   global `ContextMenu` and `Toasts` are all mounted once in `shell/App.svelte`.
-- **Notification bell.** It lives in the sidebar. It used to float over pages
-  and cost every page a 42 px "bell gutter", which is now removed. Don't
-  reintroduce floating page-level chrome — the one exception is the shell's
-  floating command bar (§7), which docks out of the way.
-- **Phone.** A mobile top bar (44 px, title from `moduleLabel()`), the content,
-  and `BottomNav` (56 px). The `Drawer` holds the Navigator.
+- **Notification bell.** It lives in the Navigator / Rail header, and on a
+  phone at the top of the drawer (BottomNav's "Menu" tab carries its unread
+  dot). It used to float over pages and cost every page a 42 px "bell
+  gutter", which is now removed. Don't reintroduce floating page-level chrome —
+  the one exception is the shell's floating command bar (§7), which docks out
+  of the way.
+- **Phone.** ONE header row, the content, and `BottomNav` (56 px). The page's
+  `PageHeader` IS that row (`☰ · title · actions · ⋯ · Side panel`; on a page
+  pushed from a list `‹ List · title · action · ⋯ · Side panel`); no history
+  arrows. A page without a `PageHeader` keeps the shell's bar with the same
+  contents. ☰ and BottomNav's **Menu** tab open the ONE drawer
+  (`shell/PhoneNavDrawer.svelte`, `min(86vw, 320px)`): the Navigator with the
+  bell, modules, workspaces, then Commands, Light / Full, Machine, Help,
+  Settings and the account.
+- **Tablet.** ONE header row too: the page's `PageHeader`, the Side panel
+  button last (no ☰ — the Navigator is a column). History arrows and the bell
+  stay in the Rail / Navigator. The **Rail** is the default; expanding it to
+  the Navigator is the person's choice, remembered on the device. Desktop,
+  tablet and phone all have one header row.
 
 ### 1.1 What lives where
 
@@ -64,7 +80,7 @@ help sentence in the one place that owns the thing, and name that place:
 |---|---|---|
 | Keep durable docs: markdown, wikilinks, an Obsidian vault, OKF bundles | **Vault** | IDE → Scratches |
 | Draft a script, snippet or scratch note and run it somewhere | **IDE → Scratches** (per-user folder in every workspace, Local History; *Send to… → Vault* moves a file into the Vault) | Vault |
-| Jot workspace notes beside a running session | the **Session panel → Notes** tab (⌘J) | Vault |
+| Jot workspace notes beside a running session | the **Side panel → Notes** tab (⌘J) | Vault |
 | Annotate a design (frame, site, 3D scene, brand kit) | the artifact's notes in **Design Hall** | Vault |
 | Draw a diagram with an agent (Excalidraw, Mermaid, D2) | **Canvas** (`#/canvas`), which is Design Hall's **Whiteboard** studio — reached from Design Hall (⌘K "Go to Design Hall" matches "canvas") | a separate "whiteboard" module or ⌘K entry |
 | Invite people into a running session | **Rooms** (session rooms: up to three guests, the host moderates) | Personal agents |
@@ -150,9 +166,9 @@ anywhere else.
   - a 3 px `--accent` bar on the inline-start edge
   - an `--accent-text` icon
 
-  A nested active row (a focused session under Agents) is quieter: the same
-  `--accent-soft` tint at weight 500, and no bar. Never use a solid fill or a non-accent colour for
-  selection.
+  The 3 px bar marks app-level place, so it belongs to the Navigator, Rail
+  and BottomNav only; rows inside a page use the tint and the bold title
+  (§4.1). Never use a solid fill or a non-accent colour for selection.
 - **The active row stays visible.** The Navigator scrolls it into view on
   every route change.
 - **⌘K "Go to"** commands are generated from `availableModules()`, with the
@@ -299,60 +315,90 @@ Which one to pick:
 - Is it mainly **fields and toggles**? → **settings form**.
 - Is the object **2D/3D space** the user arranges? → **canvas/studio**.
 
-### 4.1 List/detail
+### 4.1 List/detail and the side surfaces
+
+Every side surface is one of four, built from `lib/components/side/`
+(the how-to with examples: `sidebars/MIGRATION.md` in the design notes; the
+blocks' own header comments):
+
+| Surface | What it is | Built with |
+|---|---|---|
+| **Navigator** | the app's modules and workspaces (§2): Navigator or Rail, the phone drawer | the shell |
+| **List pane** | a page's LEFT pane: a list, a tree or a section nav | `ListDetail` + `ListPane`, `SideSection`, `SideRow` |
+| **Detail pane** | a page's RIGHT pane about the thing selected on THIS page | `DetailPane` |
+| **Side panel** | the shell's right panel: tools that follow you across pages | the shell; a page adds a tab with `rightPanel.register` |
+
+There is no fifth kind. `npm run check` fails a NEW hand-rolled one
+(`side-pane` ratchet: a local `.list-pane` / `.side` / `.sidebar`, a private
+width threshold, a module-level `Drawer`).
 
 ```
-PageHeader: title = selected item (or module), item actions, primary
-┌ list pane 260–320px ───┬ detail ─────────────────────────────┐
-│ section-title  [+]     │                                     │
-│ filter chips           │  selected item                      │
-│ ▌item (selected)       │                                     │
-│  item                  │                                     │
-└────────────────────────┴─────────────────────────────────────┘
+┌ Threads  12          ＋  ⋯ ┐  header 36 px: name · count · ONE primary · ⋯ (Hide <name> ⌘B first)
+│ 🔍 Filter…                 │  optional, one row
+│ [ All ] [ Mine ]           │  optional, ONE row (Tabs or chips), never two
+├────────────────────────────┤
+│ NEEDS YOU               2 ▾│  section head 22 px, small caps, count, folds
+│ ▸ ◻ Row title      meta  ⋯ │  line row 30 px · two-line 44 px · inbox (InboxRow)
+└ footer (optional, one row) ┘
 ```
 
+- **One behaviour per size.**
+
+  | | Desktop | Tablet | Phone |
+  |---|---|---|---|
+  | List pane | inline, resizable, hidden with ⋯ › Hide / ⌘B | the same, clamped so the content keeps 480 px (the divider's range says so) | **push**: the list is the page; an item's content replaces it, `‹ <list name>` in the header |
+  | Detail pane | inline, resizable, closable (⌥⌘B) | inline while the content keeps 480 px, else a right sheet | full-width right sheet |
+  | Side panel | inline (⌘J) | right sheet | full-width right sheet, the header's last icon |
+
+  The signal is `viewport.isPhone` / `isTablet`; layout INSIDE a pane uses
+  container queries. No private `matchMedia`, no width thresholds in script.
+- **Header.** The pane's name (what the phone Back says), an optional count,
+  at most ONE primary icon action (the "New"; if the page's primary does the
+  same, the pane has none), everything else under ⋯ — "Hide <name> ⌘B" first.
+  While hidden, "Show <name>" sits in `PageHeader`'s leading slot. A pane with
+  several views shows the views AS its header (a segmented control in place of
+  the name). Multi-select turns the header into the selection bar (count,
+  Clear, one action, ⋯) and the open item is not marked meanwhile. On a phone
+  the list pane's header becomes the page's one header row.
+- **Rows** — one look in every list, tree and nav: text 16 px in, 5 px radius,
+  selected = `--accent-soft` + the title at 600 (icon in `--text`), hover =
+  `--hover`, keyboard focus = an inset ring and no fill. More than two row
+  actions go under ⋯ (also right-click, long-press, the ContextMenu key).
+  Trees indent 12 px a level. Raw IDs (ULIDs) don't belong in rows. Trees and
+  virtual lists that draw their own rows use the global classes (`.side-row`,
+  `.selected`, `--side-depth`).
+- **Keyboard**, everywhere including the Navigator and Rail (`use:listNav`):
+  ↑ / ↓ move, Home / End, Enter or Space opens, → / ← open and close a node or
+  section. ⌘1 Navigator ↔ Rail · ⌘B the list pane · ⌥⌘B the Detail pane ·
+  ⌘J the Side panel; nothing else may reuse these four.
+- **Semantics.** The pane is a labelled `<aside>` (`<nav>` for a section nav);
+  the open item is `aria-current="true"` (`"page"` in a nav); trees use
+  `treeitem` + `aria-selected`.
+- **Surface.** List and Detail panes are opaque `--bg-sidebar` with a 1 px
+  `--separator` on their inner edge. Glass stays on the Navigator and Rail.
 - **Never open on an empty "pick one" pane when there are items.** Restore the
-  last selection or fall back to the first item, with `lib/lastSelection.ts`:
+  last selection or fall back to the first item, with `lib/lastSelection.ts`
+  (desktop and tablet; on a phone the list IS the page and the last item is
+  marked):
 
   ```ts
   import { initialSelection, rememberSelection } from '../../lib/lastSelection';
-
-  // once the list has loaded (desktop/tablet only; on phone the list IS the page)
   const id = initialSelection('proof', proof.packs, (p) => p.id);
   if (id) open(id);
-  // whenever the selection changes
   $effect(() => { if (detail?.pack.id) rememberSelection('proof', detail.pack.id); });
   ```
-- **Empty list:** hide the list pane entirely. A page-variant `EmptyState`
-  owns the page and carries the one "New …" call to action. A list that is
-  empty because of a filter keeps its pane so the filter can be changed, and
-  says "No proof packs match."
-- **Nothing selected** (after a delete, say): show an `EmptyState` or, better,
-  a small summary of the collection (counts, recent activity). Never a bare
-  "Select an item" line.
-- List rows:
-  - title in `--text`
-  - one meta line in `--text-dim`
-  - status at the trailing edge
-  - selected row in `--accent-soft`, hover in `--hover`
-
-  Raw IDs (ULIDs) don't belong in rows; put them in the detail view or a
-  tooltip.
-- The "New" affordance lives **once**: an icon `+` in the list-pane header, or
-  the primary action in the page header. Not both, and not a third copy in the
-  empty state while items exist.
-- **Phone:** push navigation. The list is full height. Opening an item replaces
-  it, and `PageHeader`'s `leading` slot shows a back button.
-- **List-pane width is the user's.** A list pane sits behind a
-  `PaneDivider` with `lib/paneResizer`'s `LIST_PANE` bounds and a
-  `storageKey`, so drag / ←→ / double-click-reset work and the width is
-  remembered. The few fixed panes below are deliberate:
-
-  | Pane | Width | Why it is fixed |
-  |---|---|---|
-  | Settings nav (`settings/Settings.svelte`) | 200 px | A short, static list of section names (sentence case, ≤ 3 words) — nothing to widen for; the form beside it is capped by `PageBody`. On phone the nav becomes the page. |
-  | Access groups list (`settings/AccessGroups.svelte`) | `minmax(180px, 240px)` grid column | A group-name column inside a settings form, not a page-level list pane; it flexes inside that range with the form and stacks on phone. |
-  | Database connections sidebar (`database/DatabasePage.svelte`) | 300 px **default** (`SIDE_DEFAULT`) | Not fixed: resizable with `PaneDivider` (`db.sideW`, up to 640 px). 300 px is the starting width because connection names carry host + database. |
+- **States, inside the pane.** Loading = skeleton rows, error = compact
+  `LoadState` with Retry. **Empty = no pane**: `ListDetail empty` drops it and a
+  page-variant `EmptyState` owns the page with the one "New …". A list empty
+  because of a filter keeps its pane and says "No proof packs match."
+- **Nothing selected** (after a delete, say): an `EmptyState` or a small summary
+  of the collection. Never a bare "Select an item" line.
+- **Width is the user's, inside one range.** `LIST_PANE` = 280 · 220–420 for
+  every list pane (a pane may start elsewhere inside it: Settings 240); one
+  wider preset for rich rows (`wide`: pull requests, 420 · 280–720); Detail
+  pane 380 · 300–560. No fixed-width side panes. Widths and the hidden state
+  persist as `otto.pane.<module>.<pane>.{w,hidden}`; a page's old keys are
+  read once (`legacy`).
 
 ### 4.2 Workbench/editor
 
@@ -477,8 +523,8 @@ PageHeader: crumbs / title · status pill · version   [device ▢▢▢] [Fit] 
   with a subtle dot grid). Chrome never covers the artboard except for the
   **floating contextual toolbar** anchored to the selection. That toolbar is a
   small `--surface` pill with `--glass-shadow`, and it is clamped into the stage.
-- Side panels are 240–320 px, can be collapsed, and use segmented tabs at the
-  top.
+- Side panels are the §4.1 list pane and Detail pane (shared widths,
+  collapsible); a panel with several views shows them as its header.
 - **Versions are the undo model.** Every applied change (the user's or an
   agent's) creates a version chip, and restoring creates a *new* version.
   Nothing is lost silently.
@@ -508,15 +554,16 @@ Breakpoints live in `lib/stores/viewport.svelte.ts` (`PHONE_MAX = 640`,
   code) scrolls inside its own container. `expectNoHorizontalOverflow` in
   `ui/e2e/helpers.ts` asserts this.
 - **Phone:**
-  - one header row, then content, then bottom nav
-  - list/detail becomes push navigation
+  - ONE header row (the page's `PageHeader`, §1), then content, then bottom nav
+  - list/detail becomes push navigation with `‹ <list>` in the header (§4.1)
   - `PageHeader` hides the subtitle and moves tabs below
   - no floating chrome over the content
-  - the drawer opens only on demand
+  - the one drawer opens only on demand (☰ or the Menu tab)
 
   Aim for at least 70% of the first screen to be content.
-- **Tablet:** the full shell with the Rail. **TBD:** default to the collapsed
-  Rail at 641–1024 px, since the expanded sidebar costs about 22% of the width.
+- **Tablet:** the full shell with the **Rail by default** (the expanded
+  Navigator costs about 22% of the width); expanding it is the person's
+  choice and is remembered. No page folds it for them.
 - **Touch targets** on phone: at least 36 px hit area. Grow the padding, not
   the glyph.
 - Fixed `min-width` values of 700 px or more on content force page scroll on a

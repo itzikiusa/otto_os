@@ -29,11 +29,12 @@ test('outline, a step sheet that saves on Done, nothing that edits the graph', a
   await expect(outline).toBeVisible({ timeout: 20_000 });
   await expect(page.getByRole('button', { name: /^Step$|Add step|Connect/ })).toHaveCount(0);
   await expect(page.getByTestId('wf-editor-canvas')).toHaveCount(0);
-  // The ⋯ menu offers only what the phone can show: no side panels, no problems bar (CR1-046).
+  // The ⋯ menu offers only what the phone can show: no problems bar (CR1-046);
+  // Triggers / Instructions / Versions open the inspector sheet.
   await page.getByTestId('page-header').first().getByRole('button', { name: 'More actions' }).tap();
   const menu = page.locator('.ctx-menu');
   await expect(menu.getByRole('menuitem', { name: 'Rename…' })).toBeVisible();
-  await expect(menu.getByRole('menuitem').or(menu.getByRole('menuitemcheckbox')).filter({ hasText: /^(Triggers|Instructions|Versions|Validate)$/ })).toHaveCount(0);
+  await expect(menu.getByRole('menuitem').or(menu.getByRole('menuitemcheckbox')).filter({ hasText: /^Validate$/ })).toHaveCount(0);
   await page.keyboard.press('Escape');
   await expect(menu).toBeHidden();
   await outline.getByRole('button', { name: /Write/ }).tap();

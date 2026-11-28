@@ -1,34 +1,32 @@
-// IDE layout mode, decided by the IDE page's OWN measured size — not by the
-// viewport bucket. A phone on its side is ~900 px wide but under 400 px tall;
-// classing it by width gave it the desktop workbench (explorer rail + editor
-// + bottom dock + agent dock) in a strip a few lines high, and rotating the
-// phone swapped between two different component trees.
+// IDE layout mode. The ONE phone signal decides it (design.md §2,
+// viewport.navDrawer: a phone, or a phone on its side):
 //
-//   stack     — one pane at a time (Files · Editor · Tools · Agent): any page
-//               narrower than STACK_MAX_W or shorter than STACK_MAX_H.
-//   workbench — the multi-pane desktop layout.
+//   stack     — the phone: the explorer is the page (ListDetail pushes), a
+//               file is pushed over it with "‹ Files"; the content is the
+//               editor or, picked from ⋯ › a tool window, the Tools (the
+//               bottom dock filling the content). The agent and the build
+//               tools are Detail panes (full-width sheets).
+//   workbench — the multi-pane layout (desktop, tablet, a narrow window).
 //
 // The stack pane is this layout's own state (kept per tab in sessionStorage);
 // it never writes the workbench's persisted preferences (dock open, explorer
-// visible, pane widths), so a rotation can't leave a desktop dock open over
-// the editor.
+// hidden, pane widths). The page's measured size still drives the phone
+// chrome inside the content (a short page hides the sub-bar).
 
-export type IdeStackPane = 'files' | 'editor' | 'tools' | 'agent';
+import { viewport } from '../../../lib/stores/viewport.svelte';
 
-/** Below this page width the IDE stacks its panes. */
+export type IdeStackPane = 'files' | 'editor' | 'tools';
+/** The explorer's views (its list pane header): the phone Back names the active one. */
+export type IdeExplorerView = 'files' | 'structure' | 'breakpoints';
+export const EXPLORER_VIEW_LABEL: Record<IdeExplorerView, string> = { files: 'Files', structure: 'Structure', breakpoints: 'Breakpoints' };
+
+/** The phone chrome's "wide" page (a phone on its side): the file row fits the header. */
 export const STACK_MAX_W = 700;
-/** Below this page height the IDE stacks its panes (phone landscape). */
+/** Below this page height the phone chrome is short (phone landscape). */
 export const STACK_MAX_H = 520;
 
 const PANE_KEY = 'otto.ide.stackPane';
-const PANES: readonly IdeStackPane[] = ['files', 'editor', 'tools', 'agent'];
-
-/** Pure: does a page of this size stack? An unmeasured page (0×0) keeps
- *  the workbench so a desktop first paint never flashes the phone layout. */
-export function isStackLayout(width: number, height: number): boolean {
-  if (width <= 0 || height <= 0) return false;
-  return width < STACK_MAX_W || height < STACK_MAX_H;
-}
+const PANES: readonly IdeStackPane[] = ['files', 'editor', 'tools'];
 
 /** Pure: the pane to show after a file was opened from the given pane — a
  *  tap on a file in Files goes to the editor; every other pane stays put. */
@@ -65,9 +63,11 @@ class IdeLayoutStore {
   width = $state(0);
   height = $state(0);
   #pane = $state<IdeStackPane>(readPane());
+  /** The explorer's active view (Files | Structure | Breakpoints). */
+  explorerView = $state<IdeExplorerView>('files');
 
   get stack(): boolean {
-    return isStackLayout(this.width, this.height);
+    return viewport.navDrawer;
   }
 
   get pane(): IdeStackPane {

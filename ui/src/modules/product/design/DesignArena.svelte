@@ -29,6 +29,10 @@
   // ≤ 640 px the three columns collapse to a segmented single pane (Assets ·
   // Canvas · Inspector), like the Database Explorer's phone layout.
   import Tabs, { type TabItem } from '../../../lib/components/Tabs.svelte';
+  import ListDetail from '../../../lib/components/side/ListDetail.svelte';
+  import ListPane from '../../../lib/components/side/ListPane.svelte';
+  import DetailPane from '../../../lib/components/side/DetailPane.svelte';
+  import { DetailOpen } from '../../../lib/components/side/detailOpen.svelte';
   import { toastError } from '../../../lib/toastError';
   import { onDestroy, untrack } from 'svelte';
   import { product, toBase64 } from '../../../lib/stores/product.svelte';
@@ -76,7 +80,6 @@
     typeLabel,
     type ArtifactKind,
   } from '../../../lib/design/format';
-  import { viewport } from '../../../lib/stores/viewport.svelte';
   import { DESIGN_TEMPLATES, blankSource, type DesignTemplate } from '../../../lib/design/templates';
   import {
     canvasToPng,
@@ -186,12 +189,6 @@
   let codeView = $state(false);
   /** Left pane while a scene is open: asset list or the scene Hierarchy. */
   type LeftPane = 'assets' | 'hierarchy';
-  type MobilePane = 'assets' | 'canvas' | 'inspector';
-  const MOBILE_TABS: readonly TabItem<MobilePane>[] = [
-    { id: 'assets', label: 'Assets' },
-    { id: 'canvas', label: 'Canvas' },
-    { id: 'inspector', label: 'Inspector' },
-  ];
   const LEFT_TABS: readonly TabItem<LeftPane>[] = [
     { id: 'assets', label: 'Assets' },
     { id: 'hierarchy', label: 'Hierarchy' },
@@ -199,8 +196,15 @@
   let leftPane = $state<LeftPane>('assets');
   let scene3dSel = $state<string | null>(null);
   let play = $state(false);
-  /** ≤ 640 px: which of the three panes is showing. */
-  let mobilePane = $state<MobilePane>('assets');
+  // Panes (design.md): the assets list is a nested ListDetail's list pane (a
+  // phone pushes the stage, "‹ Assets"); the inspector is its Detail pane —
+  // beside the stage while it keeps 480 px (starts open), else a sheet that
+  // opens on request (Refine opens it).
+  let phoneOpen = $state(false);
+  const insp = new DetailOpen();
+  const inspOpen = $derived(insp.open);
+  const setInsp = (open: boolean): void => insp.set(open);
+  let importInput = $state<HTMLInputElement | null>(null);
   let importing = $state(false);
   /** How the Assistant is shown: creating (full stage, own live preview) or
    *  refining the open artifact (docked in the inspector column). */
@@ -338,7 +342,6 @@
       // the previously-selected one is gone.
       if (!selectedId || !rows.some((r) => r.att.id === selectedId)) {
         selectedId = rows[0]?.att.id ?? null;
-        if (selectedId && !viewport.isPhone) mobilePane = 'canvas';
       }
     } catch (e) {
       // A load failure is shown inline in the assets pane (with Retry), not toasted.
@@ -560,7 +563,7 @@
       });
       await loadAll(true);
       selectedId = created.id;
-      mobilePane = 'canvas';
+      phoneOpen = true;
     } catch (e) {
       toastError('Couldn’t create the artifact', e);
     }
@@ -578,7 +581,7 @@
     if (!storyId) return;
     mockupAssist.openNew(storyId, format);
     assistMode = 'create';
-    mobilePane = 'canvas';
+    phoneOpen = true;
   }
   /** Manual import: upload picked file(s), then select the first. */
   async function importFiles(e: Event): Promise<void> {
@@ -636,7 +639,7 @@
   }
 
   // ── Menus (the global ctxMenu store — already viewport-clamped) ────────────
-  function newMenu(e: MouseEvent): void {
+  function newMenu(e: MouseEvent | Element | null): void {
     const items: MenuItem[] = DESIGN_FORMATS.map((f) => ({
       label: `${FORMATS[f].label}${f === 'html' ? ' (HTML screen)' : f === 'mermaid' ? ' (Mermaid)' : f === 'excalidraw' ? ' (Excalidraw)' : ''}`,
       icon: FORMATS[f].icon,
@@ -646,11 +649,13 @@
     for (const t of DESIGN_TEMPLATES) {
       items.push({ label: `Template: ${t.name}`, icon: 'layers', action: () => createFromTemplate(t) });
     }
-    ctxMenu.show(e, items, { filter: true, filterPlaceholder: 'New…', maxVisible: 14 });
+    const opts = { filter: true, filterPlaceholder: 'New…', maxVisible: 14 };
+    if (e instanceof MouseEvent) ctxMenu.show(e, items, opts);
+    else ctxMenu.showAt(e, items, opts);
   }
-  function aiMenu(e: MouseEvent): void {
-    ctxMenu.show(
-      e,
+  function aiMenu(anchor: Element | null): void {
+    ctxMenu.showAt(
+      anchor,
       DESIGN_FORMATS.map((f) => ({
         label: f === 'html' ? 'HTML screen' : f === 'mermaid' ? 'Diagram' : FORMATS[f].label,
         icon: FORMATS[f].icon,
@@ -731,7 +736,7 @@
   // ── Row actions ────────────────────────────────────────────────────────────
   function selectArtifact(id: string): void {
     selectedId = id;
-    mobilePane = 'canvas';
+    phoneOpen = true;
     // Leaving the full-stage create panel: keep the agent docked when the picked
     // row IS the artifact it's working on, otherwise close it.
     if (assistMode === 'create') {
@@ -770,7 +775,8 @@
     selectedId = a.id;
     void mockupAssist.openRefine(a);
     assistMode = 'refine';
-    mobilePane = 'inspector';
+    phoneOpen = true;
+    setInsp(true);
   }
   /** A turn committed — reload the list and select the committed artifact. */
   async function onAssistCommit(a: ProductAttachment): Promise<void> {
@@ -835,54 +841,45 @@
 
 <div class="arena-container">
 <!-- `.mockups-tab` is kept as an alias class: the product-mockups E2E + deep links target it. -->
-<div
-  class="design-arena mockups-tab"
-  class:m-assets={mobilePane === 'assets'}
-  class:m-canvas={mobilePane === 'canvas'}
-  class:m-inspector={mobilePane === 'inspector'}
->
-  <!-- Narrow available pane: preserve a useful stage with explicit pane navigation. -->
-  <div class="arena-seg">
-    <Tabs size="s" label="Design panes" tabs={MOBILE_TABS} value={mobilePane} onchange={(v) => (mobilePane = v)} />
-  </div>
-
-  <!-- ── ASSETS / HIERARCHY ─────────────────────────────────────────────── -->
-  <aside class="arena-assets list-pane">
-    <div class="pane-head">
-      {#if kind === 'scene3d' && sceneDoc}
-        <Tabs size="s" label="Left pane" tabs={LEFT_TABS} value={leftPane} onchange={(v) => (leftPane = v)} />
-      {:else}
-        <span class="pane-title">Assets</span>
-      {/if}
-      <div class="list-actions">
-        <button class="btn small" onclick={newMenu} title="New artifact (blank or from a template)">
-          <Icon name="plus" size={12} /> New <Icon name="chevronDown" size={12} />
-        </button>
-        <label class="btn small" title="Import files: HTML, images, SVG, .mmd, .excalidraw, .glb / .gltf">
-          <Icon name="arrowUp" size={12} />
-          {importing ? 'Importing…' : 'Import'}
-          <input type="file" multiple accept={IMPORT_ACCEPT} style="display:none" onchange={importFiles} disabled={importing} />
+<div class="design-arena mockups-tab">
+  <ListDetail
+    module="product"
+    pane="arena"
+    name={leftPane === 'hierarchy' && sceneDoc ? 'Hierarchy' : 'Assets'}
+    open={phoneOpen}
+    onback={() => (phoneOpen = false)}
+    testid="arena"
+  >
+  {#snippet list()}
+  <!-- ── ASSETS / HIERARCHY (the arena's list pane) ──────────────────────── -->
+  <ListPane
+    views={kind === 'scene3d' && sceneDoc ? leftViews : undefined}
+    count={kind === 'scene3d' && sceneDoc ? null : rows.length}
+    primary={{ icon: 'zap', label: 'Create with AI', onclick: () => aiMenu(document.querySelector('[data-testid="arena-create-ai"]')), testid: 'arena-create-ai' }}
+    menu={() => [
+      { label: 'New artifact…', icon: 'plus', action: () => newMenu(document.querySelector('[data-testid="arena-assets-more"]')) },
+      { label: importing ? 'Importing…' : 'Import files…', icon: 'arrowUp', disabled: importing, action: () => importInput?.click() },
+      { label: 'Refresh', icon: 'refresh', action: () => void loadAll(true) },
+    ]}
+    testid="arena-assets"
+  >
+    {#snippet filterRow()}
+      {#if isEpic && children.length > 0 && leftPane === 'assets'}
+        <!-- The epic is the single place to review the whole feature: filter by child. -->
+        <label class="child-filter">
+          <span>Show</span>
+          <select bind:value={childFilter} aria-label="Filter artifacts by child story">
+            <option value="">Epic + all children</option>
+            <option value={storyId}>Epic only</option>
+            {#each children as c (c.id)}
+              <option value={c.id}>{c.folder ? `${c.folder} / ` : ''}{c.title}</option>
+            {/each}
+          </select>
         </label>
-        <button class="act-btn btn small primary" onclick={aiMenu} title="Generate an artifact with AI">
-          <Icon name="zap" size={12} /> Create with AI
-        </button>
-      </div>
-    </div>
-
-    {#if isEpic && children.length > 0 && leftPane === 'assets'}
-      <!-- The epic is the single place to review the whole feature: filter by child. -->
-      <label class="child-filter">
-        <span>Show</span>
-        <select bind:value={childFilter} aria-label="Filter artifacts by child story">
-          <option value="">Epic + all children</option>
-          <option value={storyId}>Epic only</option>
-          {#each children as c (c.id)}
-            <option value={c.id}>{c.folder ? `${c.folder} / ` : ''}{c.title}</option>
-          {/each}
-        </select>
-      </label>
-    {/if}
-
+      {/if}
+    {/snippet}
+    <input bind:this={importInput} type="file" multiple accept={IMPORT_ACCEPT} hidden onchange={importFiles} disabled={importing} aria-label="Import files" data-testid="arena-import-input" />
+    <div class="arena-assets">
     <div class="pane-body">
       {#if leftPane === 'hierarchy' && sceneDoc}
         <Hierarchy
@@ -898,7 +895,7 @@
         <EmptyState
           icon="layers"
           title="No design artifacts yet"
-          body="New ▾ for a blank screen, board, diagram or 3D scene (or a template); Import a file; or Create with AI to have a specialized agent build one right here."
+          body="⋯ › New artifact for a blank screen, board, diagram or 3D scene (or a template); ⋯ › Import files; or ＋ Create with AI to have a specialized agent build one right here."
         />
       {:else}
         {#each groups as g (g.name)}
@@ -910,12 +907,13 @@
           {#if !collapsedGroups[g.name]}
             {#each g.rows as r (r.att.id)}
               <div use:rowMenuKeys
-                class="mockup-row"
+                class="mockup-row side-row"
+                class:selected={selectedId === r.att.id}
                 class:active={selectedId === r.att.id}
                 role="presentation"
                 oncontextmenu={(e) => rowMenu(e, r)}
               >
-                <button class="mockup-open" onclick={() => selectArtifact(r.att.id)} title={r.att.filename}>
+                <button class="mockup-open side-row-main" data-side-row aria-current={selectedId === r.att.id ? 'true' : undefined} onclick={() => selectArtifact(r.att.id)} title={r.att.filename}>
                   <span class="mockup-type">{typeLabel(r.att)}</span>
                   <span class="mockup-name">{r.att.filename}</span>
                   {#if isEpic && r.owner && r.owner.id !== storyId}
@@ -928,8 +926,8 @@
                     <Icon name="zap" size={12} />
                   </button>
                 {/if}
-                <button class="row-more reveal-on-hover" onclick={(e) => rowMenu(e, r)} aria-label="Artifact actions" title="Artifact actions">
-                  <Icon name="more" size={12} />
+                <button class="icon-btn side-row-more row-more" tabindex="-1" onclick={(e) => rowMenu(e, r)} aria-label="Artifact actions" title="Artifact actions">
+                  <Icon name="more" size={14} />
                 </button>
               </div>
             {/each}
@@ -937,7 +935,9 @@
         {/each}
       {/if}
     </div>
-  </aside>
+    </div>
+  </ListPane>
+  {/snippet}
 
   <!-- ── VIEWPORT / BOARD (the "stage") ─────────────────────────────────── -->
   <div class="arena-stage mockup-stage">
@@ -974,6 +974,7 @@
         {/if}
         <span class="st-grow"></span>
         <button class="btn small" onclick={exportMenu} title="Export"><Icon name="arrowDown" size={12} /> Export <Icon name="chevronDown" size={12} /></button>
+        <button class="icon-btn" class:on={inspOpen} aria-pressed={inspOpen} onclick={() => setInsp(!inspOpen)} aria-label="Inspector" title={inspOpen ? 'Hide the inspector (⌥⌘B)' : 'Show the inspector (⌥⌘B)'} data-testid="arena-inspector-toggle"><Icon name="info" size={14} /></button>
         <button class="icon-btn" onclick={moreMenu} aria-label="More actions" title="More actions"><Icon name="more" size={14} /></button>
       </div>
 
@@ -1054,10 +1055,18 @@
     {/if}
   </div>
 
-  <!-- ── INSPECTOR + ASSISTANT ──────────────────────────────────────────── -->
-  <aside class="arena-inspector" hidden={assistCreating}>
+  <!-- ── INSPECTOR + ASSISTANT (the arena's Detail pane) ───────────────── -->
+  {#snippet detail()}
+  <DetailPane
+    module="product"
+    pane="inspector"
+    title="Inspector"
+    open={!assistCreating}
+    control={insp}
+    testid="arena-inspector-pane"
+  >
+  <div class="arena-inspector">
     <div class="insp-scroll">
-      <div class="insp-head">Inspector</div>
       {#if att}
         <section class="insp-sec">
           <div class="insp-row"><span class="k">File</span><span class="v mono" title={att.filename}>{att.filename}</span></div>
@@ -1136,9 +1145,16 @@
         <MockupAssistPanel embedded oncommit={onAssistCommit} onclose={closeAssist} />
       </div>
     {/if}
-  </aside>
+  </div>
+  </DetailPane>
+  {/snippet}
+  </ListDetail>
 </div>
 </div>
+
+{#snippet leftViews()}
+  <Tabs size="s" label="Left pane" tabs={LEFT_TABS} value={leftPane} onchange={(v) => (leftPane = v)} />
+{/snippet}
 
 <style>
   .arena-container { container-type: inline-size; display: flex; flex: 1; min-height: 0; min-width: 0; }
@@ -1152,52 +1168,11 @@
     overflow: hidden;
     background: var(--surface);
   }
-  .arena-seg {
-    display: none;
-  }
-
-  /* ── Assets pane (ListPane chrome, inlined so the header can hold a switch) ── */
-  .arena-assets {
-    width: 250px;
-    flex-shrink: 0;
-    border-inline-end: 1px solid var(--border);
-    display: flex;
-    flex-direction: column;
-    min-height: 0;
-  }
-  .pane-head {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    flex-wrap: wrap;
-    gap: 6px;
-    padding: 8px 10px 6px;
-    border-bottom: 1px solid var(--border);
-    flex-shrink: 0;
-  }
-  .pane-title {
-    font-size: var(--fs-xs);
-    font-weight: 600;
-    text-transform: uppercase;
-    letter-spacing: .06em;
-    color: var(--text-dim);
-  }
-  .list-actions {
-    display: flex;
-    align-items: center;
-    gap: 4px;
-    flex-wrap: wrap;
-    width: 100%;
-  }
-  .list-actions .primary {
-    margin-inline-start: auto;
-  }
+  /* ── Assets pane: the shared ListPane; rows on the shared .side-row look ── */
   .child-filter {
     display: flex;
     align-items: center;
     gap: 6px;
-    padding: 6px 10px;
-    border-bottom: 1px solid var(--border);
     font-size: var(--fs-xs);
     color: var(--text-dim);
   }
@@ -1212,9 +1187,6 @@
     color: var(--text);
   }
   .pane-body {
-    flex: 1;
-    min-height: 0;
-    overflow-y: auto;
     display: flex;
     flex-direction: column;
   }
@@ -1239,35 +1211,10 @@
     font-weight: 600;
     opacity: 0.8;
   }
-  .mockup-row {
-    display: flex;
-    align-items: center;
-    gap: 2px;
-    width: 100%;
-    border-bottom: 1px solid color-mix(in srgb, var(--border) 60%, transparent);
-  }
   .mockup-open {
-    flex: 1;
-    min-width: 0;
-    display: flex;
-    align-items: center;
     gap: 6px;
-    padding: 6px 10px;
-    border: none;
-    background: transparent;
-    color: var(--text);
-    cursor: pointer;
-    text-align: start;
   }
-  .mockup-row:hover {
-    background: color-mix(in srgb, var(--text-dim) 10%, transparent);
-  }
-  .mockup-row.active {
-    background: var(--accent-soft);
-    color: var(--accent-text);
-  }
-  .refine-btn,
-  .row-more {
+  .refine-btn {
     flex-shrink: 0;
     display: grid;
     place-items: center;
@@ -1279,24 +1226,7 @@
     color: var(--text-dim);
     cursor: pointer;
   }
-  .row-more {
-    margin-inline-end: 4px;
-    opacity: 0;
-  }
-  /* Revealed on row hover / keyboard focus; always shown on a touch screen. */
-  .mockup-row:hover .row-more,
-  .mockup-row:focus-within .row-more,
-  .mockup-row.active .row-more,
-  .row-more:focus-visible {
-    opacity: 1;
-  }
-  @media (hover: none) {
-    .row-more {
-      opacity: 1;
-    }
-  }
-  .refine-btn:hover,
-  .row-more:hover {
+  .refine-btn:hover {
     background: var(--accent-soft-strong);
     color: var(--accent-text);
   }
@@ -1527,29 +1457,15 @@
 
   /* ── Inspector + assistant ────────────────────────────────────────────── */
   .arena-inspector {
-    width: 300px;
-    flex-shrink: 0;
-    border-inline-start: 1px solid var(--border);
+    flex: 1;
     display: flex;
     flex-direction: column;
     min-height: 0;
-  }
-  .arena-inspector[hidden] {
-    display: none;
   }
   .insp-scroll {
     flex: 1 1 auto;
     min-height: 0;
     overflow-y: auto;
-  }
-  .insp-head {
-    padding: 8px 12px 6px;
-    font-size: var(--fs-xs);
-    font-weight: 600;
-    text-transform: uppercase;
-    letter-spacing: .06em;
-    color: var(--text-dim);
-    border-bottom: 1px solid var(--border);
   }
   .insp-sec {
     padding: 10px 12px;
@@ -1628,37 +1544,8 @@
     font-family: var(--font-mono);
   }
 
-  /* ── Phone: segmented single pane ─────────────────────────────────────── */
-  @container (max-width: 960px) {
-    .design-arena {
-      flex-direction: column;
-    }
-    .arena-seg {
-      display: block;
-      padding: 0 8px;
-      border-bottom: 1px solid var(--border);
-      flex-shrink: 0;
-    }
-    .arena-assets,
-    .arena-stage,
-    .arena-inspector {
-      display: none;
-      width: 100%;
-      border: none;
-    }
-    .m-assets .arena-assets,
-    .m-canvas .arena-stage,
-    .m-inspector .arena-inspector:not([hidden]) {
-      display: flex;
-      flex: 1;
-      min-height: 0;
-    }
-    /* Creating with AI (full-stage panel) always shows the canvas pane. */
-    .m-assets .arena-stage:has(:global(.mockup-assist:not(.embedded))),
-    .m-inspector .arena-stage:has(:global(.mockup-assist:not(.embedded))) {
-      display: flex;
-      flex: 1;
-    }
+  /* A narrow stage stacks the source under the viewport. */
+  @container (max-width: 640px) {
     .st-name {
       max-width: 100%;
     }

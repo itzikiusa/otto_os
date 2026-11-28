@@ -345,6 +345,8 @@ function dispatchRepoTestAction(filePath: string, mode: 'run' | 'coverage' | 'de
 export interface IdeTouchMenuExtra {
   goToLine?: (() => void) | null;
   textSize?: ((delta: -1 | 1) => void) | null;
+  back?: (() => void) | null;
+  canBack?: boolean;
 }
 
 const ideTouchMenus = new WeakMap<EditorView, (x: number, y: number, extra: IdeTouchMenuExtra) => void>();
@@ -725,6 +727,8 @@ export function createIdeRefactorExtensions(opts: {
           replace: () => { openReplaceInFile(view); },
           goToLine: touch?.goToLine ?? cbs.onGoToLine ?? (() => { cmGotoLine(view); }),
           textSize: touch?.textSize ?? null,
+          back: touch?.back ?? null,
+          canBack: touch?.canBack,
         }));
       };
       showMain();

@@ -38,10 +38,13 @@
   import type { ActionDef } from './actions';
   import { actionsFor, runAction } from './actions';
   import { chooseK9sMode, type K9sMode } from './k9sLaunch';
-  import { formatAge, kindDef, visibleKinds } from './k8s-util';
+  import { formatAge, kindDef, visibleKinds, type KindDef } from './k8s-util';
   import EnvBadge from '../../lib/components/EnvBadge.svelte';
   import K8sViewSwitch from './K8sViewSwitch.svelte';
-  import { paneResizer, pxWide, RESIZE_TITLE } from '../../lib/paneResizer';
+  import ListDetail from '../../lib/components/side/ListDetail.svelte';
+  import ListPane from '../../lib/components/side/ListPane.svelte';
+  import SideRow from '../../lib/components/side/SideRow.svelte';
+  import SideSection from '../../lib/components/side/SideSection.svelte';
   import { monitorPath } from '../../lib/k8s/viewState';
   import { SINGLE_KEYS, SINGLE_KEYS_PREF, inWorkspace } from './workspaceKeys';
   import { lsGet, lsSet } from '../../lib/storage';
@@ -106,50 +109,14 @@
   /** Set by the `s` shortcut so the drawer's Terminal tab opens the shell at once. */
   let autoExec = $state(false);
 
-  // Drawer width (desktop) — persisted; clamped so neither pane collapses.
-  const DRAWER_KEY = 'otto_k8s_drawer_w';
-  let drawerW = $state(
-    (() => {
-      try {
-        const v = Number(localStorage.getItem(DRAWER_KEY));
-        return v >= 320 ? v : 520;
-      } catch {
-        return 520;
-      }
-    })(),
-  );
-  let resizing = $state(false);
-  let bodyEl = $state<HTMLDivElement | null>(null);
-  let bodyWidth = $state(0);
-  // A useful table needs 280px beside the 168px kind rail and 320px detail.
-  const detailSheet = $derived(viewport.isPhone || (bodyWidth > 0 && bodyWidth < 780));
-  // Also ≤ 55% of the row: DockedDrawer caps its column there, and the
-  // splitter's value must match what's drawn.
-  const maxDrawerW = $derived(Math.max(320, Math.min(bodyWidth - 168 - 280 - 6, Math.floor((bodyWidth - 168) * 0.55))));
-  const visibleDrawerW = $derived(Math.min(drawerW, maxDrawerW));
-  function saveDrawerWidth(): void {
-    try { localStorage.setItem(DRAWER_KEY, String(Math.round(drawerW))); } catch { /* ignore */ }
-  }
-  let stopDragResize: (() => void) | null = null;
-  function startResize(e: PointerEvent): void {
-    e.preventDefault();
-    stopDragResize?.();
-    resizing = true;
-    const startX = e.clientX, startW = visibleDrawerW;
-    const dir = getComputedStyle(e.currentTarget as HTMLElement).direction === 'rtl' ? 1 : -1;
-    const onMove = (ev: PointerEvent): void => { drawerW = Math.max(320, Math.min(maxDrawerW, startW + (ev.clientX - startX) * dir)); };
-    const onUp = (): void => {
-      resizing = false; saveDrawerWidth();
-      window.removeEventListener('pointermove', onMove); window.removeEventListener('pointerup', onUp); window.removeEventListener('pointercancel', onUp);
-      if (stopDragResize === onUp) stopDragResize = null;
-    };
-    stopDragResize = onUp;
-    window.addEventListener('pointermove', onMove); window.addEventListener('pointerup', onUp); window.addEventListener('pointercancel', onUp);
-  }
+  // Phone: the kinds are the page until one is opened ("‹ Resources"); a
+  // link that names a kind (or a resource) opens on it.
+  let phoneOpen = $state(untrack(() => !!router.parts[2]));
 
   // --- routing helpers ----------------------------------------------------------
   const base = $derived(`kubernetes/${encodeURIComponent(cluster.id)}`);
   function goKind(k: K8sResourceKind): void {
+    phoneOpen = true;
     router.go(`${base}/${k}`);
   }
   /** `exec` = open the pod's shell straight away (the `s` key / "Shell" menu
@@ -195,7 +162,6 @@
   }
   $effect(() => () => {
     if (drawerTimer) clearTimeout(drawerTimer);
-    stopDragResize?.();
   });
   // K-1: the filter + drawer tab are remembered per cluster (and per kind for
   // the filter), so they survive a module switch, the Monitor and a reload.
@@ -408,9 +374,10 @@
 </script>
 
 <div class="wsp" class:prod={cluster.environment === 'prod'} data-testid="k8s-workspace" bind:this={wspEl}>
-  <PageHeader title={cluster.name} class="k8s-topbar">
+  <PageHeader title={cluster.name} class="k8s-topbar" tabsPlacement="below" more={viewport.navDrawer ? () => [{ label: 'All clusters', icon: 'chevronLeft', action: () => router.go('kubernetes') }] : undefined}>
   {#snippet leading()}
-    <button class="icon-btn" onclick={() => router.go('kubernetes')} title="All clusters" aria-label="Back to clusters"><Icon name="chevronLeft" size={14} /></button>
+    <!-- A phone's header already holds the list's ‹ Back: "All clusters" is under ⋯ there. -->
+    {#if !viewport.navDrawer}<button class="icon-btn" onclick={() => router.go('kubernetes')} title="All clusters" aria-label="Back to clusters"><Icon name="chevronLeft" size={14} /></button>{/if}
     <span class="dot" style="background:{cluster.color || 'var(--accent)'}"></span>
   {/snippet}
   {#snippet titleContent()}
@@ -455,34 +422,51 @@
       </div>
     </div>
   {:else}
-    <div class="body" bind:this={bodyEl} bind:clientWidth={bodyWidth} class:resizing>
-      {#if viewport.isPhone}
-        <!-- Phone: the header can't hold a text field (it never collapses into ⋯),
-             so the row filter sits beside the kind picker instead. -->
-        <div class="kinds-mobile">
-          <select class="input" aria-label="Resource kind" value={kind} onchange={(e) => goKind((e.currentTarget as HTMLSelectElement).value as K8sResourceKind)} data-testid="k8s-kinds">
-            {#each kinds as k (k.id)}<option value={k.id}>{k.label}</option>{/each}
-          </select>
-          {@render filterBox()}
-        </div>
-      {:else}
-        <nav class="kinds" aria-label="Resource kinds" data-testid="k8s-kinds">
-          {#each kinds as k (k.id)}
-            <button class="kind" class:active={k.id === kind} class:crd={!!k.requires} onclick={() => goKind(k.id)} aria-current={k.id === kind ? 'page' : undefined}>
-              {k.label}
-              {#if k.id === kind && !k8s.rowsLoading && !(k8s.rowsError && !rowsForKey.length)}<span class="cnt mono">{rowsForKey.length}</span>{/if}
-            </button>
+    <!-- 220: kind names are short; the table and the Detail pane get the room. -->
+    <ListDetail module="kubernetes" pane="kinds" name="Resources" open={phoneOpen} onback={() => (phoneOpen = false)} defaultWidth={220}>
+      {#snippet list()}
+        <ListPane count={kinds.length} testid="k8s-kinds">
+          {#each kinds.filter((x) => !x.requires) as k (k.id)}
+            {@render kindRow(k)}
           {/each}
-        </nav>
-      {/if}
+          {#if kinds.some((x) => x.requires)}
+            <SideSection title="Custom resources" foldable={false}>
+              {#each kinds.filter((x) => x.requires) as k (k.id)}
+                {@render kindRow(k)}
+              {/each}
+            </SideSection>
+          {/if}
+        </ListPane>
+      {/snippet}
+      {#snippet detail()}
+        {#if drawerOpen && sel}
+          {#key `${cluster.id}/${kind}/${sel.ns}/${sel.name}`}
+            <ResourceDrawer
+              clusterId={cluster.id}
+              {kind}
+              ns={sel.ns}
+              name={sel.name}
+              row={selRow}
+              tab={k8s.drawerTab}
+              {canEdit}
+              {autoExec}
+              onautoexec={() => (autoExec = false)}
+              ontab={(t) => (k8s.drawerTab = t)}
+              onclose={closeDrawer}
+              onopenpod={openPod}
+              onaction={(a, r) => void doAction(a, r)}
+              reloadNonce={drawerNonce}
+              onmonitor={openInMonitor}
+            />
+          {/key}
+        {/if}
+      {/snippet}
 
       <div class="center">
         <!-- Table toolbar: scope + filter + freshness belong to the table, not the page header. -->
         <div class="tbl-bar" role="toolbar" aria-label="Resource table">
           <span class="ns-keep"><NamespacePicker allowAll={can(readOperation(kind), '')} bind:this={nsPicker} value={k8s.namespace} namespaces={k8s.namespaces} error={k8s.namespacesError} partial={k8s.namespacesPartial} disabled={clusterScoped} onchange={(ns) => k8s.setNamespace(ns)} /></span>
-          {#if !viewport.isPhone}
-            {@render filterBox()}
-          {/if}
+          {@render filterBox()}
           <span class="meta dim" role="status" title={k8s.rowsLoadedAt ? new Date(k8s.rowsLoadedAt).toLocaleTimeString() : ''}>
             {#if k8s.rowsLoading}loading…{:else if lastLoaded}{k8s.filteredRows.length}{k8s.filter ? `/${rowsForKey.length}` : ''} · {lastLoaded} ago{/if}
           </span>
@@ -506,42 +490,7 @@
         />
       </div>
 
-      {#if drawerOpen && sel}
-        {#if !detailSheet}
-          <!-- A focusable separator is the ARIA window-splitter widget (paneResizer sets its tabIndex and value, and adds ←/→, Home/End). -->
-          <div
-            class="splitter"
-            role="separator"
-            aria-orientation="vertical"
-            aria-label="Resize details"
-            title={RESIZE_TITLE}
-            onpointerdown={startResize}
-            use:paneResizer={{ value: visibleDrawerW, min: 320, max: maxDrawerW, invert: true, onChange: (w) => { drawerW = w; saveDrawerWidth(); }, text: pxWide }}
-          ></div>
-        {/if}
-        {#key `${cluster.id}/${kind}/${sel.ns}/${sel.name}`}
-            <ResourceDrawer
-              modal={detailSheet}
-              width="{visibleDrawerW}px"
-              clusterId={cluster.id}
-              {kind}
-              ns={sel.ns}
-              name={sel.name}
-              row={selRow}
-              tab={k8s.drawerTab}
-              {canEdit}
-              {autoExec}
-              onautoexec={() => (autoExec = false)}
-              ontab={(t) => (k8s.drawerTab = t)}
-              onclose={closeDrawer}
-              onopenpod={openPod}
-              onaction={(a, r) => void doAction(a, r)}
-              reloadNonce={drawerNonce}
-              onmonitor={openInMonitor}
-            />
-        {/key}
-      {/if}
-    </div>
+    </ListDetail>
   {/if}
   </PageBody>
 </div>
@@ -609,6 +558,12 @@
     {/snippet}
   </Modal>
 {/if}
+
+{#snippet kindRow(k: KindDef)}
+  <SideRow title={k.label} selected={k.id === kind} onclick={() => goKind(k.id)}>
+    {#snippet trailing()}{#if k.id === kind && !k8s.rowsLoading && !(k8s.rowsError && !rowsForKey.length)}<span class="mono">{rowsForKey.length}</span>{/if}{/snippet}
+  </SideRow>
+{/snippet}
 
 {#snippet filterBox()}
   <div class="filter">
@@ -680,76 +635,6 @@
     font-size: var(--fs-xs);
     white-space: nowrap;
   }
-  .body {
-    flex: 1;
-    min-height: 0;
-    display: flex;
-    overflow: hidden;
-    position: relative;
-  }
-  .body.resizing {
-    cursor: col-resize;
-    user-select: none;
-  }
-  .kinds {
-    width: 168px;
-    flex-shrink: 0;
-    overflow-y: auto;
-    border-inline-end: 1px solid var(--border);
-    padding: 6px;
-    display: flex;
-    flex-direction: column;
-    gap: 1px;
-    background: var(--surface);
-  }
-  .kind {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 6px;
-    border: none;
-    background: transparent;
-    text-align: start;
-    padding: 4px 8px;
-    border-radius: var(--radius-s);
-    font-size: var(--fs-m);
-    color: var(--text-dim);
-    cursor: pointer;
-  }
-  .kind:hover {
-    background: var(--hover);
-    color: var(--text);
-  }
-  .kind.active {
-    background: var(--accent-soft);
-    color: var(--text);
-    font-weight: 500;
-  }
-  .kind.crd {
-    margin-top: 2px;
-  }
-  .cnt {
-    font-size: var(--fs-xs);
-    color: var(--text-dim);
-  }
-  .kinds-mobile {
-    position: absolute;
-    top: 6px;
-    inset-inline: 10px;
-    z-index: 2;
-  }
-  .kinds-mobile {
-    display: flex;
-    gap: 6px;
-  }
-  .kinds-mobile .input {
-    flex: 0 0 44%;
-    min-width: 0;
-  }
-  .kinds-mobile .filter {
-    flex: 1 1 auto;
-    height: auto;
-  }
   .tbl-bar {
     display: flex;
     align-items: center;
@@ -768,44 +653,6 @@
     min-height: 0;
     display: flex;
     flex-direction: column;
-  }
-  @media (max-width: 640px) {
-    .center {
-      padding-top: 40px;
-    }
-  }
-  .splitter {
-    appearance: none;
-    border: 0;
-    border-radius: 0;
-    padding: 0;
-    margin: 0;
-    height: 100%;
-    min-width: 0;
-    width: 6px;
-    flex-shrink: 0;
-    cursor: col-resize;
-    background: var(--border);
-    position: relative;
-    touch-action: none;
-  }
-  .splitter:focus-visible {
-    outline: 2px solid var(--accent-text);
-    outline-offset: -2px;
-  }
-  .splitter:hover,
-  .resizing .splitter {
-    background: color-mix(in srgb, var(--accent) 45%, var(--border));
-  }
-  /* The grip. */
-  .splitter::after {
-    content: '';
-    position: absolute;
-    inset-block: calc(50% - 14px);
-    inset-inline: calc(50% - 1px);
-    border-radius: 2px;
-    background: var(--text-dim);
-    opacity: 0.6;
   }
   .k9s {
     flex: 1;

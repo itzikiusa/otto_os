@@ -115,7 +115,10 @@ impl IncrementalTestTracker {
                     self.push_capped(tc);
                 }
             }
-            IdeRunnerKind::JavaJunit | IdeRunnerKind::Maven | IdeRunnerKind::Gradle => {
+            IdeRunnerKind::JavaJunit
+            | IdeRunnerKind::Kotest
+            | IdeRunnerKind::Maven
+            | IdeRunnerKind::Gradle => {
                 if let Some(tc) = parse_jvm_test_line(line) {
                     self.push_capped(tc);
                 }

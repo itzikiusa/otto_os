@@ -178,3 +178,19 @@ test('a failed hydration stays retryable even when an event arrived during it', 
   assert.equal(h.activity.artifacts('s').length, 2);
   assert.equal(h.activity.artifactsErrorBySession.s, undefined);
 });
+
+test('the trail read reports loading until it settles, and a reset clears a stale one', async () => {
+  const h = fixture();
+  const first = h.activity.load('w', 's');
+  assert.equal(h.activity.loadingBySession.s, true, 'the Activity panel shows its skeleton');
+  h.calls[0].response.resolve([trail('A')]);
+  h.calls[1].response.resolve([]);
+  await first;
+  assert.equal(h.activity.loadingBySession.s, false);
+  const aborted = h.activity.load('w', 's', true);
+  h.activity.reset();
+  h.calls[2].response.reject(new Error('aborted'));
+  h.calls[3].response.reject(new Error('aborted'));
+  await aborted;
+  assert.equal(h.activity.loadingBySession.s, undefined, 'no skeleton left behind by an invalidated read');
+});

@@ -37,7 +37,7 @@
   // page's list is empty, the EmptyState owns the "New …" CTA and the header
   // omits it.
   import type { Snippet } from 'svelte';
-  import { onMount, tick } from 'svelte';
+  import { getContext, onMount, tick } from 'svelte';
   import Icon, { type IconName } from './Icon.svelte';
   import { ui, isTauri } from '../stores/ui.svelte';
   import { viewport } from '../stores/viewport.svelte';
@@ -50,6 +50,8 @@
   import { uiControl } from '../stores/uiControl.svelte';
   import { ctxMenu, type MenuItem } from '../contextmenu.svelte';
   import { FitGate, StyleWriter, WidthCache, nodeSig } from './headerFit';
+  import HeaderChrome from './side/HeaderChrome.svelte';
+  import { HEADER_HOST, listPageMenu, pageNav, type HeaderHost } from './side/pageNav.svelte';
 
   interface Props {
     title: string;
@@ -119,6 +121,34 @@
   // strip under its row (lib/components/AgentDrivingBar.svelte).
   $effect(() => (rootEl ? uiControl.claimBar(rootEl) : undefined));
   const hostsBar = $derived(!!rootEl && uiControl.barOwner === rootEl);
+  // The page's own top header (not one inside a panel or the side pane).
+  const pageTop = $derived(hostsBar && !isEmbedded && !isPopout);
+  // Phone and tablet: this header IS the one top row (design.md §7.1, §7.11,
+  // decision 12) — the page's title and actions, ⋯, and the Side panel last
+  // (HeaderChrome). A phone adds ☰ on a list / top-level page or the list's
+  // ‹ Back on a page pushed from it (pageNav, from ListDetail). History arrows
+  // and the bell stay in the Rail / Navigator / drawer. A narrow Mac window
+  // keeps the shell bar for its traffic lights.
+  // The shell's centre column: a static marker, never a class a resize toggles.
+  const inCenter = $derived(!!rootEl?.closest('[data-shell-center]'));
+  const compactRow = $derived(pageTop && inCenter && !viewport.isDesktop && !isTauri);
+  const phoneRow = $derived(compactRow && viewport.navDrawer);
+  // (A nested list that pushes for want of room — paneKeys nestedPush — has its
+  // Back here on a tablet or desktop too.)
+  const back = $derived(phoneRow || pageTop ? pageNav.back : null);
+  // …and while a list IS the page (ListDetail on a phone), the row is that
+  // list's header: ☰ · name count · its one primary · its ⋯ · Side panel.
+  // The page's own `more` rows follow the pane's in that ⋯, and its `tabs`
+  // (sections that hold the list: Containers | Images …) stay on the row below.
+  const listPage = $derived(phoneRow ? pageNav.listPage : null);
+  const itemTitle = $derived(phoneRow ? back?.title : undefined);
+  // A page hosting this header at its top (Settings, design.md §7.16) draws the bar there.
+  const host = getContext<HeaderHost | undefined>(HEADER_HOST);
+  const hosted = $derived(!!host?.active);
+  $effect(() => (hosted ? host!.claim(bar) : undefined));
+  const moreItems = $derived(listPage ? listPageMenu(listPage.menu, more) : hosted ? listPageMenu(more, host!.more) : more);
+  // Desktop / tablet: a hidden list pane's "Show <name>" (design.md §7.3).
+  const showPane = $derived(pageTop && !viewport.navDrawer ? pageNav.show : null);
   // A pop-out window's traffic lights live in its own title strip (shell).
   // In a side-by-side split they sit over whichever pane leads: the main
   // pane's header when the side pane trails, the side pane's when it leads.
@@ -203,7 +233,7 @@
       let keepW = keep.reduce((s, k) => s + (widthOf.get(k) ?? 0), 0) + GAP * Math.max(0, keep.length - 1);
       // The ⋯ as drawn (44 px on touch), else its desktop width.
       const moreW = moreEl?.offsetWidth || MORE_W;
-      if (more || keep.length < visible.length) keepW += moreW + (keep.length ? GAP : 0);
+      if (moreItems || keep.length < visible.length) keepW += moreW + (keep.length ? GAP : 0);
       // …but the title block never gives up its title line (h1 + badges).
       // Every layout READ happens before the first style WRITE below.
       let titleMin = 0;
@@ -223,6 +253,7 @@
       const lead = row?.querySelector<HTMLElement>(':scope > .ph-leading');
       const inlineTabs = row?.querySelector<HTMLElement>(':scope > .ph-tabs-inline');
       const pane = row?.querySelector<HTMLElement>(':scope > .pane-controls');
+      const side = row?.querySelector<HTMLElement>(':scope > .ph-side');
       const rowW = row ? row.clientWidth : 0;
       // The row's own padding and gap, as styled (a phone's are smaller than
       // the desktop 20 + 16 / 12: a constant 48 under-sized the actions there
@@ -232,7 +263,7 @@
       const chrome = rs ? parseFloat(rs.paddingInlineStart) + parseFloat(rs.paddingInlineEnd) + gap : 48;
       const leadW = lead ? lead.offsetWidth + gap : 0;
       const tabsW = inlineTabs ? inlineTabs.offsetWidth + gap : 0;
-      const paneW = pane ? pane.offsetWidth + gap : 0;
+      const paneW = (pane ? pane.offsetWidth + gap : 0) + (side ? side.offsetWidth + gap : 0);
       const room = row ? rowW - chrome - titleMin - leadW - tabsW - paneW : Infinity;
       if (rootEl && titleEl) styles.set(rootEl, rootEl.style, '--ph-title-min', `${titleMin}px`);
       styles.set(wrapEl, wrapEl.style, 'min-width', `${Math.max(0, Math.min(Math.ceil(keepW) + RING * 2, room))}px`);
@@ -244,7 +275,7 @@
       // row below, so its header has no actions at all).
       if (row && rootEl) {
         // (+ the page's ⋯, which sits in the same wrap.)
-        const reserved = chrome + titleMin + leadW + paneW + (visible.length ? need + RING * 2 + gap : 0) + (more ? moreW + GAP : 0);
+        const reserved = chrome + titleMin + leadW + paneW + (visible.length ? need + RING * 2 + gap : 0) + (moreItems ? moreW + GAP : 0);
         const tabsCap = Math.max(rowW * tabsMin, rowW - reserved);
         styles.set(rootEl, rootEl.style, '--ph-tabs-max', `${Math.floor(tabsCap)}px`);
       }
@@ -261,9 +292,9 @@
       // the wrap's width is flex-basis 0, independent of what it contains.)
       let avail = wrapEl.clientWidth - RING * 2;
       const hidden: HTMLElement[] = [];
-      if (more) avail -= moreW + GAP;
+      if (moreItems) avail -= moreW + GAP;
       if (need > avail + 0.5) {
-        if (!more) avail -= moreW + GAP;
+        if (!moreItems) avail -= moreW + GAP;
         const order = visible
           .map((el, i) => ({ el, i, p: Number(el.dataset.overflow ?? 0) || 0 }))
           .filter((o) => canCollapse(o.el))
@@ -276,7 +307,7 @@
       }
       const focused = document.activeElement;
       const hidingFocus = focused instanceof HTMLElement && hidden.some((el) => el.contains(focused));
-      const removingFocusedMore = !more && focused === moreEl && hidden.length === 0;
+      const removingFocusedMore = !moreItems && focused === moreEl && hidden.length === 0;
       const expandedFocus = removingFocusedMore ? overflowFocus ?? collapsed
         .flatMap((el) => el.matches('button, a, [role="button"]') ? [el] : Array.from(el.querySelectorAll<HTMLElement>('button, a, [role="button"]')))
         .find((el) => !el.matches(':disabled') && el.getAttribute('aria-disabled') !== 'true') : null;
@@ -383,7 +414,7 @@
         for (const b of inner) items.push(rowFor(b));
       }
     }
-    const extra = more?.() ?? [];
+    const extra = moreItems?.() ?? [];
     if (items.length && extra.length) items.push({ separator: true });
     items.push(...extra);
     // Directly under the button, end edges aligned (mirrored in RTL);
@@ -392,43 +423,61 @@
   }
 </script>
 
+{#snippet bar()}
 <header
   bind:this={rootEl}
   class="page-header-bar chrome-material {klass}"
   class:tauri-pad={padTraffic}
+  class:compact-top={compactRow}
+  class:phone-top={phoneRow}
   class:has-below={tabsBelow}
   data-tauri-drag-region
   use:windowDrag
   data-testid="page-header"
 >
   <div class="ph-row">
-    {#if leading}<div class="ph-leading">{@render leading()}</div>{/if}
-    {#if tabs && !tabsBelow && tabsPlacement === 'start'}
+    {#if (leading && !listPage) || phoneRow || showPane || back}
+      <div class="ph-leading">
+        <HeaderChrome part="lead" drawer={phoneRow} {back} show={showPane} />
+        {#if !listPage}{@render leading?.()}{/if}
+      </div>
+    {/if}
+    {#if tabs && !listPage && !tabsBelow && tabsPlacement === 'start'}
       <div class="ph-tabs-inline">{@render tabs()}</div>
     {/if}
     <div class="ph-title-block">
       {#if icon}<span class="ph-icon" bind:this={iconEl}><Icon name={icon} size={16} /></span>{/if}
       <div class="ph-titles">
         <div class="ph-title-line">
-          <h1 class="ph-title" title={title} bind:this={titleEl}>
-            {#each crumbs as c (c.label)}
+          {#if listPage?.views}<div class="ph-views">{@render listPage.views()}</div>{:else}
+          <h1 class="ph-title" title={listPage?.name ?? itemTitle ?? title} bind:this={titleEl}>
+            {#each listPage ? [] : hosted ? [...host!.crumbs, ...crumbs] : crumbs as c (c.label)}
               <button class="ph-crumb" onclick={c.onclick}>{c.label}</button><span class="ph-sep" aria-hidden="true">/</span>
             {/each}
-            <span class="ph-title-text">{#if titleContent}{@render titleContent()}{:else}{title}{/if}</span>
-          </h1>
-          {#if badge}<span class="ph-badge" bind:this={badgeEl}>{@render badge()}</span>{/if}
+            <span class="ph-title-text">{#if listPage}{listPage.name}{:else if itemTitle}{itemTitle}{:else if titleContent}{@render titleContent()}{:else}{title}{/if}</span>
+          </h1>{/if}
+          {#if listPage}
+            {#if listPage.count !== null}<span class="ph-badge" bind:this={badgeEl}>{listPage.count}</span>{/if}
+          {:else if badge}<span class="ph-badge" bind:this={badgeEl}>{@render badge()}</span>{/if}
         </div>
-        {#if subtitle}<div class="ph-sub" title={subtitle}>{subtitle}</div>{/if}
+        {#if subtitle && !listPage}<div class="ph-sub" title={subtitle}>{subtitle}</div>{/if}
       </div>
     </div>
-    {#if tabs && !tabsBelow && tabsPlacement === 'inline'}
+    {#if tabs && !listPage && !tabsBelow && tabsPlacement === 'inline'}
       <div class="ph-tabs-inline">{@render tabs()}</div>
     {/if}
     <div class="ph-actions-wrap" bind:this={wrapEl}>
       <div class="ph-actions" bind:this={actionsEl}>
-        {#if actions}{@render actions()}{/if}
+        {#if listPage}
+          {#if listPage.primary}
+            {@const p = listPage.primary}
+            <button type="button" class="icon-btn ph-list-primary" data-keep onclick={p.onclick} title={p.label} aria-label={p.label} data-testid={p.testid}>
+              <Icon name={p.icon} size={20} />
+            </button>
+          {/if}
+        {:else if actions}{@render actions()}{/if}
       </div>
-      {#if collapsed.length || more}
+      {#if collapsed.length || moreItems}
         <button
           bind:this={moreEl}
           class="icon-btn ph-more"
@@ -442,12 +491,15 @@
       {/if}
     </div>
     {#if hostsPane}<PaneControls />{:else if hostsPrimaryPane}<PaneControls pane="primary" />{/if}
+    {#if compactRow}<HeaderChrome part="trail" />{/if}
   </div>
   {#if tabs && tabsBelow}
     <div class="ph-tabs-below">{@render tabs()}</div>
   {/if}
   {#if hostsBar}<AgentDrivingBar />{/if}
 </header>
+{/snippet}
+{#if !hosted}{@render bar()}{/if}
 
 <style>
   .page-header-bar {
@@ -666,6 +718,37 @@
       min-inline-size: 44px;
     }
   }
+  /* Phone / tablet: the ONE top row (design.md §7.1, decision 12). It reaches
+     up into the status bar strip like the shell bar it replaced, in the same
+     chrome colour. */
+  .page-header-bar.compact-top {
+    background: var(--bg-sidebar);
+    border-bottom-color: var(--border);
+    margin-block-start: calc(-1 * var(--safe-top));
+    padding-block-start: var(--safe-top);
+  }
+  .phone-top .ph-row {
+    padding-inline: 2px;
+    gap: 2px;
+  }
+  .phone-top .ph-title-block {
+    max-width: none;
+    flex: 1 1 auto;
+    padding-inline-start: 4px;
+  }
+  .ph-list-primary {
+    inline-size: 38px;
+    block-size: min(44px, var(--ph-h));
+  }
+  .ph-views {
+    display: flex;
+    min-width: 0;
+    overflow-x: auto;
+    scrollbar-width: none;
+  }
+  .ph-row :global(.phone-back) {
+    block-size: min(44px, var(--ph-h));
+  }
   .ph-tabs-below {
     display: flex;
     align-items: center;
@@ -679,6 +762,9 @@
   .ph-tabs-below::-webkit-scrollbar {
     display: none;
   }
+  /* A page's sections (Tabs, design.md §7.14) sit on the header's hairline; sub-tabs wrap below. */
+  .ph-tabs-below:has(> :global(.otabs)) { padding: 0; flex-wrap: wrap; }
+  .ph-tabs-below > :global(.otabs) { flex: 1 1 100%; border-block-end: 0; }
   @media (max-width: 640px) {
     .ph-row {
       padding-block: 0; padding-inline: 14px 10px;

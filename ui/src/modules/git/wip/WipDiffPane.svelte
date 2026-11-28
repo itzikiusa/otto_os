@@ -1,13 +1,11 @@
 <script lang="ts">
-  // The WIP panel's per-file diff (WipPanel). Inline beside or under the
-  // file list — or, on a phone, a pushed full-height sheet (DockedDrawer →
-  // the shell Drawer: ✕, Esc and the system Back close it, lib/backCloses).
+  // The WIP panel's per-file diff (WipPanel): beside the file list when the
+  // pane is wide, under it when narrow (WipPanel's container query).
   import type { ComponentProps } from 'svelte';
   import type { DiffResp } from '../../../lib/api/types';
   import Icon from '../../../lib/components/Icon.svelte';
   import Skeleton from '../../../lib/components/Skeleton.svelte';
   import LoadState from '../../../lib/components/LoadState.svelte';
-  import DockedDrawer from '../../../lib/components/DockedDrawer.svelte';
   import DiffViewer from '../DiffViewer.svelte';
   import { splitPath } from './wipTree';
 
@@ -23,56 +21,44 @@
     repoId: string;
     loadFile: ComponentProps<typeof DiffViewer>['loadFile'];
     wip: ComponentProps<typeof DiffViewer>['wip'];
-    sheet: boolean;
     onretry: () => void;
     onclose: () => void;
     /** Every change only virtually included (no hunk tools yet): leave them
      *  all out so single hunks can be staged. */
     onpickhunks?: () => void;
   }
-  let { path, id, both, stagedView = $bindable(), diff, loading, error, repoId, loadFile, wip, sheet, onretry, onclose, onpickhunks }: Props = $props();
+  let { path, id, both, stagedView = $bindable(), diff, loading, error, repoId, loadFile, wip, onretry, onclose, onpickhunks }: Props = $props();
   const parts = $derived(splitPath(path));
 </script>
 
-{#snippet pane()}
-  <div class="wp-diff" class:sheet {id}>
-    <!-- The sheet's title already names the file: its head only picks the side. -->
-    {#if !sheet || both}
-    <div class="wp-diff-head">
-      {#if !sheet}<Icon name="file" size={12} />
-      <span class="wp-diff-path" title={path} dir="ltr"><strong>{parts.name}</strong>{#if parts.dir}<span class="wp-diff-dir">{parts.dir}</span>{/if}</span>{/if}
-      <span class="grow"></span>
-      {#if both}
-        <div class="segmented wp-target" role="group" aria-label="Diff side">
-          <button class:active={!stagedView} aria-pressed={!stagedView} onclick={() => (stagedView = false)}>Unstaged</button>
-          <button class:active={stagedView} aria-pressed={stagedView} onclick={() => (stagedView = true)}>Staged</button>
-        </div>
-      {/if}
-      {#if !sheet}<button class="icon-btn wp-close" onclick={onclose} title="Close diff" aria-label="Close diff"><Icon name="x" size={14} /></button>{/if}
-    </div>
+<div class="wp-diff" {id}>
+  <div class="wp-diff-head">
+    <Icon name="file" size={12} />
+    <span class="wp-diff-path" title={path} dir="ltr"><strong>{parts.name}</strong>{#if parts.dir}<span class="wp-diff-dir">{parts.dir}</span>{/if}</span>
+    <span class="grow"></span>
+    {#if both}
+      <div class="segmented wp-target" role="group" aria-label="Diff side">
+        <button class:active={!stagedView} aria-pressed={!stagedView} onclick={() => (stagedView = false)}>Unstaged</button>
+        <button class:active={stagedView} aria-pressed={stagedView} onclick={() => (stagedView = true)}>Staged</button>
+      </div>
     {/if}
-    {#if onpickhunks}
-      <p class="wp-hunks-hint">Every file is included. <button type="button" class="btn small ghost" onclick={onpickhunks}>Pick hunks</button> to commit only parts of a file.</p>
-    {/if}
-    <div class="wp-diff-body">
-      {#if loading && !diff}
-        <div class="wp-diff-skel"><Skeleton rows={5} height={20} /></div>
-      {:else if diff && diff.files.length > 0}
-        <DiffViewer {diff} {repoId} {loadFile} {wip} />
-      {:else if error}
-        <LoadState variant="compact" what="this file’s diff" {error} empty {onretry} />
-      {:else}
-        <div class="wp-diff-empty">No textual diff for this file.</div>
-      {/if}
-    </div>
+    <button class="icon-btn wp-close" onclick={onclose} title="Close diff" aria-label="Close diff"><Icon name="x" size={14} /></button>
   </div>
-{/snippet}
-
-{#if sheet}
-  <DockedDrawer open modal title={parts.name} {onclose} testid="wip-diff-sheet">{@render pane()}</DockedDrawer>
-{:else}
-  {@render pane()}
-{/if}
+  {#if onpickhunks}
+    <p class="wp-hunks-hint">Every file is included. <button type="button" class="btn small ghost" onclick={onpickhunks}>Pick hunks</button> to commit only parts of a file.</p>
+  {/if}
+  <div class="wp-diff-body">
+    {#if loading && !diff}
+      <div class="wp-diff-skel"><Skeleton rows={5} height={20} /></div>
+    {:else if diff && diff.files.length > 0}
+      <DiffViewer {diff} {repoId} {loadFile} {wip} />
+    {:else if error}
+      <LoadState variant="compact" what="this file’s diff" {error} empty {onretry} />
+    {:else}
+      <div class="wp-diff-empty">No textual diff for this file.</div>
+    {/if}
+  </div>
+</div>
 
 <style>
   .wp-diff {
@@ -83,9 +69,6 @@
     flex-direction: column;
     border-block-start: 1px solid var(--border);
   }
-  /* The phone's sheet: the diff fills it (as PrAgentPanel's sheet does). */
-  .wp-diff.sheet { flex: 1; border-block-start: none; }
-  :global(.drawer-body > .dd-body:has(> .wp-diff.sheet)) { height: 100%; }
   .wp-diff-head {
     display: flex;
     align-items: center;
@@ -133,7 +116,4 @@
     border-block-end: 1px solid var(--border);
   }
   .grow { flex: 1; }
-  @media (max-width: 1024px) {
-    .wp-diff:not(.sheet) { flex: none; height: min(70vh, 560px); }
-  }
 </style>

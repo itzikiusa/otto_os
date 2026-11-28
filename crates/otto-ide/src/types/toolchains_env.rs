@@ -92,6 +92,9 @@ pub enum IdeInstallComponent {
     Sdk,
     Lsp,
     Dap,
+    /// .NET only, this Mac only: the Unity debugger (DotRush `monodbg`, plus the
+    /// .NET 10 SDK when no .NET 10+ runtime is present).
+    UnityDap,
     #[default]
     All,
 }
@@ -156,6 +159,10 @@ pub struct IdeToolchainEcosystem {
     pub installed: Vec<IdeInstalledSdk>,
     pub lsp_status: IdeToolBinaryStatus,
     pub dap_status: IdeToolBinaryStatus,
+    /// .NET on this Mac: the Unity debugger (`monodbg`), installed with
+    /// `component: "unity_dap"`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unity_dap_status: Option<IdeToolBinaryStatus>,
     pub downloadable: Vec<IdeDownloadableVersion>,
 }
 
@@ -605,6 +612,10 @@ pub struct IdeRunConfig {
     pub target_path: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub test_filter: Option<String>,
+    /// Kotest: the names from the spec (`test_filter`) down to the container or test to run.
+    /// Carried by gutter runs; a saved configuration does not keep it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub test_path: Vec<String>,
     #[serde(default, alias = "compound_ids", alias = "compoundConfigs")]
     pub compound_configs: Vec<String>,
     #[serde(default)]
@@ -639,6 +650,7 @@ impl Default for IdeRunConfig {
             before_launch: None,
             target_path: None,
             test_filter: None,
+            test_path: Vec::new(),
             compound_configs: Vec::new(),
             auto_detected: false,
             maven_profiles: Vec::new(),

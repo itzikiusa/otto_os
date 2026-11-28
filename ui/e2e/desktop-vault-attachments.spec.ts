@@ -137,12 +137,13 @@ test('a text paste is left to the editor', async ({ page }) => {
 
 test('⋯ → Rebuild search index confirms, rebuilds, and search still answers', async ({ page }) => {
   await openPage(page, 'vault');
-  await page.getByRole('button', { name: 'More vault actions', exact: true }).click();
+  await page.getByTestId('page-header').getByRole('button', { name: 'More actions', exact: true }).click();
   await page.getByRole('menuitem', { name: 'Rebuild search index' }).click();
   await page.getByRole('button', { name: 'Rebuild', exact: true }).click();
   await expect(page.getByText('Rebuilding the search index', { exact: true })).toBeVisible();
-  await page.locator('.left-modes button[title="Search"]').click();
-  await page.locator('.search input').fill('charging customer');
-  await page.locator('.search input').press('Enter');
+  await page.getByRole('tablist', { name: 'Vault views' }).getByRole('tab', { name: 'Search' }).click();
+  const query = page.getByRole('searchbox', { name: 'Search this vault' });
+  await query.fill('charging customer');
+  await query.press('Enter');
   await expect(page.locator('.hit .t', { hasText: 'Orders API' })).toBeVisible({ timeout: 15_000 });
 });

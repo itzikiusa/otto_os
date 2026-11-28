@@ -1,29 +1,35 @@
 <script lang="ts">
-  // A repo's Pull requests tab: the PR list on the start side, the open PRs
-  // on the other — as tabs once two or more are open (several can be open
-  // together); with one, its header carries the list toggle instead of a strip.
-  // The list pane can be resized or hidden. The open PR's Files tree sits
-  // under the list only while its Files view shows. Open tabs are
-  // persisted per repo (prWorkspace store). Only the PR in front is mounted:
-  // switching tabs repaints from the SWR caches instantly, and nothing heavy
-  // (a big diff's row model) stays alive for tabs nobody is looking at.
-  import { untrack } from 'svelte';
+  // A repo's Pull requests tab (ListDetail): the PR list is the list pane
+  // (wide preset; ⋯ › Hide Pull requests ⌘B), the open PRs the content — as
+  // tabs once two or more are open (several can be open together). The open
+  // PR's Files tree sits under the list while its Code view shows. The Detail
+  // pane holds the PR's details card or its agent thread (views; ⓘ / ✦ in the
+  // PR header, ⌥⌘B). A phone pushes: the list is the page, an opened PR is
+  // pushed with "‹ Pull requests". Open tabs are persisted per repo
+  // (prWorkspace store). Only the PR in front is mounted: switching tabs
+  // repaints from the SWR caches instantly, and nothing heavy (a big diff's
+  // row model) stays alive for tabs nobody is looking at.
+  import { untrack, type Snippet } from 'svelte';
   import type { PrSummary } from '../../lib/api/types';
   import Icon from '../../lib/components/Icon.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
+  import Tabs from '../../lib/components/Tabs.svelte';
+  import ListDetail from '../../lib/components/side/ListDetail.svelte';
+  import DetailPane from '../../lib/components/side/DetailPane.svelte';
+  import { pageNav } from '../../lib/components/side/pageNav.svelte';
   import { ctxMenu } from '../../lib/contextmenu.svelte';
   import { paneResizer } from '../../lib/paneResizer';
   import { startMouseDrag } from '../../lib/dragCursor';
   import { prWorkspace } from './prWorkspaceStore.svelte';
-  import { prDetailCache, prKey } from './pr-cache';
+  import { invalidatePr, prDetailCache, prKey } from './pr-cache';
   import PrList from './PrList.svelte';
   import PrDetail from './PrDetail.svelte';
   import PrFilesPanel from './PrFilesPanel.svelte';
   import PrAgentPanel from './PrAgentPanel.svelte';
   import PrAgentLinePick from './PrAgentLinePick.svelte';
+  import CreatePr from './CreatePr.svelte';
   import { prAgentBridge } from './pr-agent-bridge.svelte';
   import { prAgentOriginId } from './pr-agent-thread';
-  import DockedDrawer from '../../lib/components/DockedDrawer.svelte';
   import { viewport } from '../../lib/stores/viewport.svelte';
   import { RESIZE_TITLE_VERTICAL } from '../../lib/paneResizer';
   import { nextTabAfterClose } from './gitUiHelpers';
@@ -40,27 +46,28 @@
   /** Titles for the tab strip (from the list rows or the detail cache). */
   let titles = $state<Record<number, string>>({});
 
-  const LIST_W_KEY = 'otto_pr_list_w';
-  const LIST_HIDDEN_KEY = 'otto_pr_list_hidden';
   const readNum = (k: string, d: number): number => {
     try { return Number(localStorage.getItem(k)) || d; } catch { return d; }
   };
-  let listW = $state(readNum(LIST_W_KEY, 420));
+  function persist(k: string, v: string): void {
+    try { localStorage.setItem(k, v); } catch { /* not persisted */ }
+  }
   /** The open PR's view (PrDetail): the Files tree shows beside 'code' only. */
   let prView = $state('summary');
   /** The tab strip earns its row with two or more open PRs. */
   const strip = $derived(tabs.open.length >= 2);
-  /** ≤1024px shows one pane at a time: true = the list. */
-  let mobileList = $state(untrack(() => prWorkspace.tabs(repoId).active === null));
-  let listHidden = $state((() => { try { return localStorage.getItem(LIST_HIDDEN_KEY) === '1'; } catch { return false; } })());
-  const clampW = (w: number): number => Math.max(280, Math.min(720, Math.round(w)));
-  function persist(k: string, v: string): void {
-    try { localStorage.setItem(k, v); } catch { /* not persisted */ }
-  }
-  function setListW(w: number): void {
-    listW = clampW(w);
-    persist(LIST_W_KEY, String(listW));
-  }
+  /** Phone: an opened PR is the page (pushed from the list; a deep link lands on it); Back returns. */
+  let phoneOpen = $state(false);
+  $effect(() => {
+    if (prWorkspace.revealed !== repoId) return;
+    untrack(() => {
+      phoneOpen = true;
+      prWorkspace.revealed = null;
+    });
+  });
+  /** The repository has no pull request at all: no list pane, the EmptyState owns the page. */
+  let listEmpty = $state(false);
+  let createOpen = $state(false);
   // The Files panel under the list (the open PR's files): its height and
   // whether it is folded to its header, both persisted.
   const FILES_H_KEY = 'otto_pr_files_h';
@@ -87,69 +94,54 @@
     });
   }
 
-  // The open PR's agent thread (PrAgentPanel) under the files: folded until
-  // first used, its height persisted like the Files panel's. Maximised it
-  // takes the whole workspace (the PR stays mounted, hidden, behind it). At
-  // ≤1024 px the column does not exist: the thread opens in a sheet.
-  const AGENT_H_KEY = 'otto_pr_agent_h';
-  const AGENT_FOLDED_KEY = 'otto_pr_agent_folded';
-  let agentH = $state(clampH(readNum(AGENT_H_KEY, 360)));
-  let agentFolded = $state((() => { try { return localStorage.getItem(AGENT_FOLDED_KEY) !== '0'; } catch { return true; } })());
+  // The Detail pane: the open PR's details card or its agent thread. Which
+  // one is remembered (an inline pane stays open across PRs); a sheet — a
+  // phone, or no room beside the PR — opens only when asked.
+  type PaneView = 'details' | 'agent';
+  const VIEW_KEY = 'otto.pane.git.pr.view';
+  function readView(): PaneView | null {
+    try {
+      const v = localStorage.getItem(VIEW_KEY);
+      if (v !== null) return v === 'details' || v === 'agent' ? v : null;
+      // rc.5 kept the agent thread unfolded under the list: start on it.
+      return localStorage.getItem('otto_pr_agent_folded') === '0' ? 'agent' : 'details';
+    } catch { return 'details'; }
+  }
+  let paneView = $state<PaneView | null>(readView());
+  let sheet = $state(false);
+  let asked = $state(false);
   let agentMax = $state(false);
-  let agentSheet = $state(false);
-  // Phone: the sheet's opener carries the thread's state while the sheet is
-  // closed (a hidden status-only panel keeps the embed reporting it).
+  const paneOpen = $derived(tabs.active !== null && paneView !== null && (!sheet || asked));
+  const PANE_VIEWS = [{ id: 'details', label: 'Details' }, { id: 'agent', label: 'Agent' }];
+  function showPane(v: PaneView): void {
+    paneView = v;
+    persist(VIEW_KEY, v);
+    asked = true;
+  }
+  function closePane(): void {
+    if (sheet) asked = false;
+    else {
+      paneView = null;
+      persist(VIEW_KEY, '');
+    }
+  }
+  const togglePane = (v: PaneView): void => (paneOpen && paneView === v ? closePane() : showPane(v));
+  /** The open PR's details card (PrDetail hands it over). */
+  let detailsCard = $state.raw<Snippet | null>(null);
+
+  // The agent thread's live state: the ✦ button's dot while the thread is not
+  // on screen (a hidden status-only panel keeps the embed reporting it).
   const agentLive = $derived(tabs.active === null ? null : (prAgentBridge.status[prAgentOriginId(repoId, tabs.active)] ?? null));
   const agentLabel = $derived(agentLive === 'working' ? 'Agent thread: the agent is working' : agentLive === 'needs-you' ? 'Agent thread: the agent needs you' : 'Agent thread');
-  const narrow = $derived(viewport.isMobile);
-  const agentMaxOn = $derived(agentMax && tabs.active !== null && !narrow);
-  function setAgentH(h: number): void {
-    agentH = clampH(h);
-    persist(AGENT_H_KEY, String(agentH));
-  }
-  function setAgentFolded(v: boolean): void {
-    agentFolded = v;
-    persist(AGENT_FOLDED_KEY, v ? '1' : '0');
-  }
-  function startAgentResize(e: MouseEvent): void {
-    const startY = e.clientY;
-    const startH = agentH;
-    startMouseDrag(e, {
-      cursor: 'row-resize',
-      onMove: (ev) => { agentH = clampH(startH - (ev.clientY - startY)); },
-      onEnd: () => persist(AGENT_H_KEY, String(agentH)),
-    });
-  }
-  // An ask (⋯ menu, Files panel, diff, the panel's own box) brings the thread
-  // forward. Desktop: the docked panel is always mounted and may take the
-  // ask before this component sees it, so the panel calls `revealAgent`
-  // itself. Phone: the sheet's panel mounts only once the sheet opens, so
-  // the waiting ask opens it here.
-  function revealAgent(): void {
-    if (agentFolded) setAgentFolded(false);
-    if (listHidden) toggleList();
-  }
+  const agentShown = $derived(paneOpen && paneView === 'agent');
+  // An ask (⋯ menu, Files panel, diff, the thread's own box) brings the
+  // thread forward; its panel mounts with the pane and takes the waiting ask.
   $effect(() => {
     const p = prAgentBridge.pending;
     const n = tabs.active;
-    if (!p || n === null || !narrow || p.key !== prAgentOriginId(repoId, n)) return;
-    untrack(() => (agentSheet = true));
+    if (!p || n === null || p.key !== prAgentOriginId(repoId, n)) return;
+    untrack(() => showPane('agent'));
   });
-
-  function toggleList(): void {
-    listHidden = !listHidden;
-    persist(LIST_HIDDEN_KEY, listHidden ? '1' : '0');
-  }
-  function startResize(e: MouseEvent): void {
-    const startX = e.clientX;
-    const startW = listW;
-    const rtl = getComputedStyle(e.currentTarget as Element).direction === 'rtl';
-    startMouseDrag(e, {
-      cursor: 'col-resize',
-      onMove: (ev) => { listW = clampW(startW + (rtl ? startX - ev.clientX : ev.clientX - startX)); },
-      onEnd: () => persist(LIST_W_KEY, String(listW)),
-    });
-  }
 
   function titleOf(n: number): string {
     return titles[n] ?? prDetailCache.get(prKey(repoId, n))?.value.title ?? '';
@@ -161,12 +153,12 @@
   function openPr(pr: PrSummary, opts: { background: boolean }): void {
     remember(pr);
     prWorkspace.open(repoId, pr.number, opts.background);
-    if (!opts.background) mobileList = false;
+    if (!opts.background) phoneOpen = true;
   }
-  /** Never "pick one": with nothing open, the list opens on what needs you. */
+  /** Open on an item: with nothing open, the list opens on what needs you, else its first row. */
   function openFirst(prs: PrSummary[]): void {
     if (tabs.active !== null) return;
-    const pr = firstNeedingPr(prs, (p) => p.is_mine ?? false);
+    const pr = firstNeedingPr(prs, (p) => p.is_mine ?? false) ?? prs[0];
     if (!pr) return;
     remember(pr);
     prWorkspace.open(repoId, pr.number);
@@ -174,7 +166,7 @@
   function openMany(prs: PrSummary[]): void {
     for (const p of prs) remember(p);
     prWorkspace.openMany(repoId, prs.map((p) => p.number));
-    mobileList = false;
+    phoneOpen = true;
   }
 
   let prwEl = $state<HTMLDivElement | null>(null);
@@ -215,51 +207,51 @@
       closeTab(n);
     }
   }
-  /** "+": bring the list back and put the cursor in its search box. */
+  /** "+": bring the list back (a phone: go back to it) and put the cursor in its search box. */
   function focusSearch(): void {
-    if (listHidden) toggleList();
+    if (viewport.navDrawer) phoneOpen = false;
+    else pageNav.show?.onclick();
     requestAnimationFrame(() => prwEl?.querySelector<HTMLInputElement>('.pr-search')?.focus());
   }
 </script>
 
-{#snippet agentOpen()}
-  {#if narrow && tabs.active !== null}
-    <button class="prw-icon prw-agent-open" aria-label={agentLabel} title={agentLabel} onclick={() => (agentSheet = true)}
-      data-testid="pr-agent-open" data-status={agentLive ?? 'idle'}>
-      <Icon name="sparkle" size={13} />
-      {#if agentLive === 'working' || agentLive === 'needs-you'}<span class="prw-agent-dot" class:needs={agentLive === 'needs-you'} aria-hidden="true"></span>{/if}
-    </button>
-  {/if}
-{/snippet}
-{#snippet listToggle()}
-  <button class="prw-icon prw-desk" aria-pressed={!listHidden} aria-label={listHidden ? 'Show the list' : 'Hide the list'}
-    title={listHidden ? 'Show the list' : 'Hide the list'} onclick={toggleList}>
-    <Icon name="sidebar" size={13} />
+{#snippet paneToggles()}
+  <button class="prw-icon" aria-pressed={paneOpen && paneView === 'details'} aria-label="Details" title="Details: reviewers, checks, labels (⌥⌘B)"
+    onclick={() => togglePane('details')} data-testid="pr-details-toggle">
+    <Icon name="info" size={13} />
+  </button>
+  <button class="prw-icon prw-agent-open" aria-pressed={agentShown} aria-label={agentLabel} title={agentLabel} onclick={() => togglePane('agent')}
+    data-testid="pr-agent-open" data-status={agentLive ?? 'idle'}>
+    <Icon name="sparkle" size={13} />
+    {#if !agentShown && (agentLive === 'working' || agentLive === 'needs-you')}<span class="prw-agent-dot" class:needs={agentLive === 'needs-you'} aria-hidden="true"></span>{/if}
   </button>
 {/snippet}
-<!-- One PR open: no tab strip — its header starts with these. -->
-{#snippet soloLead()}
-  <button class="prw-icon prw-back" aria-label="Back to the list" title="Back to the list" onclick={() => (mobileList = true)}><Icon name="chevronLeft" size={14} /></button>
-  {@render listToggle()}
-  {@render agentOpen()}
-{/snippet}
 
-<div class="prw" bind:this={prwEl} class:m-list={mobileList || tabs.active === null} class:agent-max={agentMaxOn}
-  class:list-hidden={!agentMaxOn && listHidden} style="--listw:{listW}px">
-  {#if agentMaxOn || !listHidden}
-    <section class="prw-list" aria-label="Pull requests">
-      <div class="prw-list-main">
-        <PrList
-          {repoId}
-          activeNumber={tabs.active}
-          openNumbers={tabs.open}
-          onopen={openPr}
-          onopenmany={openMany}
-          {patch}
-          onfirst={openFirst}
-        />
-      </div>
-      {#if tabs.active !== null && prView === 'code'}
+<div class="prw" bind:this={prwEl}>
+  <ListDetail
+    module="git"
+    pane="prs"
+    name="Pull requests"
+    title={tabs.active !== null ? `#${tabs.active} ${titleOf(tabs.active)}`.trim() : undefined}
+    wide
+    open={phoneOpen}
+    onback={() => (phoneOpen = false)}
+    empty={listEmpty}
+    legacy={{ w: 'otto_pr_list_w', hidden: () => { try { const v = localStorage.getItem('otto_pr_list_hidden'); return v === null ? null : v === '1'; } catch { return null; } } }}
+  >
+    {#snippet list()}
+      <PrList
+        {repoId}
+        activeNumber={tabs.active}
+        openNumbers={tabs.open}
+        onopen={openPr}
+        onopenmany={openMany}
+        {patch}
+        onfirst={openFirst}
+        onempty={() => (listEmpty = true)}
+      />
+      <!-- The open PR's Files under the list (a phone: the diff's Files picker). -->
+      {#if tabs.active !== null && prView === 'code' && !viewport.navDrawer}
         {#if !filesFolded}
           <div
             class="prw-files-resize"
@@ -273,131 +265,127 @@
           <PrFilesPanel {repoId} number={tabs.active} collapsed={filesFolded} ontogglecollapsed={toggleFilesFolded} />
         </div>
       {/if}
-      {#if tabs.active !== null}
-        <!-- The agent thread stays: folded it is one bar, the visible door to it. -->
-        {#if !narrow}
-          {#if !agentFolded && !agentMaxOn}
-            <div
-              class="prw-files-resize prw-agent-resize"
-              role="separator"
-              aria-label="Resize the agent thread"
-              title={RESIZE_TITLE_VERTICAL}
-              use:paneResizer={{ value: agentH, min: 120, max: 900, orientation: 'horizontal', invert: true, onChange: setAgentH, onReset: () => setAgentH(360), onDragStart: startAgentResize, text: (v) => `${Math.round(v)} pixels tall` }}
-            ></div>
-          {/if}
-          <div class="prw-agent" class:open={!agentFolded || agentMaxOn} style={agentFolded || agentMaxOn ? undefined : `block-size:${agentH}px`}>
+    {/snippet}
+
+    {#snippet detail()}
+      <DetailPane
+        module="git"
+        pane="pr"
+        title={paneView === 'agent' ? `Agent · PR #${tabs.active}` : 'Pull request details'}
+        open={paneOpen}
+        onclose={closePane}
+        ontoggle={() => (paneOpen ? closePane() : showPane(paneView ?? 'details'))}
+        maximized={agentMax && paneView === 'agent'}
+        bind:sheet
+        menu={paneView === 'agent' ? () => [{ label: agentMax ? 'Narrow' : 'Widen', icon: agentMax ? 'minimize' : 'maximize', action: () => (agentMax = !agentMax) }] : undefined}
+        testid="pr-pane"
+      >
+        {#snippet views()}
+          <Tabs label="Pull request panes" size="s" idBase="pr-pane" testid="pr-pane-tabs" tabs={PANE_VIEWS} value={paneView ?? 'details'} onchange={(id) => showPane(id as PaneView)} />
+        {/snippet}
+        <div class="prw-pane-body" role="tabpanel" id="pr-pane-panel-{paneView}" aria-labelledby="pr-pane-tab-{paneView}">
+          {#if tabs.active !== null && paneView === 'agent'}
             {#key `${repoId}:${tabs.active}`}
-              <PrAgentPanel {repoId} number={tabs.active} title={titleOf(tabs.active)} layout={agentMaxOn ? 'max' : 'dock'}
-                folded={agentFolded && !agentMaxOn} ontogglefolded={() => setAgentFolded(!agentFolded)}
-                onmaximize={() => (agentMax = true)} onrestore={() => (agentMax = false)} onasked={revealAgent} />
+              <PrAgentPanel {repoId} number={tabs.active} title={titleOf(tabs.active)} onmaximize={() => (agentMax = !agentMax)} onasked={() => showPane('agent')} />
             {/key}
-          </div>
-        {/if}
+          {:else}
+            <div class="prw-card">{@render detailsCard?.()}</div>
+          {/if}
+        </div>
+      </DetailPane>
+    {/snippet}
+
+    {#if listEmpty}
+      <EmptyState variant="page" icon="pr" title="No pull requests" body="Open one from your current branch." actionLabel="New pull request" actionIcon="plus" onaction={() => (createOpen = true)} />
+    {:else}
+    <section class="prw-detail" aria-label="Open pull requests">
+      {#if strip}
+      <div class="prw-tabs">
+        <nav class="prw-tablist" aria-label="Open pull requests" bind:this={tablistEl}>
+          {#each tabs.open as n (n)}
+            {@const title = titleOf(n)}
+            <div class="prw-tab" class:active={tabs.active === n}>
+              <button
+                class="prw-tab-btn"
+                data-pr-tab={n}
+                aria-current={tabs.active === n ? 'page' : undefined}
+                title={title ? `#${n} ${title}` : `#${n}`}
+                onclick={() => prWorkspace.activate(repoId, n)}
+                onauxclick={(e) => { if (e.button === 1) closeTab(n); }}
+                oncontextmenu={(e) => tabMenu(e, n)}
+                onkeydown={(e) => onTabKeydown(e, n)}
+              >
+                <Icon name="pr" size={12} />
+                <span class="prw-tab-num">#{n}</span>
+                {#if title}<span class="prw-tab-title">{title}</span>{/if}
+              </button>
+              <button class="prw-tab-x" aria-label="Close #{n}" title="Close #{n}" onclick={() => closeTab(n)}>
+                <Icon name="x" size={12} />
+              </button>
+            </div>
+          {/each}
+        </nav>
+        <button class="prw-icon" bind:this={findPrBtnEl} aria-label="Find a pull request" title="Find a pull request" onclick={focusSearch}><Icon name="plus" size={13} /></button>
+        <span class="grow"></span>
+        {@render paneToggles()}
+      </div>
       {/if}
-      <div
-        class="prw-resize"
-        role="separator"
-        aria-label="Resize the pull request list"
-        title="Drag or use ←/→ to resize · double-click or Enter to reset"
-        use:paneResizer={{ value: listW, min: 280, max: 720, onChange: setListW, onReset: () => setListW(420), onDragStart: startResize, text: (v) => `${Math.round(v)} pixels wide` }}
-      ></div>
-    </section>
-  {/if}
 
-  <section class="prw-detail" aria-label="Open pull requests">
-    {#if strip}
-    <div class="prw-tabs">
-      <button class="prw-icon prw-back" aria-label="Back to the list" title="Back to the list" onclick={() => (mobileList = true)}><Icon name="chevronLeft" size={14} /></button>
-      <nav class="prw-tablist" aria-label="Open pull requests" bind:this={tablistEl}>
-        {#each tabs.open as n (n)}
-          {@const title = titleOf(n)}
-          <div class="prw-tab" class:active={tabs.active === n}>
-            <button
-              class="prw-tab-btn"
-              data-pr-tab={n}
-              aria-current={tabs.active === n ? 'page' : undefined}
-              title={title ? `#${n} ${title}` : `#${n}`}
-              onclick={() => prWorkspace.activate(repoId, n)}
-              onauxclick={(e) => { if (e.button === 1) closeTab(n); }}
-              oncontextmenu={(e) => tabMenu(e, n)}
-              onkeydown={(e) => onTabKeydown(e, n)}
-            >
-              <Icon name="pr" size={12} />
-              <span class="prw-tab-num">#{n}</span>
-              {#if title}<span class="prw-tab-title">{title}</span>{/if}
-            </button>
-            <button class="prw-tab-x" aria-label="Close #{n}" title="Close #{n}" onclick={() => closeTab(n)}>
-              <Icon name="x" size={12} />
-            </button>
-          </div>
-        {/each}
-      </nav>
-      <button class="prw-icon" bind:this={findPrBtnEl} aria-label="Find a pull request" title="Find a pull request" onclick={focusSearch}><Icon name="plus" size={13} /></button>
-      {@render agentOpen()}
-      <span class="grow"></span>
-      {@render listToggle()}
-    </div>
-    {/if}
-
-    <div class="prw-pane">
-      {#if tabs.active !== null}
-        {#key `${repoId}:${tabs.active}`}
-          <PrDetail
-            {repoId}
-            number={tabs.active}
-            onloaded={(p) => { patch = p; remember(p); }}
-            onview={(v) => (prView = v)}
-            lead={strip ? undefined : soloLead}
+      <div class="prw-pane">
+        {#if tabs.active !== null}
+          {#key `${repoId}:${tabs.active}`}
+            <PrDetail
+              {repoId}
+              number={tabs.active}
+              onloaded={(p) => { patch = p; remember(p); }}
+              onview={(v) => { prView = v; if (sheet) asked = false; }}
+              ondetails={(card) => (detailsCard = card)}
+              lead={strip ? undefined : paneToggles}
+            />
+          {/key}
+        {:else}
+          <EmptyState
+            icon="pr"
+            title="No pull request open"
+            body="Pick one from the list — ⌘-click opens it in the background, and you can select several and open them together."
           />
-        {/key}
-      {:else}
-        <EmptyState
-          icon="pr"
-          title="No pull request open"
-          body="Pick one from the list — ⌘-click opens it in the background, and you can select several and open them together."
-          actionLabel={listHidden ? 'Show the list' : undefined}
-          onaction={listHidden ? toggleList : undefined}
-        />
-      {/if}
-    </div>
-  </section>
+        {/if}
+      </div>
+    </section>
+    {/if}
+  </ListDetail>
 </div>
 
 {#if tabs.active !== null}
   <PrAgentLinePick onexplain={(n, pick) => prAgentBridge.ask(repoId, n, { kind: 'lines', pick })} />
-  {#if narrow}
-    {#if !agentSheet}
-      <div hidden>
-        {#key `${repoId}:${tabs.active}`}<PrAgentPanel {repoId} number={tabs.active} title={titleOf(tabs.active)} layout="sheet" statusOnly />{/key}
-      </div>
-    {/if}
-    <DockedDrawer open={agentSheet} modal title="Agent · PR #{tabs.active}" onclose={() => (agentSheet = false)} testid="pr-agent-sheet">
-      {#key `${repoId}:${tabs.active}`}
-        <PrAgentPanel {repoId} number={tabs.active} title={titleOf(tabs.active)} layout="sheet" />
-      {/key}
-    </DockedDrawer>
+  {#if !agentShown}
+    <div hidden>
+      {#key `${repoId}:${tabs.active}`}<PrAgentPanel {repoId} number={tabs.active} title={titleOf(tabs.active)} statusOnly />{/key}
+    </div>
   {/if}
+{/if}
+
+{#if createOpen}
+  <CreatePr
+    {repoId}
+    onclose={() => (createOpen = false)}
+    oncreated={(pr) => {
+      createOpen = false;
+      invalidatePr(repoId);
+      listEmpty = false;
+      openPr(pr, { background: false });
+    }}
+  />
 {/if}
 
 <style>
   .prw {
-    display: grid;
-    grid-template-columns: var(--listw) minmax(0, 1fr);
+    display: flex;
     height: 100%;
     min-height: 0;
     min-width: 0;
   }
-  .prw.list-hidden { grid-template-columns: minmax(0, 1fr); }
-  .prw-list {
-    position: relative;
-    min-width: 0;
-    min-height: 0;
-    border-inline-end: 1px solid var(--separator);
-    display: flex;
-    flex-direction: column;
-  }
-  .prw-list-main { flex: 1 1 auto; min-height: 140px; display: flex; flex-direction: column; }
-  .prw-files { flex: none; min-height: 0; max-block-size: 70%; display: flex; flex-direction: column; }
+  .prw-files { flex: none; min-height: 0; max-block-size: 70%; display: flex; flex-direction: column; background: var(--bg-sidebar); }
   .prw-files-resize {
     flex: none;
     height: 6px;
@@ -407,25 +395,7 @@
     cursor: row-resize;
   }
   .prw-files-resize:hover, .prw-files-resize:focus-visible { background: var(--accent-line); }
-  /* Shrinks before the list does when Files and the agent are both open. */
-  .prw-agent { flex: none; min-height: 0; display: flex; flex-direction: column; }
-  .prw-agent.open { flex: 0 1 auto; min-block-size: 200px; max-block-size: 70%; }
-  /* The agent thread over the whole workspace: list, files and the PR stay
-     mounted (drafts, scroll) but out of the way. */
-  .prw.agent-max { grid-template-columns: minmax(0, 1fr); }
-  .prw.agent-max .prw-list { border-inline-end: none; }
-  .prw.agent-max :is(.prw-detail, .prw-list-main, .prw-files, .prw-files-resize, .prw-resize) { display: none; }
-  .prw.agent-max .prw-agent { flex: 1; max-block-size: none; }
-  .prw-resize {
-    position: absolute;
-    inset-block: 0;
-    inset-inline-end: -3px;
-    width: 6px;
-    cursor: col-resize;
-    z-index: 2;
-  }
-  .prw-resize:hover, .prw-resize:focus-visible { background: var(--accent-line); }
-  .prw-detail { min-width: 0; min-height: 0; display: flex; flex-direction: column; }
+  .prw-detail { flex: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column; }
   .prw-tabs {
     flex: none;
     display: flex;
@@ -477,7 +447,7 @@
   .prw-tab-x:hover { background: var(--hover); color: var(--text); }
   .prw-icon { width: 26px; height: 26px; flex: none; }
   .prw-icon:hover { background: var(--hover); color: var(--text); }
-  .prw-icon[aria-pressed='true'] { color: var(--text); }
+  .prw-icon[aria-pressed='true'] { color: var(--accent-text); background: var(--accent-soft); }
   .prw-agent-open { position: relative; }
   .prw-agent-dot {
     position: absolute;
@@ -492,23 +462,10 @@
   .prw-agent-dot.needs { background: var(--warning); animation: none; }
   @media (prefers-reduced-motion: reduce) { .prw-agent-dot { animation: none; } }
   .prw-pane { flex: 1; min-height: 0; min-width: 0; }
-  .prw-back { display: none; }
-
-  /* Phone/tablet: one pane at a time — the list, or the open PR. */
-  @media (max-width: 1024px) {
-    .prw { grid-template-columns: minmax(0, 1fr); }
-    .prw-list { border-inline-end: none; }
-    .prw-resize { display: none; }
-    /* One pane at a time: the files jump into a PR pane that is hidden here. */
-    .prw-files, .prw-files-resize, .prw-agent { display: none; }
-    .prw:not(.m-list) .prw-list { display: none; }
-    .prw.m-list .prw-detail { display: none; }
-    .prw-back { display: inline-flex; }
-    .prw-desk { display: none; }
-    .prw-icon, .prw-tab-x { width: 32px; height: 32px; }
-  }
-  /* A phone: ‹ back, the agent, a tab's ✕ and Find take a finger (44 px). */
-  @media (max-width: 640px) and (pointer: coarse) {
+  .prw-pane-body { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+  .prw-card { padding: 12px; }
+  /* Touch: the strip's controls take a finger. */
+  @media (pointer: coarse) {
     .prw-icon, .prw-tab-x { width: 44px; height: 44px; }
   }
 </style>

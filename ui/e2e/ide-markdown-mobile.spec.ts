@@ -1,4 +1,5 @@
 import { test, expect, type Page } from '@playwright/test';
+import { idePane } from './ide-panes';
 import { expectNoHorizontalOverflow } from './helpers';
 import { bootWriteIde, writeShot } from './ide-write-fixtures';
 
@@ -11,13 +12,12 @@ async function openReadmeByTap(page: Page): Promise<void> {
   const active = page.getByTestId('ide-tabs-strip').locator('.ide-tab.active');
   await page.waitForFunction(() => document.querySelector('[data-testid="ide-tabs-strip"] .ide-tab.active') || document.querySelector('[data-testid="ide-project-tree"] button.tree-item'));
   if (!((await active.count()) && (await active.textContent())?.includes('README.md'))) {
-    await page.getByTestId('ide-stack-tab-files').tap();
+    await idePane(page, 'files');
     const file = page.getByTestId('ide-project-tree').locator('button.tree-item[title="README.md"], button.tree-item[title$="/README.md"]').first();
     await expect(file).toBeVisible({ timeout: 15_000 });
     await file.tap();
   }
-  const editorTab = page.getByTestId('ide-stack-tab-editor');
-  if ((await editorTab.getAttribute('aria-pressed')) !== 'true') await editorTab.tap();
+  await idePane(page, 'editor');
   await expect(active).toContainText('README.md', { timeout: 15_000 });
 }
 
@@ -91,12 +91,10 @@ test('phone: a Makefile shows a tappable ▶ per target', async ({ page }, info)
   test.skip(!PHONES.includes(info.project.name), 'phones');
   test.setTimeout(150_000);
   await bootWriteIde(page);
-  await page.getByTestId('ide-stack-tab-files').tap();
+  await idePane(page, 'files');
   const file = page.getByTestId('ide-project-tree').locator('button.tree-item[title="Makefile"], button.tree-item[title$="/Makefile"]').first();
   await expect(file).toBeVisible({ timeout: 15_000 });
   await file.tap();
-  const editorTab = page.getByTestId('ide-stack-tab-editor');
-  if ((await editorTab.getAttribute('aria-pressed')) !== 'true') await editorTab.tap();
   const run = page.locator('.ide-editor-area [data-gutter-run][aria-label="Run make build"]');
   await expect(run).toBeVisible({ timeout: 15_000 });
   expect((await run.boundingBox())!.width).toBeGreaterThanOrEqual(15);

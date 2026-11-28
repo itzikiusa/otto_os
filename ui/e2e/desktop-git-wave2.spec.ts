@@ -57,18 +57,22 @@ test('the header "Browse stashes…" dialog is visible and leaves Pull in place'
   await expect(dialog).toBeVisible();
   const box = await dialog.boundingBox();
   expect(box && box.width > 200 && box.height > 200).toBeTruthy();
-  await expect(dialog.getByRole('option', { name: /Wave two stash/ })).toBeVisible();
+  await expect(dialog.getByRole('button', { name: /Wave two stash/ })).toBeVisible();
   await expect(pull).toBeVisible();
 });
 
-test('Escape closes the History drawer', async ({ page }) => {
+test('a file history takes the Detail pane; Escape gives the commit back', async ({ page }) => {
   await openRepo(page);
   // History opens on the checked-out commit (Add notes).
   await expect(page.locator('.graph-row').filter({ has: page.getByText('Add notes', { exact: true }) }).first()).toHaveClass(/graph-row-selected/);
-  await page.getByRole('button', { name: 'File actions', exact: true }).first().click();
+  const pane = page.getByTestId('git-detail');
+  const tools = page.getByRole('button', { name: 'File actions', exact: true }).first();
+  await tools.click();
   await page.locator('.ctx-menu').getByRole('menuitem', { name: 'History' }).click();
-  const drawer = page.locator('.rv-drawer');
-  await expect(drawer).toBeVisible();
+  await expect(pane.getByRole('heading', { name: 'File history' })).toBeVisible();
+  await expect(pane.getByRole('region', { name: 'File history' })).toBeVisible();
   await page.keyboard.press('Escape');
-  await expect(drawer).toBeHidden();
+  await expect(pane.getByRole('heading', { name: 'Commit detail' })).toBeVisible();
+  await expect(pane.getByRole('region', { name: 'File history' })).toHaveCount(0);
+  await expect(tools).toBeFocused();
 });

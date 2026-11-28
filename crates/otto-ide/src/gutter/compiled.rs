@@ -60,6 +60,7 @@ pub(super) fn detect_go(path: &str, dir: &str, content: &str, out: &mut Vec<IdeG
                     kind: IdeGutterKind::Main,
                     label: "main".into(),
                     language: "go".into(),
+                    note: None,
                     run_spec: IdeQuickRunSpec {
                         runner: IdeRunnerKind::GoRun,
                         command: Some("go".into()),
@@ -69,6 +70,7 @@ pub(super) fn detect_go(path: &str, dir: &str, content: &str, out: &mut Vec<IdeG
                         test_filter: None,
                         debug_program: Some(path.to_string()),
                         debug_test_name: None,
+                        test_path: None,
                     },
                 });
             } else if (fn_name.starts_with("Test") || fn_name.starts_with("Fuzz"))
@@ -88,6 +90,7 @@ pub(super) fn detect_go(path: &str, dir: &str, content: &str, out: &mut Vec<IdeG
                     kind: IdeGutterKind::Test,
                     label: fn_name.to_string(),
                     language: "go".into(),
+                    note: None,
                     run_spec: IdeQuickRunSpec {
                         runner: IdeRunnerKind::GoTest,
                         command: Some("go".into()),
@@ -97,6 +100,7 @@ pub(super) fn detect_go(path: &str, dir: &str, content: &str, out: &mut Vec<IdeG
                         test_filter: Some(pattern.clone()),
                         debug_program: Some(dir.to_string()),
                         debug_test_name: Some(pattern),
+                        test_path: None,
                     },
                 });
             } else if fn_name.starts_with("Benchmark") && params.contains("*testing.B") {
@@ -117,6 +121,7 @@ pub(super) fn detect_go(path: &str, dir: &str, content: &str, out: &mut Vec<IdeG
                     kind: IdeGutterKind::Bench,
                     label: format!("Bench {fn_name}"),
                     language: "go".into(),
+                    note: None,
                     run_spec: IdeQuickRunSpec {
                         runner: IdeRunnerKind::GoTest,
                         command: Some("go".into()),
@@ -126,6 +131,7 @@ pub(super) fn detect_go(path: &str, dir: &str, content: &str, out: &mut Vec<IdeG
                         test_filter: Some(pattern),
                         debug_program: Some(dir.to_string()),
                         debug_test_name: Some(fn_name.to_string()),
+                        test_path: None,
                     },
                 });
             }
@@ -149,6 +155,7 @@ pub(super) fn detect_go(path: &str, dir: &str, content: &str, out: &mut Vec<IdeG
                         kind: IdeGutterKind::Test,
                         label: format!("{parent_fn}/{sub_name}"),
                         language: "go".into(),
+                        note: None,
                         run_spec: IdeQuickRunSpec {
                             runner: IdeRunnerKind::GoTest,
                             command: Some("go".into()),
@@ -158,6 +165,7 @@ pub(super) fn detect_go(path: &str, dir: &str, content: &str, out: &mut Vec<IdeG
                             test_filter: Some(pattern.clone()),
                             debug_program: Some(dir.to_string()),
                             debug_test_name: Some(pattern),
+                            test_path: None,
                         },
                     });
                 }
@@ -293,6 +301,7 @@ pub(super) fn detect_java(path: &str, dir: &str, content: &str, out: &mut Vec<Id
                 kind: IdeGutterKind::Main,
                 label,
                 language: "java".into(),
+                note: None,
                 run_spec: IdeQuickRunSpec {
                     runner: IdeRunnerKind::JavaMain,
                     command: None,
@@ -302,6 +311,7 @@ pub(super) fn detect_java(path: &str, dir: &str, content: &str, out: &mut Vec<Id
                     test_filter: Some(fqcn.clone()),
                     debug_program: Some(fqcn),
                     debug_test_name: None,
+                    test_path: None,
                 },
             });
             pending_test_ann = false;
@@ -357,6 +367,7 @@ fn emit_java_test(
             kind: IdeGutterKind::Suite,
             label: cls_name.to_string(),
             language: "java".into(),
+            note: None,
             run_spec: IdeQuickRunSpec {
                 runner: IdeRunnerKind::JavaJunit,
                 command: None,
@@ -366,6 +377,7 @@ fn emit_java_test(
                 test_filter: Some(fqcn.clone()),
                 debug_program: Some(fqcn.clone()),
                 debug_test_name: Some(fqcn.clone()),
+                test_path: None,
             },
         });
     }
@@ -376,6 +388,7 @@ fn emit_java_test(
         kind: IdeGutterKind::Test,
         label: format!("{cls_name}.{method}"),
         language: "java".into(),
+        note: None,
         run_spec: IdeQuickRunSpec {
             runner: IdeRunnerKind::JavaJunit,
             command: None,
@@ -385,6 +398,7 @@ fn emit_java_test(
             test_filter: Some(selector.clone()),
             debug_program: Some(fqcn),
             debug_test_name: Some(selector),
+            test_path: None,
         },
     });
 }
@@ -401,6 +415,41 @@ fn qualify_java(package_name: &str, class_name: &str) -> String {
 // 2b. Kotlin (`fun main`, JUnit `@Test`/`@ParameterizedTest` incl. backticks,
 //     and Kotest specs: StringSpec, FunSpec, BehaviorSpec, DescribeSpec, etc.)
 // ---------------------------------------------------------------------------
+
+/// A Kotest spec (empty `test_path`), container or test, run and debugged through the
+/// build tool with Kotest's own addressing.
+fn kotest_item(
+    path: &str,
+    dir: &str,
+    fqcn: &str,
+    line: u32,
+    label: String,
+    test_path: Vec<String>,
+    container: bool,
+) -> IdeGutterItem {
+    IdeGutterItem {
+        line,
+        kind: if container {
+            IdeGutterKind::Suite
+        } else {
+            IdeGutterKind::Test
+        },
+        label,
+        language: "kotlin".into(),
+        note: None,
+        run_spec: IdeQuickRunSpec {
+            runner: IdeRunnerKind::Kotest,
+            command: None,
+            args: Vec::new(),
+            cwd: Some(dir.to_string()),
+            target_path: Some(path.to_string()),
+            test_filter: Some(fqcn.to_string()),
+            debug_program: Some(fqcn.to_string()),
+            debug_test_name: None,
+            test_path: Some(test_path),
+        },
+    }
+}
 
 pub(super) fn detect_kotlin(path: &str, dir: &str, content: &str, out: &mut Vec<IdeGutterItem>) {
     static RE_PKG: OnceLock<Regex> = OnceLock::new();
@@ -459,6 +508,20 @@ pub(super) fn detect_kotlin(path: &str, dir: &str, content: &str, out: &mut Vec<
         .unwrap_or("Main");
     let top_level_cls = crate::dap::java_bridge::infer_kotlin_class_stem(file_stem, content);
 
+    for node in crate::gutter::kotest::kotest_tree(content) {
+        let fqcn = qualify_java(&package_name, &node.spec);
+        let label = node.path.join(" -- ");
+        out.push(kotest_item(
+            path,
+            dir,
+            &fqcn,
+            node.line,
+            label,
+            node.path,
+            node.container,
+        ));
+    }
+
     let mut current_class: Option<(String, u32)> = None;
     let mut class_has_tests = false;
     let mut pending_test_ann = false;
@@ -478,24 +541,16 @@ pub(super) fn detect_kotlin(path: &str, dir: &str, content: &str, out: &mut Vec<
             current_class = Some((cls.clone(), line_no));
             class_has_tests = true;
             emitted_suite_line = Some(line_no);
-            // Kotest specs are executed at spec-class granularity via JUnit 5 Platform
-            // (leaf DSL strings are not JUnit method selectors).
-            out.push(IdeGutterItem {
-                line: line_no,
-                kind: IdeGutterKind::Suite,
-                label: cls,
-                language: "kotlin".into(),
-                run_spec: IdeQuickRunSpec {
-                    runner: IdeRunnerKind::JavaJunit,
-                    command: None,
-                    args: Vec::new(),
-                    cwd: Some(dir.to_string()),
-                    target_path: Some(path.to_string()),
-                    test_filter: Some(fqcn.clone()),
-                    debug_program: Some(fqcn.clone()),
-                    debug_test_name: Some(fqcn),
-                },
-            });
+            // The whole spec; its containers and tests follow from the Kotest tree.
+            out.push(kotest_item(
+                path,
+                dir,
+                &fqcn,
+                line_no,
+                cls,
+                Vec::new(),
+                true,
+            ));
         } else if let Some(cap) = re_class.captures(line) {
             let cls = cap[1].to_string();
             current_class = Some((cls, line_no));
@@ -548,6 +603,7 @@ pub(super) fn detect_kotlin(path: &str, dir: &str, content: &str, out: &mut Vec<
                 kind: IdeGutterKind::Main,
                 label,
                 language: "kotlin".into(),
+                note: None,
                 run_spec: IdeQuickRunSpec {
                     runner: IdeRunnerKind::JavaMain,
                     command: None,
@@ -557,6 +613,7 @@ pub(super) fn detect_kotlin(path: &str, dir: &str, content: &str, out: &mut Vec<
                     test_filter: Some(fqcn.clone()),
                     debug_program: Some(fqcn),
                     debug_test_name: None,
+                    test_path: None,
                 },
             });
             pending_test_ann = false;
@@ -619,6 +676,7 @@ fn emit_kotlin_test(
             kind: IdeGutterKind::Suite,
             label: cls_name.to_string(),
             language: "kotlin".into(),
+            note: None,
             run_spec: IdeQuickRunSpec {
                 runner: IdeRunnerKind::JavaJunit,
                 command: None,
@@ -628,6 +686,7 @@ fn emit_kotlin_test(
                 test_filter: Some(fqcn.clone()),
                 debug_program: Some(fqcn.clone()),
                 debug_test_name: Some(fqcn.clone()),
+                test_path: None,
             },
         });
     }
@@ -638,6 +697,7 @@ fn emit_kotlin_test(
         kind: IdeGutterKind::Test,
         label: format!("{cls_name}.{method}"),
         language: "kotlin".into(),
+        note: None,
         run_spec: IdeQuickRunSpec {
             runner: IdeRunnerKind::JavaJunit,
             command: None,
@@ -647,6 +707,7 @@ fn emit_kotlin_test(
             test_filter: Some(selector.clone()),
             debug_program: Some(fqcn),
             debug_test_name: Some(selector),
+            test_path: None,
         },
     });
 }
@@ -721,6 +782,7 @@ pub(super) fn detect_rust(path: &str, dir: &str, content: &str, out: &mut Vec<Id
                     kind,
                     label: fn_name.to_string(),
                     language: "rust".into(),
+                    note: None,
                     run_spec: IdeQuickRunSpec {
                         runner: IdeRunnerKind::CargoTest,
                         command: Some("cargo".into()),
@@ -730,6 +792,7 @@ pub(super) fn detect_rust(path: &str, dir: &str, content: &str, out: &mut Vec<Id
                         test_filter: Some(full_filter.clone()),
                         debug_program: Some(path.to_string()),
                         debug_test_name: Some(full_filter),
+                        test_path: None,
                     },
                 });
             } else if fn_name == "main" && mod_stack.is_empty() {
@@ -738,6 +801,7 @@ pub(super) fn detect_rust(path: &str, dir: &str, content: &str, out: &mut Vec<Id
                     kind: IdeGutterKind::Main,
                     label: "main".into(),
                     language: "rust".into(),
+                    note: None,
                     run_spec: IdeQuickRunSpec {
                         runner: IdeRunnerKind::CargoRun,
                         command: Some("cargo".into()),
@@ -749,6 +813,7 @@ pub(super) fn detect_rust(path: &str, dir: &str, content: &str, out: &mut Vec<Id
                         test_filter: None,
                         debug_program: Some(path.to_string()),
                         debug_test_name: None,
+                        test_path: None,
                     },
                 });
             }
@@ -842,6 +907,7 @@ pub(super) fn detect_zig(path: &str, dir: &str, content: &str, out: &mut Vec<Ide
                 kind: IdeGutterKind::Main,
                 label: "main".into(),
                 language: "zig".into(),
+                note: None,
                 run_spec: IdeQuickRunSpec {
                     runner,
                     command: Some("zig".into()),
@@ -851,6 +917,7 @@ pub(super) fn detect_zig(path: &str, dir: &str, content: &str, out: &mut Vec<Ide
                     test_filter: None,
                     debug_program: Some(path.to_string()),
                     debug_test_name: None,
+                    test_path: None,
                 },
             });
         } else if let Some(cap) = re_test_str.captures(line) {
@@ -870,6 +937,7 @@ pub(super) fn detect_zig(path: &str, dir: &str, content: &str, out: &mut Vec<Ide
                 kind: IdeGutterKind::Test,
                 label: test_name.clone(),
                 language: "zig".into(),
+                note: None,
                 run_spec: IdeQuickRunSpec {
                     runner: IdeRunnerKind::ZigTest,
                     command: Some("zig".into()),
@@ -879,6 +947,7 @@ pub(super) fn detect_zig(path: &str, dir: &str, content: &str, out: &mut Vec<Ide
                     test_filter: Some(test_name.clone()),
                     debug_program: Some(path.to_string()),
                     debug_test_name: Some(test_name),
+                    test_path: None,
                 },
             });
         } else if let Some(cap) = re_test_decl.captures(line) {
@@ -898,6 +967,7 @@ pub(super) fn detect_zig(path: &str, dir: &str, content: &str, out: &mut Vec<Ide
                 kind: IdeGutterKind::Test,
                 label: decl_name.clone(),
                 language: "zig".into(),
+                note: None,
                 run_spec: IdeQuickRunSpec {
                     runner: IdeRunnerKind::ZigTest,
                     command: Some("zig".into()),
@@ -907,6 +977,7 @@ pub(super) fn detect_zig(path: &str, dir: &str, content: &str, out: &mut Vec<Ide
                     test_filter: Some(decl_name.clone()),
                     debug_program: Some(path.to_string()),
                     debug_test_name: Some(decl_name),
+                    test_path: None,
                 },
             });
         }
@@ -973,6 +1044,7 @@ pub(super) fn detect_c_cpp(
                 kind: IdeGutterKind::Main,
                 label: "main".into(),
                 language: lang.to_string(),
+                note: None,
                 run_spec: IdeQuickRunSpec {
                     runner: IdeRunnerKind::CppRun,
                     command: None,
@@ -982,6 +1054,7 @@ pub(super) fn detect_c_cpp(
                     test_filter: None,
                     debug_program: Some(path.to_string()),
                     debug_test_name: None,
+                    test_path: None,
                 },
             });
         } else if let Some(cap) = re_gtest.captures(line) {
@@ -995,6 +1068,7 @@ pub(super) fn detect_c_cpp(
                     kind: IdeGutterKind::Suite,
                     label: suite.clone(),
                     language: lang.to_string(),
+                    note: None,
                     run_spec: IdeQuickRunSpec {
                         runner: IdeRunnerKind::Ctest,
                         command: None,
@@ -1004,6 +1078,7 @@ pub(super) fn detect_c_cpp(
                         test_filter: Some(suite_filter.clone()),
                         debug_program: Some(path.to_string()),
                         debug_test_name: Some(suite_filter),
+                        test_path: None,
                     },
                 });
             }
@@ -1012,6 +1087,7 @@ pub(super) fn detect_c_cpp(
                 kind: IdeGutterKind::Test,
                 label: full.clone(),
                 language: lang.to_string(),
+                note: None,
                 run_spec: IdeQuickRunSpec {
                     runner: IdeRunnerKind::Ctest,
                     command: None,
@@ -1021,6 +1097,7 @@ pub(super) fn detect_c_cpp(
                     test_filter: Some(full.clone()),
                     debug_program: Some(path.to_string()),
                     debug_test_name: Some(full),
+                    test_path: None,
                 },
             });
         } else if let Some(cap) = re_catch.captures(line) {
@@ -1030,6 +1107,7 @@ pub(super) fn detect_c_cpp(
                 kind: IdeGutterKind::Test,
                 label: test_name.clone(),
                 language: lang.to_string(),
+                note: None,
                 run_spec: IdeQuickRunSpec {
                     runner: IdeRunnerKind::Ctest,
                     command: None,
@@ -1039,6 +1117,7 @@ pub(super) fn detect_c_cpp(
                     test_filter: Some(test_name.clone()),
                     debug_program: Some(path.to_string()),
                     debug_test_name: Some(test_name),
+                    test_path: None,
                 },
             });
         }
@@ -1160,6 +1239,7 @@ pub(super) fn detect_csharp(path: &str, dir: &str, content: &str, out: &mut Vec<
                 kind: IdeGutterKind::Main,
                 label: format!("{cls}.Main()"),
                 language: "csharp".into(),
+                note: None,
                 run_spec: IdeQuickRunSpec {
                     runner: IdeRunnerKind::DotnetRun,
                     command: Some("dotnet".into()),
@@ -1169,6 +1249,7 @@ pub(super) fn detect_csharp(path: &str, dir: &str, content: &str, out: &mut Vec<
                     test_filter: None,
                     debug_program: Some(path.to_string()),
                     debug_test_name: None,
+                    test_path: None,
                 },
             });
             pending_test_attr = false;
@@ -1191,6 +1272,7 @@ pub(super) fn detect_csharp(path: &str, dir: &str, content: &str, out: &mut Vec<
                             kind: IdeGutterKind::Suite,
                             label: format!("{cls} (all tests)"),
                             language: "csharp".into(),
+                            note: None,
                             run_spec: IdeQuickRunSpec {
                                 runner: IdeRunnerKind::DotnetTest,
                                 command: Some("dotnet".into()),
@@ -1206,6 +1288,7 @@ pub(super) fn detect_csharp(path: &str, dir: &str, content: &str, out: &mut Vec<
                                 test_filter: Some(fqn_prefix.clone()),
                                 debug_program: Some(path.to_string()),
                                 debug_test_name: Some(fqn_prefix.clone()),
+                                test_path: None,
                             },
                         });
                     }
@@ -1220,6 +1303,7 @@ pub(super) fn detect_csharp(path: &str, dir: &str, content: &str, out: &mut Vec<
                     kind: IdeGutterKind::Test,
                     label: method,
                     language: "csharp".into(),
+                    note: None,
                     run_spec: IdeQuickRunSpec {
                         runner: IdeRunnerKind::DotnetTest,
                         command: Some("dotnet".into()),
@@ -1235,6 +1319,7 @@ pub(super) fn detect_csharp(path: &str, dir: &str, content: &str, out: &mut Vec<
                         test_filter: Some(full_test.clone()),
                         debug_program: Some(path.to_string()),
                         debug_test_name: Some(full_test),
+                        test_path: None,
                     },
                 });
                 pending_test_attr = false;
@@ -1254,6 +1339,7 @@ pub(super) fn detect_csharp(path: &str, dir: &str, content: &str, out: &mut Vec<
                 kind: IdeGutterKind::Main,
                 label: "Program (top-level)".into(),
                 language: "csharp".into(),
+                note: None,
                 run_spec: IdeQuickRunSpec {
                     runner: IdeRunnerKind::DotnetRun,
                     command: Some("dotnet".into()),
@@ -1263,6 +1349,7 @@ pub(super) fn detect_csharp(path: &str, dir: &str, content: &str, out: &mut Vec<
                     test_filter: None,
                     debug_program: Some(path.to_string()),
                     debug_test_name: None,
+                    test_path: None,
                 },
             });
         }
@@ -1311,6 +1398,7 @@ pub(super) fn detect_fsharp(path: &str, dir: &str, content: &str, out: &mut Vec<
                     kind: IdeGutterKind::Main,
                     label: format!("{name} (EntryPoint)"),
                     language: "fsharp".into(),
+                    note: None,
                     run_spec: IdeQuickRunSpec {
                         runner: IdeRunnerKind::DotnetRun,
                         command: Some("dotnet".into()),
@@ -1320,6 +1408,7 @@ pub(super) fn detect_fsharp(path: &str, dir: &str, content: &str, out: &mut Vec<
                         test_filter: None,
                         debug_program: Some(path.to_string()),
                         debug_test_name: None,
+                        test_path: None,
                     },
                 });
                 pending_entry = false;
@@ -1337,6 +1426,7 @@ pub(super) fn detect_fsharp(path: &str, dir: &str, content: &str, out: &mut Vec<
                     kind: IdeGutterKind::Test,
                     label: name.clone(),
                     language: "fsharp".into(),
+                    note: None,
                     run_spec: IdeQuickRunSpec {
                         runner: IdeRunnerKind::DotnetTest,
                         command: Some("dotnet".into()),
@@ -1352,6 +1442,7 @@ pub(super) fn detect_fsharp(path: &str, dir: &str, content: &str, out: &mut Vec<
                         test_filter: Some(name.clone()),
                         debug_program: Some(path.to_string()),
                         debug_test_name: Some(name),
+                        test_path: None,
                     },
                 });
                 pending_test = false;

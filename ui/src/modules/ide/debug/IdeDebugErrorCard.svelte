@@ -26,7 +26,10 @@
     if (!card.ecosystem || installing) return;
     starting = true;
     try {
-      const started = await ide.installToolchain(card.ecosystem, 'dap');
+      // The Unity debugger is a .NET component of its own (it adds .NET 10 when needed).
+      const started = card.ecosystem === 'unity'
+        ? await ide.installToolchain('dotnet', 'unity_dap')
+        : await ide.installToolchain(card.ecosystem, 'dap');
       jobId = started?.id ?? null;
     } finally {
       starting = false;

@@ -66,7 +66,6 @@
 </script>
 
 <script lang="ts">
-  import { pageChrome } from '../lib/stores/pageChrome.svelte';
   // The Side panel (⌘J), on every page. One component in both states: the
   // vertical icon rail is always there (VS Code activity bar); clicking an
   // icon opens that tab's content beside the rail, clicking the shown tab
@@ -90,21 +89,6 @@
   import { loadErrorText } from '../lib/loadError';
   import { onDestroy, untrack } from 'svelte';
   import { reloadForStaleChunk } from '../lib/staleChunk';
-  import LazyMount from '../lib/components/LazyMount.svelte';
-  import { lazyComponent } from '../lib/lazy-component.svelte';
-  import { router } from '../lib/router.svelte';
-  // On Agents the panel opens on the session's details card (A5) — Threads'
-  // card (folder, branch, changes with commit → push → PR, context, MCP,
-  // subagents). Its own chunk, loaded only once the panel is open.
-  const SessionDetails = lazyComponent(() => import('../modules/agents/SessionDetailsCard.svelte'));
-  // A focused chat pane gets the card too (its folder comes from its thread row, read by the card's chunk).
-  const details = $derived.by(() => {
-    if (router.module !== 'agents' && router.module !== '') return null;
-    const id = ws.activeSessionId;
-    if (id && ws.threadPanes.includes(id)) return { threadId: id, cwd: null };
-    const s = rightPanel.session ? ws.getSession(id) : null;
-    return s?.cwd ? { threadId: s.id, cwd: s.cwd } : null;
-  });
 
   // `forceOpen` is set when the panel is hosted inside the mobile right drawer:
   // it then always shows content, fills the drawer width (no fixed width), and
@@ -155,7 +139,7 @@
 
   // Closing the panel unmounts (or hides) whatever had focus inside it — the
   // Collapse button, the notes textarea on ⌘J. Hand focus to the rail button
-  // of the tab that was showing (DockedDrawer's "refocus the opener" rule), but
+  // of the tab that was showing (DetailPane's "refocus the opener" rule), but
   // only when focus was in the panel or fell to <body>: a ⌘J from elsewhere
   // leaves focus where it is.
   let asideEl = $state<HTMLElement | null>(null);
@@ -378,8 +362,6 @@
   />
 {/if}
 
-<!-- A page may hide the rail (Threads) until the person opens the panel. -->
-{#if !pageChrome.hideSideRail || open || forceOpen}
 <div class="rside" class:embedded={forceOpen}>
   {#if open || browserKept}
     <aside
@@ -426,8 +408,8 @@
         {/if}
       </header>
 
-      {#if shown && FOLDER_TABS.has(shown) && !(open && !pageTab && details)}
-        <!-- Which folder Git / Files work in: the session's (the details card names it), or a pickable one. -->
+      {#if shown && FOLDER_TABS.has(shown)}
+        <!-- Which folder Git / Files work in: the session's, or a pickable one. -->
         <div class="rpanel-folder">
           {#if rightPanel.session}
             <span class="folder-label" title={folder}>
@@ -452,12 +434,7 @@
         </div>
       {/if}
 
-      <div class="rpanel-body" class:has-card={open && !pageTab && !!details}>
-        {#if open && !pageTab && details}
-          <div class="rpanel-card" data-testid="agents-details-card">
-            <LazyMount lazy={SessionDetails} what="the session details" variant="compact" props={details} />
-          </div>
-        {/if}
+      <div class="rpanel-body">
         {#if pageTab}
           {@const PagePanel = pageTab.component}
           <PagePanel {...pageTab.props ?? {}} />
@@ -532,23 +509,8 @@
     {/each}
   </div>
 </div>
-{/if}
 
 <style>
-  .rpanel-card {
-    flex-shrink: 0;
-    padding: var(--sp-3) var(--sp-4) 0;
-  }
-  /* Under the card a panel (most fill the body with height: 100%) gets what
-     is left, so its own scroller and footer stay inside the viewport. */
-  .rpanel-body.has-card {
-    display: flex;
-    flex-direction: column;
-  }
-  .rpanel-body.has-card > :global(:not(.rpanel-card)) {
-    flex: 1 1 auto;
-    min-height: 0;
-  }
   .rside {
     height: 100%;
     display: flex;

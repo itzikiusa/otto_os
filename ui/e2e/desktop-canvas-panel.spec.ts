@@ -61,7 +61,7 @@ test('Canvas panel: attach a scene, preview it, open it in Design Hall, detach',
   // Attach the seeded scene via the picker.
   await panel.getByRole('button', { name: /Attach scene/i }).click();
   await panel.locator('.candidates').getByRole('button', { name: SCENE_TITLE }).click();
-  const row = panel.locator('.ref-row', { hasText: SCENE_TITLE });
+  const row = panel.locator('.scene-row', { hasText: SCENE_TITLE });
   await expect(row).toBeVisible({ timeout: 15_000 });
   await expect(row.locator('.badge')).toHaveText('mermaid');
 
@@ -74,8 +74,8 @@ test('Canvas panel: attach a scene, preview it, open it in Design Hall, detach',
   await ctx.dispose();
 
   // Expand — the inline SVG preview renders from the scene's live source.
-  await row.locator('.ref-title').click();
-  await expect(row.locator('.ref-preview svg').first()).toBeVisible({ timeout: 20_000 });
+  await row.locator('.scene-title').click();
+  await expect(row.locator('.scene-preview svg').first()).toBeVisible({ timeout: 20_000 });
 
   // "Open in Design Hall" opens the scene's Hall mirror (the Canvas page folded
   // into Design Hall): read-only there until someone presses Edit here.
@@ -89,7 +89,7 @@ test('Canvas panel: attach a scene, preview it, open it in Design Hall, detach',
   // is routed through differently.
   await page.getByTestId('rail-back').click();
   await expect(page.locator('.term-host').first()).toBeVisible({ timeout: 20_000 });
-  const rowAfterBack = page.locator('.canvas-panel .ref-row', { hasText: SCENE_TITLE });
+  const rowAfterBack = page.locator('.canvas-panel .scene-row', { hasText: SCENE_TITLE });
   await expect(rowAfterBack).toBeVisible({ timeout: 15_000 });
 
   // Detach — the row disappears and the empty state returns.
@@ -121,7 +121,7 @@ test('Canvas panel: a live API attach (canvas_refs_changed) updates the panel wi
 
   // The daemon broadcasts `canvas_refs_changed` over /ws/events; the panel's
   // canvasRefsBus subscriber refetches on its own — no reload, no user action.
-  await expect(panel.locator('.ref-row', { hasText: SCENE_TITLE })).toBeVisible({
+  await expect(panel.locator('.scene-row', { hasText: SCENE_TITLE })).toBeVisible({
     timeout: 15_000,
   });
 });

@@ -195,6 +195,8 @@ export type IdeRunnerKind =
   | 'xcode'
   | 'flutter'
   | 'react_native'
+  | 'unity_attach'
+  | 'kotest'
   | 'compound'
   | 'custom';
 
@@ -210,6 +212,8 @@ export interface IdeQuickRunSpec {
   debug_program?: string | null;
   debug_test_name?: string | null;
   language?: string | null;
+  /** Kotest: the names from the spec down to the container or test (empty: the whole spec). */
+  test_path?: string[] | null;
 }
 
 export interface IdeGutterItem {
@@ -218,6 +222,8 @@ export interface IdeGutterItem {
   label: string;
   language: string;
   run_spec: IdeQuickRunSpec;
+  /** A one-line note the item's menu shows (why a Kotest spec has no test items). */
+  note?: string | null;
 }
 
 export interface IdeGutterResp {
@@ -241,7 +247,7 @@ export type IdeEcosystem =
   | 'ios'
   | 'android'
   | 'flutter';
-export type IdeInstallComponent = 'sdk' | 'lsp' | 'dap' | 'all';
+export type IdeInstallComponent = 'sdk' | 'lsp' | 'dap' | 'unity_dap' | 'all';
 
 export interface IdeInstalledSdk {
   id: string;
@@ -291,6 +297,8 @@ export interface IdeToolchainEcosystem {
   installed: IdeInstalledSdk[];
   lsp_status: IdeToolStatus;
   dap_status: IdeToolStatus;
+  /** .NET on this Mac: the Unity debugger, installed with `component: 'unity_dap'`. */
+  unity_dap_status?: IdeToolStatus | null;
   downloadable: IdeDownloadableSdk[];
 }
 
@@ -475,6 +483,8 @@ export interface IdeRunConfig {
   before_launch?: string | null;
   target_path?: string | null;
   test_filter?: string | null;
+  /** Kotest: the names from the spec (`test_filter`) down to the container or test; gutter runs only. */
+  test_path?: string[];
   maven_profiles?: string[];
   spring_profiles?: string[];
   skip_tests?: boolean;
@@ -497,47 +507,6 @@ export interface IdeEnvironmentsResp {
   detected_configs?: IdeRunConfig[];
   effective_env?: Record<string, string>;
   accelerators?: IdeMlAcceleratorInfo[];
-}
-
-export interface IdeNotebookKernelInfo {
-  id: string;
-  display_name: string;
-  language: string;
-  interpreter: string;
-  kind: 'venv' | 'uv' | 'conda' | 'poetry' | 'system' | string;
-  version?: string | null;
-  active: boolean;
-}
-
-export interface IdeNotebookVariable {
-  name: string;
-  var_type: string;
-  shape?: string | null;
-  preview: string;
-}
-
-export interface IdeNotebookKernelsResp {
-  kernels: IdeNotebookKernelInfo[];
-  accelerators: IdeMlAcceleratorInfo[];
-  active_session_id?: string | null;
-  active_interpreter?: string | null;
-  execution_count?: number;
-}
-
-export interface IdeNotebookExecuteResp {
-  session_id: string;
-  interpreter: string;
-  execution_count: number;
-  status: 'ok' | 'error' | string;
-  elapsed_ms: number;
-  outputs: Record<string, unknown>[];
-  variables: IdeNotebookVariable[];
-}
-
-export interface IdeNotebookVariablesResp {
-  session_id?: string | null;
-  execution_count?: number;
-  variables: IdeNotebookVariable[];
 }
 
 export interface IdeUpdateEnvironmentReq extends IdeProjectEnvironment {
@@ -625,28 +594,6 @@ export interface IdeBreakpoint {
   message?: string | null;
 }
 
-export interface IdeDebugLaunch {
-  program: string;
-  args?: string[];
-  build_flags?: string[];
-  cwd?: string | null;
-  test_name?: string | null;
-  is_test?: boolean;
-  attach_port?: number | null;
-  attach_pid?: number | null;
-  attach_process_name?: string | null;
-  core_file?: string | null;
-  env?: Record<string, string>;
-  env_file?: string | null;
-  inherit_shell_env?: boolean;
-  sdk_path?: string | null;
-  maven_profiles?: string[];
-  spring_profiles?: string[];
-  skip_tests?: boolean;
-  offline?: boolean;
-}
-export type IdeDebugLaunchSpec = IdeDebugLaunch;
-
 export interface IdeStartDebugReq {
   target: IdeTargetSpec;
   language: string;
@@ -665,30 +612,6 @@ export interface IdeStartDebugReq {
 export interface IdeSetBreakpointsReq {
   breakpoints: IdeBreakpoint[];
   break_on_exceptions?: boolean;
-}
-
-export interface IdeDebugCommandReq {
-  action: IdeDebugAction;
-  thread_id?: number | null;
-  frame_id?: number | null;
-  path?: string | null;
-  line?: number | null;
-}
-
-export interface IdeDebugVariablesReq {
-  variables_reference: number;
-}
-
-export interface IdeDebugEvaluateReq {
-  expression: string;
-  frame_id?: number | null;
-  context?: string | null;
-}
-
-export interface IdeDebugSetVariableReq {
-  variables_reference: number;
-  name: string;
-  value: string;
 }
 
 export type IdeDebugState = 'starting' | 'running' | 'paused' | 'terminated' | 'error';
@@ -728,12 +651,8 @@ export interface IdeInlineValue {
   value: string;
 }
 
-export interface IdeDebugOutput {
-  category: 'stdout' | 'stderr' | 'console' | string;
-  text: string;
-  /** Monotonic per-session position (1-based, never reused); absent on older daemons. */
-  seq?: number;
-}
+export type { IdeDebugLaunch, IdeDebugLaunchSpec, IdeDebugOutput, IdeDebugTarget } from './ide-debug';
+import type { IdeDebugLaunch, IdeDebugOutput, IdeDebugTarget } from './ide-debug';
 
 export interface IdeDebugSessionSnapshot {
   id: string;
@@ -769,18 +688,17 @@ export interface IdeDebugSessionSnapshot {
   error_ecosystem?: string | null;
   /** Root of the IDE target the session was launched from. */
   target_root?: string | null;
+  /** Debug All runs: one step per test project / framework or test suite, in run order. */
+  steps?: IdeDebugStep[];
+  /** Index into `steps` of the step that runs now. */
+  current_step?: number | null;
+  /** js-debug sessions (Playwright, Karma): one entry per debugged process. */
+  targets?: IdeDebugTarget[];
 }
 
-export type IdeDebugAction =
-  | 'continue'
-  | 'pause'
-  | 'step_over'
-  | 'step_into'
-  | 'step_out'
-  | 'run_to_cursor'
-  | 'select_frame'
-  | 'restart'
-  | 'stop';
+
+export type { IdeDebugAction, IdeDebugCommandReq, IdeDebugEvaluateReq, IdeDebugSetVariableReq, IdeDebugStep, IdeDebugStepState, IdeDebugVariablesReq } from './ide-debug-steps';
+import type { IdeDebugStep } from './ide-debug-steps';
 
 export interface IdeDebugSessionResp { session: IdeDebugSessionSnapshot; }
 export interface IdeDebugSessionsResp { sessions: IdeDebugSessionSnapshot[]; }

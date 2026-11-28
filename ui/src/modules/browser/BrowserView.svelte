@@ -37,6 +37,8 @@
   import BrowserSummary from './BrowserSummary.svelte';
   import ReaderView from './ReaderView.svelte';
   import NotesRail from './NotesRail.svelte';
+  import DetailPane from '../../lib/components/side/DetailPane.svelte';
+  import Tabs from '../../lib/components/Tabs.svelte';
   import AgentDock from './AgentDock.svelte';
   import AskBar from './AskBar.svelte';
   import BrowserUrlBar from './BrowserUrlBar.svelte';
@@ -155,10 +157,9 @@
     void browser.loadAnnotations(url);
   });
 
-  // Marks rail visibility: auto-opens when the page has marks (or user clicks
-  // the Marks toggle), and stays collapsed when empty so narrow embedded panels
-  // and Reader view don't lose 260px to an empty rail.
+  // Detail pane: Marks (auto when it fits inline) and the Agent (remembered; first while open).
   let marksRailOverride = $state<boolean | null>(null);
+  let marksSheet = $state(false);
   let lastMarksTabId = $state<string | null>(null);
   $effect(() => {
     const id = browser.activeId;
@@ -171,10 +172,19 @@
     !!activeLive || (!!activeRemote && browserLive.ready) || !!browser.page,
   );
   const showMarksRail = $derived(
-    canShowMarksRail && (marksRailOverride ?? browser.annotations.length > 0),
+    canShowMarksRail && (marksRailOverride ?? (browser.annotations.length > 0 && !marksSheet)),
   );
-  function closeMarksRail(): void {
-    marksRailOverride = false;
+  let paneView = $state<'marks' | 'agent'>('agent');
+  let agentPicked = $state(false); // a sheet (no room inline) opens only when asked for
+  const agentShown = $derived(!embedded && ui.browserAgentOpen && (!marksSheet || agentPicked));
+  const view = $derived(agentShown && (paneView === 'agent' || !showMarksRail) ? 'agent' : 'marks');
+  function showView(v: 'marks' | 'agent', on = true): void {
+    if (v === 'marks') marksRailOverride = on; else ui.setBrowserAgentOpen((agentPicked = on));
+    paneView = v;
+  }
+  const toggleView = (v: 'marks' | 'agent') => showView(v, !(view === v && (v === 'marks' ? showMarksRail : agentShown)));
+  function closePane(): void {
+    marksRailOverride = false; if (!embedded) ui.setBrowserAgentOpen(false);
     urlBar?.focusMarksToggle();
   }
 
@@ -717,7 +727,8 @@
       inspectorOpen,
       mirroredSim,
       canShowMarksRail,
-      showMarksRail,
+      showMarksRail: showMarksRail && view === 'marks',
+      showAgent: agentShown && view === 'agent',
     }}
     actions={{
       onUrlInput: (v) => (urlInput = v),
@@ -735,7 +746,8 @@
       simulators: openSimulators,
       summarize: () => void doSummarize(),
       vaultSave: (e) => void doVaultSave(e),
-      toggleMarksRail: () => (marksRailOverride = !showMarksRail),
+      toggleMarksRail: () => toggleView('marks'),
+      toggleAgent: embedded ? undefined : () => toggleView('agent'),
     }}
   />
 
@@ -801,22 +813,22 @@
     {#if mirroredSim}
       <LazyMount lazy={SimulatorView} what="the simulator view" variant="panel" props={{ device: mirroredSim, currentUrl: browser.activeTab?.url ?? '', split: simSplit, ontogglesplit: () => (simSplit = !simSplit), ondevicechange: (d: SimDevice) => (mirroredSim = d), onclose: () => (mirroredSim = null) }} />
     {/if}
-    {#if showMarksRail}
-      <div class="notes-wrap mobile-open">
-        <NotesRail
-          annotations={browser.annotations}
-          liveMode={!!activeLive || !!activeRemote}
-          onclose={closeMarksRail}
-          onfocusmark={!activeLive && !activeRemote && browser.page ? (sel) => readerView?.scrollToMark(sel) : undefined}
-        />
-      </div>
+    {#if canShowMarksRail || !embedded}
+      <DetailPane module="browser" pane="detail" title={view === 'agent' ? 'Agent' : 'Marks'} open={showMarksRail || agentShown} bind:sheet={marksSheet}
+        onclose={closePane} ontoggle={() => (showMarksRail || agentShown ? closePane() : showView(embedded ? 'marks' : 'agent'))} testid="browser-pane">
+        {#snippet views()}
+          <Tabs label="Marks or agent" value={view} onchange={(v) => showView(v)} idBase="brw-pane"
+            tabs={[...(canShowMarksRail ? [{ id: 'marks' as const, label: 'Marks', count: browser.annotations.length }] : []), ...(embedded ? [] : [{ id: 'agent' as const, label: 'Agent' }])]} />
+        {/snippet}
+        <div class="pane-view" hidden={view !== 'marks'}><NotesRail annotations={browser.annotations} liveMode={!!activeLive || !!activeRemote}
+          onfocusmark={!activeLive && !activeRemote && browser.page ? (sel) => readerView?.scrollToMark(sel) : undefined} /></div>
+        {#if !embedded}<div class="pane-view" hidden={view !== 'agent'}><AgentDock /></div>{/if}
+      </DetailPane>
     {/if}
   </div>
 
   {#if embedded}
     <AskBar sessionId={targetSessionId} unboundHint="Open an agent session to ask about this page." />
-  {:else}
-    <AgentDock />
   {/if}
 </div>
 
@@ -851,31 +863,19 @@
 
 <style>
   .browser {
-    container-type: inline-size;
     display: flex;
     flex-direction: column;
     height: 100%;
     min-height: 0;
     min-width: 0;
   }
-  .body {
-    flex: 1;
-    display: flex;
-    min-height: 0;
-    min-width: 0;
-    position: relative;
-  }
+  .body,
   .web-pane {
     flex: 1;
     display: flex;
     min-height: 0;
     min-width: 0;
     position: relative;
-  }
-  .notes-wrap {
-    display: flex;
-    min-height: 0;
-    flex-shrink: 0;
   }
   @media (max-width: 640px) {
     .body.sim-split {
@@ -886,15 +886,9 @@
     .web-pane {
       flex-direction: column;
     }
-    .notes-wrap:not(.mobile-open) {
-      display: none;
-    }
   }
-  @container (max-width: 640px) {
-    .body {
-      flex-direction: column;
-    }
-  }
+  .pane-view { flex: 1; display: flex; flex-direction: column; min-height: 0; }
+  .pane-view[hidden] { display: none; }
   .live-note {
     position: absolute;
     inset-inline: 12px;

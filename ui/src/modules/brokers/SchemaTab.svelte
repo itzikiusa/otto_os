@@ -1,8 +1,10 @@
 <script lang="ts">
   import { api } from '../../lib/api/client';
   import LoadState from '../../lib/components/LoadState.svelte';
-  import Skeleton from '../../lib/components/Skeleton.svelte';
   import Tabs from '../../lib/components/Tabs.svelte';
+  import EmptyState from '../../lib/components/EmptyState.svelte';
+  import ListDetail from '../../lib/components/side/ListDetail.svelte';
+  import ListPane from '../../lib/components/side/ListPane.svelte';
   import { loadErrorText } from '../../lib/loadError';
   import { TableWindow } from '../../lib/tableWindow.svelte';
   import type { BrokerCluster, SchemaSubject } from '../../lib/api/types';
@@ -20,6 +22,13 @@
   let selected = $state.raw<SchemaSubject | null>(null);
   // Toggle to show version history / compat panel for the selected subject.
   let showVersions = $state(false);
+  // Phone: the subject list is the page until one is tapped (pushed, "‹ Subjects").
+  let phoneOpen = $state(false);
+  function pick(s: SchemaSubject): void {
+    selected = s;
+    showVersions = false;
+    phoneOpen = true;
+  }
 
   // Window the subject list (SC-03): thousands of subjects mount only the
   // visible slice between two spacers.
@@ -67,11 +76,8 @@
   });
 </script>
 
-<div class="schema-host">
-<div class="schema">
-  {#if loading}
-    <div class="pad"><Skeleton rows={6} label="schema subjects" /></div>
-  {:else if error}
+<div class="schema-host schema">
+  {#if error && !loading}
     <div class="empty">
       {#if cluster.schema_registry_url}
         <!-- A registry IS configured: this is a real failure — say so, with Retry. -->
@@ -84,97 +90,68 @@
       {/if}
     </div>
   {:else}
-    <div
-      class="list"
-      class:windowed={tw.active(subjects.length)}
-      bind:this={listEl}
-      bind:clientHeight={tw.viewH}
-      onscroll={tw.onscroll}
-    >
-      {#if win.top}<div class="tw-spacer" aria-hidden="true" style="height:{win.top}px"></div>{/if}
-      {#each subjects.slice(win.start, win.end) as s (s.subject)}
-        <button
-          class="srow"
-          class:sel={selected?.subject === s.subject}
-          onclick={() => { selected = s; showVersions = false; }}
-        >
-          <span class="sn" title={s.subject}>{s.subject}</span>
-          <span class="muted small">v{s.version} · {s.schema_type} · #{s.id}</span>
-        </button>
-      {/each}
-      {#if win.bottom}<div class="tw-spacer" aria-hidden="true" style="height:{win.bottom}px"></div>{/if}
-      {#if subjects.length === 0}<p class="muted pad">No subjects in this registry.</p>{/if}
-    </div>
-    <div class="view">
-      {#if selected}
-        <div class="view-head">
-          <span class="sn-big">{selected.subject}</span>
-          <div class="view-tabs">
-            <Tabs
-              label="Subject views"
-              size="s"
-              tabs={[{ id: 'schema', label: 'Schema' }, { id: 'versions', label: 'Versions & Compat' }]}
-              value={showVersions ? 'versions' : 'schema'}
-              onchange={(id) => (showVersions = id === 'versions')}
-            />
+    <ListDetail module="brokers" pane="subjects" name="Subjects" open={phoneOpen && !!selected} onback={() => (phoneOpen = false)} empty={!loading && subjects.length === 0}>
+      {#snippet list()}
+        <ListPane count={subjects.length} {loading} menu={() => [{ label: 'Refresh', icon: 'refresh', action: load }]} testid="brokers-subjects-list">
+          <div
+            class="list"
+            class:windowed={tw.active(subjects.length)}
+            bind:this={listEl}
+            bind:clientHeight={tw.viewH}
+            onscroll={tw.onscroll}
+          >
+            {#if win.top}<div class="tw-spacer" aria-hidden="true" style="height:{win.top}px"></div>{/if}
+            {#each subjects.slice(win.start, win.end) as s (s.subject)}
+              {@const sel = selected?.subject === s.subject}
+              <div class="side-row two-line" class:selected={sel}>
+                <button type="button" class="side-row-main srow" data-side-row aria-current={sel ? 'true' : undefined} onclick={() => pick(s)}>
+                  <span class="side-row-text">
+                    <span class="side-row-title sn" title={s.subject}>{s.subject}</span>
+                    <span class="side-row-meta">v{s.version} · {s.schema_type} · #{s.id}</span>
+                  </span>
+                </button>
+              </div>
+            {/each}
+            {#if win.bottom}<div class="tw-spacer" aria-hidden="true" style="height:{win.bottom}px"></div>{/if}
           </div>
-        </div>
-        {#if showVersions}
-          <SchemaVersionsPanel cluster={cluster} subject={selected.subject} />
-        {:else}
-          <pre class="payload" dir="ltr">{prettySchema(selected)}</pre>
+        </ListPane>
+      {/snippet}
+      <div class="view">
+        {#if selected}
+          <div class="view-head">
+            <span class="sn-big">{selected.subject}</span>
+            <div class="view-tabs">
+              <Tabs
+                label="Subject views"
+                size="s"
+                tabs={[{ id: 'schema', label: 'Schema' }, { id: 'versions', label: 'Versions & Compat' }]}
+                value={showVersions ? 'versions' : 'schema'}
+                onchange={(id) => (showVersions = id === 'versions')}
+              />
+            </div>
+          </div>
+          {#if showVersions}
+            <SchemaVersionsPanel cluster={cluster} subject={selected.subject} />
+          {:else}
+            <pre class="payload" dir="ltr">{prettySchema(selected)}</pre>
+          {/if}
+        {:else if !loading && subjects.length === 0}
+          <EmptyState icon="file" title="No subjects in this registry" body="Subjects appear here once producers register a schema." />
         {/if}
-      {/if}
-    </div>
+      </div>
+    </ListDetail>
   {/if}
 </div>
 
-</div>
 <style>
-  .schema-host { container-type: inline-size; height: 100%; min-height: 0; min-width: 0; }
-  .schema {
-    display: flex;
-    height: 100%;
-    min-height: 0;
-  }
+  .schema-host { display: flex; height: 100%; min-height: 0; min-width: 0; }
+  /* The windowed scroller fills the list pane's body. */
   .list {
-    width: 300px;
-    max-width: 40%;
-    flex-shrink: 0;
-    border-inline-end: 1px solid var(--border);
-    overflow: auto;
-  }
-  .srow {
-    width: 100%;
-    text-align: start;
-    border: none;
-    background: transparent;
-    padding: 8px 12px;
-    display: flex;
-    flex-direction: column;
-    gap: 2px;
-    cursor: pointer;
-    border-inline-start: 2px solid transparent;
-  }
-  .srow:hover {
-    background: var(--hover);
-  }
-  .srow.sel {
-    background: var(--accent-soft);
-    border-inline-start-color: var(--accent);
+    block-size: 100%;
+    overflow-y: auto;
   }
   .sn {
     font-family: var(--font-mono);
-    font-size: var(--fs-m);
-    word-break: break-all;
-  }
-  /* Windowed rows must be uniform: one-line names (full name in the title
-     and the detail header). */
-  .list.windowed .sn {
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    word-break: normal;
   }
   .view {
     min-width: 0;
@@ -215,6 +192,7 @@
     word-break: break-word;
   }
   .empty {
+    flex: 1;
     padding: 28px;
     text-align: center;
     color: var(--text-dim);
@@ -224,25 +202,5 @@
   }
   .small {
     font-size: var(--fs-xs);
-  }
-  .pad {
-    padding: 12px;
-  }
-
-  /* Stack by available pane width, including tablets and embedded panels. */
-  @container (max-width: 760px) {
-    .schema {
-      flex-direction: column;
-    }
-    .list {
-      width: 100%;
-      max-width: none;
-      max-height: 25vh;
-      border-inline-end: none;
-      border-bottom: 1px solid var(--border);
-    }
-    .view {
-      min-height: 200px;
-    }
   }
 </style>

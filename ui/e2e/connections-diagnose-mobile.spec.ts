@@ -26,12 +26,17 @@ test('the diagnosis thread is a full-height sheet on small screens', async ({ pa
   await expect(aside.locator('[data-testid="runtime-thread-rt-diag-1"]')).toBeVisible({ timeout: 15_000 });
   const vw = page.viewportSize();
   const box = await aside.boundingBox();
-  if (vw && box && vw.width <= 1024) {
+  // A phone: a full-screen sheet. A tablet: a right sheet (the Detail pane
+  // has no room beside the workbench), full height, at the window's end edge.
+  if (vw && box && vw.width <= 640) {
     expect(Math.round(box.height)).toBeGreaterThanOrEqual(vw.height - 2);
     expect(Math.round(box.width)).toBeGreaterThanOrEqual(vw.width - 2);
+  } else if (vw && box && vw.width <= 1024) {
+    expect(Math.round(box.height)).toBeGreaterThanOrEqual(vw.height * 0.9);
+    expect(Math.round(box.x + box.width)).toBeGreaterThanOrEqual(vw.width - 2);
   }
-  await expectFullyInViewport(page, aside.getByRole('button', { name: 'Close — the thread is kept' }), 'the sheet’s Close');
-  await aside.getByRole('button', { name: 'Close — the thread is kept' }).click();
+  await expectFullyInViewport(page, page.getByTestId('diagnose-aside-close'), 'the sheet’s Close');
+  await page.getByTestId('diagnose-aside-close').click();
   await expect(aside).toHaveCount(0);
   await f.dispose();
 });

@@ -257,7 +257,7 @@ test.describe('IDE dialogs on a phone', () => {
     await page.keyboard.press('Escape');
   });
 
-  test('tablet: the IDE folds the navigator to its rail and gets the workbench; leaving restores it', async ({ page }, info) => {
+  test('tablet: the Rail (the tablet default) leaves the IDE its workbench; leaving keeps the choice', async ({ page }, info) => {
     test.skip(!TABLETS.includes(info.project.name), 'tablets');
     test.setTimeout(90_000);
     seed ??= await seedWorkspace('lh');
@@ -270,7 +270,7 @@ test.describe('IDE dialogs on a phone', () => {
     await expectNoHorizontalOverflow(page);
     await shot(page, '09-tablet-workbench', ['dark', 'light']);
     await page.goto('/#/agents');
-    if (tabletShell) await expect(page.locator('.sidebar.msidebar')).not.toHaveClass(/\bmfolded\b/, { timeout: 10_000 });
+    if (tabletShell) await expect(page.locator('.sidebar.msidebar')).toHaveClass(/\bmfolded\b/, { timeout: 10_000 });
     await shot(page, '10-tablet-left-ide');
   });
 });

@@ -1,7 +1,7 @@
 <script lang="ts">
   // GoLand-style Run / Debug configuration selector & execution cluster:
   // `[Config Selector ▾] [▶ Run] [🐞 Debug] [⏹ Stop] [⚙]`. Coverage lives in
-  // the IDE ⋯ menu. `compact` (the stacked phone layout) keeps only Run/Stop:
+  // the IDE ⋯ menu. `compact` (the stacked phone layout) keeps only Run/Stop, as an icon:
   // Debug, Coverage and the configs move to ⋯ so the header stays one row.
   import Icon from '../../../lib/components/Icon.svelte';
   import LazyMount from '../../../lib/components/LazyMount.svelte';
@@ -9,6 +9,8 @@
   import { GUTTER_TARGET_ID, ide, type IdeRunConfig } from '../ideStore.svelte';
   import { ideDevices } from '../devices/ideDevicesState.svelte';
   import { launchSelectorLabel } from '../store/ideLaunchTarget';
+  import { ATTACH_ONLY_TITLE, UNITY_ATTACH_RUNNER, unityTargetLabel } from '../debug/ideUnityAttach';
+  import { unityAttach } from '../debug/ideUnityState.svelte';
   import { ideLayout } from './ideLayout.svelte';
   import { bridgeEnvCache } from './networkBridgeGuard.svelte';
   import { formatBridgeToolbarLabel } from './networkBridgeModel';
@@ -30,7 +32,11 @@
   const selectedConfig = $derived<IdeRunConfig | null>(
     ide.runConfigs.find((c) => c.id === ide.selectedConfigId) ?? null,
   );
-  const selectorLabel = $derived(gutterTarget?.label.replace(/^Run /, '') || launchSelectorLabel(selectedConfig, ide.activeTab));
+  const attachOnly = $derived(selectedConfig?.runner === UNITY_ATTACH_RUNNER);
+  const selectorLabel = $derived(
+    gutterTarget?.label.replace(/^Run /, '')
+      || (attachOnly && selectedConfig ? unityTargetLabel(selectedConfig.name, unityAttach.editors) : launchSelectorLabel(selectedConfig, ide.activeTab)),
+  );
   const bridgeLabel = $derived(
     ide.target.kind === 'local' ? formatBridgeToolbarLabel(ide.projectEnv?.network_bridge) : null,
   );
@@ -105,9 +111,10 @@
     <button
       type="button"
       class="btn small"
-      class:primary={!isRunning && !isDebugging}
+      class:primary={!isRunning && !isDebugging && !attachOnly}
+      disabled={attachOnly}
       onclick={() => void ide.startRun()}
-      title="Run selected target (⌃R)"
+      title={attachOnly ? ATTACH_ONLY_TITLE : 'Run selected target (⌃R)'}
       data-testid="ide-run-btn"
     >
       <Icon name="play" size={12} />
@@ -177,29 +184,32 @@
       <span class="run-bridge-prod">PROD</span>
     </button>
   {/if}
+  <!-- The phone header row holds icon actions only (one 46 px row): Run / Stop is an
+       icon with its name for assistive tech, coloured as the primary action. -->
   {#if isRunning || isDebugging}
     <button
       type="button"
-      class="btn small primary"
+      class="icon-btn run-compact is-stop"
       data-keep
+      aria-label="Stop"
       onclick={() => void ide.stopActiveExecution()}
       title="Stop active session"
       data-testid="ide-stop-btn"
     >
-      <Icon name="stop" size={12} />
-      Stop
+      <Icon name="stop" size={16} />
     </button>
   {:else}
     <button
       type="button"
-      class="btn small primary"
+      class="icon-btn run-compact"
       data-keep
+      aria-label="Run"
+      disabled={attachOnly}
       onclick={() => void ide.startRun()}
-      title="Run selected target"
+      title={attachOnly ? ATTACH_ONLY_TITLE : 'Run selected target'}
       data-testid="ide-run-btn"
     >
-      <Icon name="play" size={12} />
-      Run
+      <Icon name="play" size={16} />
     </button>
   {/if}
 {/if}
@@ -241,6 +251,8 @@
   .run-device-btn:hover { border-color: var(--border-strong); color: var(--text); background: var(--hover); }
   .run-device-btn.is-booted { color: var(--success); border-color: color-mix(in srgb, var(--success) 35%, transparent); background: var(--success-soft); }
   .run-cluster.is-narrow .run-cfg-btn { max-inline-size: 124px; }
+  .run-compact { color: var(--accent-text); }
+  .run-compact.is-stop { color: var(--danger); }
   @media (max-width: 1024px) {
     .run-cfg-btn { max-inline-size: 150px; }
     .run-bridge-btn { max-inline-size: 136px; }

@@ -11,7 +11,10 @@ pub(crate) mod discovery;
 mod installer;
 pub(crate) mod installer_remote;
 pub(crate) mod installer_tools;
+pub(crate) mod installer_unity;
 mod jobs;
+mod llvm_install;
+pub(crate) mod llvm_manifest;
 mod local_registry;
 pub(crate) mod remote_probe;
 
@@ -433,6 +436,15 @@ impl ToolchainManager {
                             .map(|s| PathBuf::from(&s.path));
                         mark_go_tool_outdated(&mut lsp_status, goroot.as_deref());
                         mark_go_tool_outdated(&mut dap_status, goroot.as_deref());
+                    } else if eco == EcosystemKind::Cpp {
+                        if let Some(clangd) = env_clone
+                            .as_ref()
+                            .and_then(|e| e.cpp_toolchain.as_deref())
+                            .and_then(|tc| discovery::cpp_toolchain_clangd(tc, None))
+                        {
+                            lsp_status.available = true;
+                            lsp_status.path = Some(clangd.to_string_lossy().into_owned());
+                        }
                     } else if eco == EcosystemKind::Zig {
                         let active_zig = installed.iter().find(|s| s.active);
                         let active_path = active_zig.map(|s| PathBuf::from(&s.path));
@@ -482,6 +494,8 @@ impl ToolchainManager {
                         installed,
                         lsp_status,
                         dap_status,
+                        unity_dap_status: (eco == EcosystemKind::Dotnet)
+                            .then(|| installer_unity::unity_dap_status(&roots[0])),
                         downloadable,
                     }
                 })
@@ -547,8 +561,11 @@ impl ToolchainManager {
                     installed,
                     lsp_status,
                     dap_status: probed.dap.unwrap_or_else(|| empty_tool(eco.dap_name())),
+                    unity_dap_status: None,
+                    // Managed LLVM installs on this Mac only (no remote script yet).
                     downloadable: catalogs
                         .get(&eco)
+                        .filter(|_| eco != EcosystemKind::Cpp)
                         .cloned()
                         .unwrap_or_default()
                         .into_iter()

@@ -1,4 +1,5 @@
 import { test, expect } from '@playwright/test';
+import { idePane } from './ide-panes';
 import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { expectNoHorizontalOverflow } from './helpers';
@@ -14,12 +15,10 @@ test('phone: a .properties file is coloured and starts next to the line numbers'
   writeFileSync(join(s.root, 'application.properties'), CONFIG_FILES['application.properties']);
   await bootWriteIde(page);
   await expect(page.getByTestId('ide-page')).toHaveClass(/\bstack\b/);
-  await page.getByTestId('ide-stack-tab-files').tap();
+  await idePane(page, 'files');
   const file = page.getByTestId('ide-project-tree').locator('button.tree-item[title="application.properties"], button.tree-item[title$="/application.properties"]').first();
   await expect(file).toBeVisible({ timeout: 15_000 });
   await file.tap();
-  const editorTab = page.getByTestId('ide-stack-tab-editor');
-  if ((await editorTab.getAttribute('aria-pressed')) !== 'true') await editorTab.tap();
   const line = page.locator('.ide-editor-area .cm-line', { hasText: 'spring.datasource.url=' }).first();
   await expect(line.locator('span[class^="ͼ"]').first()).toBeVisible({ timeout: 15_000 });
   const classes = await line.evaluate((el) => {

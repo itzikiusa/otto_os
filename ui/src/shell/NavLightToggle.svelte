@@ -1,13 +1,13 @@
 <script lang="ts">
   // Compact 1-tap Full ↔ Light version switch rendered in the Navigator footer
-  // on touch/mobile/tablet viewports (when ShortNavDrawer is not already showing it).
+  // on touch/mobile/tablet viewports (the phone drawer, PhoneNavDrawer, carries its own).
   import Icon from '../lib/components/Icon.svelte';
   import { lightMode } from '../lib/lightMode.svelte';
   import { ui } from '../lib/stores/ui.svelte';
   import { viewport } from '../lib/stores/viewport.svelte';
 </script>
 
-{#if lightMode.available && !viewport.isShort}
+{#if lightMode.available && !viewport.navDrawer}
   <button
     class="nav-light-btn"
     data-testid="nav-light-toggle"

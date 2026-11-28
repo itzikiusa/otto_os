@@ -1,6 +1,7 @@
 <script lang="ts">
-  // PR list — the left pane of the PR workspace (also usable on its own).
-  // Search takes free text + qualifiers (pr-query.ts), Sort / Filters menus,
+  // PR list — the PR workspace's list pane (ListPane: "Pull requests" count,
+  // + New, ⋯ = Sort / Refresh). Search takes free text + qualifiers
+  // (pr-query.ts) beside the Filters menu,
   // "Needs you" first (prStatus.needsYou), lazy +/- counts per visible row, multi-select
   // "Open N together", and a quiet background refresh every 2 minutes that
   // never resets scroll, selection or the search.
@@ -8,7 +9,6 @@
   import type { GitAccount, PrListResp, PrState, PrSummary } from '../../lib/api/types';
   import { myGitHandles } from './myGitHandles.svelte';
   import { router } from '../../lib/router.svelte';
-  import Skeleton from '../../lib/components/Skeleton.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
   import Icon from '../../lib/components/Icon.svelte';
@@ -16,11 +16,13 @@
   import { rel } from '../../lib/stores/now.svelte';
   import { loadErrorText } from '../../lib/loadError';
   import { plural } from '../../lib/plural';
-  import { ctxMenu } from '../../lib/contextmenu.svelte';
+  import { ctxMenu, type MenuItem } from '../../lib/contextmenu.svelte';
+  import ListPane from '../../lib/components/side/ListPane.svelte';
+  import { gitPhoneMenu } from './gitPhoneMenu.svelte';
   import { invalidatePr, prListCache, prListKey } from './pr-cache';
   import { accountCause, ciOf, groupPrs, hasClientFilter, isMine, matchesPr, mergeRefreshed, parsePrQuery, sortPrs, SORT_LABEL, type PrGroup } from './pr-query';
   import { needsYou } from './prStatus';
-  import InboxFold from '../../lib/components/InboxFold.svelte';
+  import SideSection from '../../lib/components/side/SideSection.svelte';
   import { PrStatsLoader } from './pr-stats.svelte';
   import PrListRow from './PrListRow.svelte';
   import { CLEARED_FILTERS, DEFAULT_PREFS, activeFilters, authorItems, filterItems, listToken, prListUrl, readPrefs, sortItems, writePrefs, type PrListPrefs } from './pr-list-prefs';
@@ -42,8 +44,10 @@
     patch?: PrSummary | null;
     /** The rows in list order, once per repo when they first load. */
     onfirst?: (prs: PrSummary[]) => void;
+    /** The repository has no pull request at all (every state, no filter): the page's EmptyState takes over. */
+    onempty?: () => void;
   }
-  let { repoId, activeNumber = null, openNumbers = [], onopen, onopenmany, patch = null, onfirst }: Props = $props();
+  let { repoId, activeNumber = null, openNumbers = [], onopen, onopenmany, patch = null, onfirst, onempty }: Props = $props();
 
   const PER_PAGE = 50;
   const REFRESH_MS = 2 * 60_000;
@@ -335,10 +339,16 @@
   const filtering = $derived(hasClientFilter(parsed) || activeFilterCount > 0);
   const openSet = $derived(new Set(openNumbers));
 
+  $effect(() => {
+    if (!loading && !error && prs.length === 0 && effState === 'all' && !prefs.review) untrack(() => onempty?.());
+  });
+
   // ── Menus ───────────────────────────────────────────────────────────────
-  function sortMenu(e: MouseEvent): void {
-    ctxMenu.show(e, sortItems(prefs, anyStats, setPrefs));
-  }
+  const paneMenu = (): MenuItem[] => [
+    { label: `Sort: ${SORT_LABEL[prefs.sort]}`, icon: 'swap', children: sortItems(prefs, anyStats, setPrefs) },
+    { label: 'Refresh', icon: 'refresh', hint: lastUpdated ? `updated ${rel(lastUpdated)}` : undefined, disabled: refreshing, action: () => void refresh(true) },
+    ...gitPhoneMenu.items(),
+  ];
 
   function filterMenu(e: MouseEvent): void {
     const trigger = e.currentTarget as HTMLElement;
@@ -407,29 +417,18 @@
     selected.clear();
   }
 
-  // ↑/↓ walk the rows' open buttons; Enter opens (⌘Enter: background).
-  function arrowKeys(list: HTMLElement): () => void {
-    const h = (e: KeyboardEvent) => onListKey(e, list);
-    list.addEventListener('keydown', h);
-    return () => list.removeEventListener('keydown', h);
+  // The pane walks the rows (use:listNav on .tr-main); ⌘Enter opens one in the background.
+  function bgOpenKey(list: HTMLElement): () => void {
+    list.addEventListener('keydown', onListKey);
+    return () => list.removeEventListener('keydown', onListKey);
   }
-  function onListKey(e: KeyboardEvent, list: HTMLElement): void {
-    if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
-      const n = Number((e.target as HTMLElement).closest<HTMLElement>('[data-pr]')?.dataset.pr);
-      const pr = flat.find((p) => p.number === n);
-      if (pr) {
-        e.preventDefault();
-        open(pr, true);
-      }
-      return;
-    }
-    if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp') return;
-    const btns = [...list.querySelectorAll<HTMLButtonElement>('.tr-main')];
-    const i = btns.indexOf(document.activeElement as HTMLButtonElement);
-    const next = btns[Math.max(0, Math.min(btns.length - 1, i < 0 ? 0 : i + (e.key === 'ArrowDown' ? 1 : -1)))];
-    if (next) {
+  function onListKey(e: KeyboardEvent): void {
+    if (e.key !== 'Enter' || !(e.metaKey || e.ctrlKey)) return;
+    const n = Number((e.target as HTMLElement).closest<HTMLElement>('[data-pr]')?.dataset.pr);
+    const pr = flat.find((p) => p.number === n);
+    if (pr) {
       e.preventDefault();
-      next.focus();
+      open(pr, true);
     }
   }
   function clearSearch(): void {
@@ -438,13 +437,31 @@
   }
 </script>
 
-<div class="prlist">
-  <div class="pr-toolbar">
-    <div class="pr-search-wrap">
-      <span class="pr-search-ico" aria-hidden="true"><Icon name="search" size={13} /></span>
+{#snippet selBar()}
+  <span class="pr-selcount">{selected.size} selected</span>
+  <span class="grow"></span>
+  <button class="btn small ghost" onclick={() => selected.clear()}>Clear</button>
+  <button class="btn small primary" onclick={openSelected}>Open {selected.size} together</button>
+{/snippet}
+
+<ListPane
+  count={loading || error ? null : visible.length}
+  primary={{ icon: 'plus', label: 'New pull request', onclick: () => (createOpen = true) }}
+  menu={paneMenu}
+  selection={selected.size > 0 ? selBar : undefined}
+  {loading}
+  error={error ? failText(errorCause, error) : null}
+  onretry={() => retryRev++}
+  rows=".tr-main"
+  testid="pr-list"
+>
+  {#snippet searchRow()}
+    <div class="pr-search-row">
+      <div class="side-search pr-search-field">
+      <Icon name="search" size={14} />
       <input
         dir="auto"
-        class="input pr-search"
+        class="pr-search"
         type="search"
         bind:value={query}
         placeholder="Search or label:bug"
@@ -457,112 +474,77 @@
           }
         }}
       />
-    </div>
-    <div class="pr-tools">
-      <button class="btn small pr-tool" aria-haspopup="menu" onclick={sortMenu} title="Sort: {SORT_LABEL[prefs.sort]}" aria-label="Sort pull requests ({SORT_LABEL[prefs.sort]})">
-        <Icon name="swap" size={13} /><span class="pr-tool-label">Sort</span>
-      </button>
-      <button class="btn small pr-tool" class:on={activeFilterCount > 0} aria-haspopup="menu" onclick={filterMenu}
+      </div>
+      <button class="icon-btn pr-filters" class:on={activeFilterCount > 0} aria-haspopup="menu" onclick={filterMenu}
         title={activeFilterCount > 0 ? `${plural(activeFilterCount, 'filter')} on` : 'Filter pull requests'}
         aria-label={activeFilterCount > 0 ? `Filters (${activeFilterCount} on)` : 'Filters'}>
-        <Icon name="filter" size={13} /><span class="pr-tool-label">Filters</span>
+        <Icon name="filter" size={14} />
         {#if activeFilterCount > 0}<span class="pr-badge">{activeFilterCount}</span>{/if}
       </button>
-      <button class="btn small ghost pr-icon" aria-busy={refreshing} onclick={() => void refresh(true)}
-        title={lastUpdated ? `Refresh · updated ${rel(lastUpdated)}` : 'Refresh'} aria-label="Refresh pull requests">
-        {#if refreshing}<span class="spinner" style="--spinner-size: 12px" aria-hidden="true"></span>{:else}<Icon name="refresh" size={13} />{/if}
-      </button>
-      <!-- While the list is empty the empty state carries the one "New" CTA. -->
-      {#if loading || error || prs.length > 0}
-        <button class="btn small ghost pr-icon" onclick={() => (createOpen = true)} title="New pull request" aria-label="New pull request">
-          <Icon name="plus" size={14} />
-        </button>
-      {/if}
     </div>
-  </div>
+  {/snippet}
 
   <!-- Always mounted: a status region inserted with its text is usually silent. -->
   <div class="pr-refresh-err" role="status" class:empty={!refreshError}>{refreshError ? `Couldn’t refresh: ${refreshError}` : ''}</div>
 
-  {#if selected.size > 0}
-    <div class="pr-selbar" role="region" aria-label="Selected pull requests">
-      <span>{selected.size} selected</span>
-      <span class="grow"></span>
-      <button class="btn small ghost" onclick={() => selected.clear()}>Clear</button>
-      <button class="btn small primary" onclick={openSelected}>
-        Open {selected.size === 1 ? '1' : selected.size} together
-      </button>
+  {#if prs.length === 0 && prefs.review}
+    <EmptyState icon="eye" title="No reviews requested from you" body="No open pull request asks you for a review right now."
+      actionLabel="Show every pull request" actionIcon="pr" onaction={() => setPrefs({ review: false })} />
+  {:else if prs.length === 0}
+    <div class="pr-nomatch">
+      <span class="dim">No {effState} pull requests.</span>
+      <button class="btn small ghost" onclick={() => setPrefs({ state: 'all' })}>Show every state</button>
     </div>
-  {/if}
-
-  <div class="pr-scroll">
-    {#if loading}
-      <Skeleton rows={6} height={40} />
-    {:else if error}
-      <LoadState what="pull requests" error={failText(errorCause, error)} empty onretry={() => retryRev++} />
-    {:else if prs.length === 0 && prefs.review}
-      <EmptyState icon="eye" title="No reviews requested from you" body="No open pull request asks you for a review right now."
-        actionLabel="Show every pull request" actionIcon="pr" onaction={() => setPrefs({ review: false })} />
-    {:else if prs.length === 0}
-      <EmptyState
-        icon="pr"
-        title={effState === 'all' ? 'No pull requests' : `No ${effState} pull requests`}
-        body="Open one from your current branch, or pick another state in Filters."
-        actionLabel="New pull request"
-        actionIcon="pr"
-        onaction={() => (createOpen = true)}
-      />
-    {:else}
-      <div class="pr-rows" role="list" aria-label="Pull requests" {@attach arrowKeys}>
-        {#snippet rows(items: PrSummary[], strong: boolean)}
-          {#each items as pr (pr.number)}
-            <PrListRow
-              {pr}
-              stat={stats?.get(pr) ?? null}
-              active={activeNumber === pr.number}
-              selected={selected.has(pr.number)}
-              needs={strong}
-              openTab={openSet.has(pr.number)}
-              observe={stats ? stats.observe(pr) : null}
-              ontoggle={(shift) => toggleSelect(pr, shift)}
-              onrowclick={(e) => onRowClick(e, pr)}
-              onopen={(background) => open(pr, background)}
-            />
-          {/each}
-        {/snippet}
-        <!-- Headings only when something needs you: "Needs you", then the rest. -->
-        {#each groups as g (g.id)}
-          {#if g.id === 'all'}
-            {@render rows(g.items, false)}
-          {:else}
-            <InboxFold label={g.label}>{@render rows(g.items, g.id === 'needs')}</InboxFold>
-          {/if}
+  {:else}
+    <div class="pr-rows" role="list" aria-label="Pull requests" {@attach bgOpenKey}>
+      {#snippet rows(items: PrSummary[], strong: boolean)}
+        {#each items as pr (pr.number)}
+          <PrListRow
+            {pr}
+            stat={stats?.get(pr) ?? null}
+            active={selected.size === 0 && activeNumber === pr.number}
+            selected={selected.has(pr.number)}
+            needs={strong}
+            openTab={openSet.has(pr.number)}
+            observe={stats ? stats.observe(pr) : null}
+            ontoggle={(shift) => toggleSelect(pr, shift)}
+            onrowclick={(e) => onRowClick(e, pr)}
+            onopen={(background) => open(pr, background)}
+          />
         {/each}
-        {#if visible.length === 0}
-          <div class="pr-nomatch">
-            <span class="dim">No pull request matches {query.trim() ? `“${query.trim()}”` : 'these filters'}.</span>
-            {#if query.trim()}<button class="btn small ghost" onclick={clearSearch}>Clear search</button>{/if}
-            {#if activeFilterCount > 0}
-              <button class="btn small ghost" onclick={() => setPrefs({ ...CLEARED_FILTERS })}>Clear filters</button>
-            {/if}
-          </div>
+      {/snippet}
+      <!-- Headings only when something needs you: "Needs you", then the rest. -->
+      {#each groups as g (g.id)}
+        {#if g.id === 'all'}
+          {@render rows(g.items, false)}
+        {:else}
+          <SideSection title={g.label} count={g.items.length}>{@render rows(g.items, g.id === 'needs')}</SideSection>
         {/if}
-      </div>
-      {#if hasMore}
-        <div class="pr-more">
-          {#if moreError}
-            <LoadState variant="compact" what="more pull requests" error={moreError} loading={loadingMore} empty onretry={loadMore} />
-          {:else}
-            <button class="btn small" disabled={loadingMore} onclick={loadMore}>
-              {loadingMore ? 'Loading more pull requests…' : 'Load more'}
-            </button>
+      {/each}
+      {#if visible.length === 0}
+        <div class="pr-nomatch">
+          <span class="dim">No pull request matches {query.trim() ? `“${query.trim()}”` : 'these filters'}.</span>
+          {#if query.trim()}<button class="btn small ghost" onclick={clearSearch}>Clear search</button>{/if}
+          {#if activeFilterCount > 0}
+            <button class="btn small ghost" onclick={() => setPrefs({ ...CLEARED_FILTERS })}>Clear filters</button>
           {/if}
-          {#if filtering}<span class="dim pr-more-hint">Search covers the {prs.length} loaded</span>{/if}
         </div>
       {/if}
+    </div>
+    {#if hasMore}
+      <div class="pr-more">
+        {#if moreError}
+          <LoadState variant="compact" what="more pull requests" error={moreError} loading={loadingMore} empty onretry={loadMore} />
+        {:else}
+          <button class="btn small" disabled={loadingMore} onclick={loadMore}>
+            {loadingMore ? 'Loading more pull requests…' : 'Load more'}
+          </button>
+        {/if}
+        {#if filtering}<span class="dim pr-more-hint">Search covers the {prs.length} loaded</span>{/if}
+      </div>
     {/if}
-  </div>
-</div>
+  {/if}
+</ListPane>
 
 {#if createOpen}
   <CreatePr
@@ -579,83 +561,34 @@
 {/if}
 
 <style>
-  .prlist {
-    display: flex;
-    flex-direction: column;
-    height: 100%;
-    min-height: 0;
-    min-width: 0;
-  }
-  .pr-toolbar {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    padding: 10px 12px 8px;
-    border-block-end: 1px solid var(--border);
-  }
-  .pr-search-wrap {
-    position: relative;
-    flex: 1 1 auto;
-    min-width: 0;
-  }
-  .pr-search-ico {
-    position: absolute;
-    inset-inline-start: 8px;
-    top: 50%;
-    transform: translateY(-50%);
-    color: var(--text-dim);
-    display: inline-flex;
-    pointer-events: none;
-  }
-  .pr-search {
-    width: 100%;
-    height: 28px;
-    padding-inline-start: 28px;
-    font-size: var(--fs-s);
-  }
-  .pr-tools {
+  .pr-search-row {
     display: flex;
     align-items: center;
     gap: 4px;
+  }
+  .pr-search-field {
+    flex: 1;
+  }
+  .pr-filters {
+    position: relative;
     flex: none;
   }
-  .pr-tool {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    height: 28px;
-  }
-  .pr-tool.on {
+  .pr-filters.on {
     color: var(--accent-text);
-    border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
   }
   .pr-badge {
-    min-width: 16px;
-    height: 16px;
+    position: absolute;
+    inset-block-start: -2px;
+    inset-inline-end: -2px;
+    min-width: 14px;
+    height: 14px;
     padding: 0 4px;
     border-radius: 999px;
     background: var(--accent-solid);
     color: var(--accent-contrast);
     font-size: var(--fs-xs);
-    line-height: 16px;
+    line-height: 14px;
     text-align: center;
-  }
-  .pr-icon {
-    width: 28px;
-    height: 28px;
-    padding: 0;
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-  }
-  /* Narrow pane: Sort / Filters collapse to their icons. */
-  @container (max-width: 360px) {
-    .pr-tool-label {
-      display: none;
-    }
-  }
-  .prlist {
-    container-type: inline-size;
   }
   .pr-refresh-err.empty {
     padding: 0;
@@ -665,20 +598,9 @@
     font-size: var(--fs-xs);
     color: var(--danger);
   }
-  .pr-selbar {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    padding: 6px 12px;
-    background: var(--accent-soft);
+  .pr-selcount {
     font-size: var(--fs-s);
-    border-block-end: 1px solid var(--border);
-  }
-  .pr-scroll {
-    flex: 1 1 auto;
-    min-height: 0;
-    overflow-y: auto;
-    padding: 4px 6px 12px;
+    font-weight: 600;
   }
   .pr-rows {
     display: flex;
@@ -702,27 +624,5 @@
   }
   .pr-more-hint {
     font-size: var(--fs-xs);
-  }
-
-  /* ── Mobile + tablet (≤1024px): full-width pane, 32px+ touch targets,
-     the checkbox always reachable (no hover), legible text. ── */
-  @media (max-width: 1024px) {
-    .pr-toolbar {
-      flex-wrap: wrap;
-    }
-    .pr-search-wrap {
-      flex-basis: 100%;
-    }
-    .pr-search {
-      height: 34px;
-      font-size: var(--fs-m);
-    }
-    .pr-tool,
-    .pr-icon {
-      height: 34px;
-    }
-    .pr-icon {
-      width: 34px;
-    }
   }
 </style>

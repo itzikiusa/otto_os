@@ -1,4 +1,6 @@
 <script lang="ts">
+  import SideSection from '../../lib/components/side/SideSection.svelte';
+  import { listNav } from '../../lib/components/side/listNav';
   import { announce } from '../../lib/announce.svelte';
   import { plural } from '../../lib/plural';
   import { toastError } from '../../lib/toastError';
@@ -274,28 +276,33 @@
 </script>
 
 <div class="ph" data-testid="k8s-pod-http">
-  <aside class="ph-side" aria-label="Saved actions and presets">
+  <!-- Saved actions and presets: two folding sections of shared rows above the request. -->
+  <div class="ph-side" role="group" aria-label="Saved actions and presets" use:listNav>
     {#if workload}
-      <div class="ph-sec">Saved for {workload.name}</div>
-      <LoadState what="saved actions" variant="compact" loading={savedLoading} error={savedError} empty={!saved.length} onretry={() => void loadSaved()}>
-        {#snippet emptyView()}<div class="dim small pad">None yet — build a request and Save it.</div>{/snippet}
-        {#each saved as a (a.id)}
-          <div class="ph-item-row">
-            <button class="ph-item" class:active={loadedFrom === a.id} onclick={() => applyPreset({ ...a, body: a.body_template })} title="{a.method} :{a.port}{a.path}">
-              <span class="m mono {a.method.toLowerCase()}">{a.method}</span><span class="ell">{a.name}</span>
-            </button>
-            {#if canMutate}<button class="icon-btn" onclick={() => void deleteAction(a)} aria-label="Delete {a.name}" title="Delete saved action"><Icon name="trash" size={12} /></button>{/if}
-          </div>
-        {/each}
-      </LoadState>
+      <SideSection title="Saved for {workload.name}" count={saved.length || null}>
+        <LoadState what="saved actions" variant="compact" loading={savedLoading} error={savedError} empty={!saved.length} onretry={() => void loadSaved()}>
+          {#snippet emptyView()}<div class="dim small pad">None yet — build a request and Save it.</div>{/snippet}
+          {#each saved as a (a.id)}
+            <div class="side-row" class:selected={loadedFrom === a.id}>
+              <button class="side-row-main" data-side-row aria-current={loadedFrom === a.id ? 'true' : undefined} onclick={() => applyPreset({ ...a, body: a.body_template })} title="{a.method} :{a.port}{a.path}">
+                <span class="m mono {a.method.toLowerCase()}">{a.method}</span><span class="side-row-title">{a.name}</span>
+              </button>
+              {#if canMutate}<button class="icon-btn" onclick={() => void deleteAction(a)} aria-label="Delete {a.name}" title="Delete saved action"><Icon name="trash" size={12} /></button>{/if}
+            </div>
+          {/each}
+        </LoadState>
+      </SideSection>
     {/if}
-    <div class="ph-sec">Spring Boot actuator</div>
-    {#each ACTUATOR_PRESETS as p (p.id)}
-      <button class="ph-item" class:active={loadedFrom === p.id} onclick={() => applyPreset(p)} title={p.hint} data-testid="k8s-pod-http-preset-{p.id}">
-        <span class="m mono {p.method.toLowerCase()}">{p.method}</span><span class="ell">{p.name}</span>
-      </button>
-    {/each}
-  </aside>
+    <SideSection title="Spring Boot actuator" count={ACTUATOR_PRESETS.length}>
+      {#each ACTUATOR_PRESETS as p (p.id)}
+        <div class="side-row" class:selected={loadedFrom === p.id}>
+          <button class="side-row-main" data-side-row aria-current={loadedFrom === p.id ? 'true' : undefined} onclick={() => applyPreset(p)} title={p.hint} data-testid="k8s-pod-http-preset-{p.id}">
+            <span class="m mono {p.method.toLowerCase()}">{p.method}</span><span class="side-row-title">{p.name}</span>
+          </button>
+        </div>
+      {/each}
+    </SideSection>
+  </div>
 
   <section class="ph-main">
     <div class="ph-line">
@@ -390,51 +397,16 @@
 
 <style>
   .ph {
-    display: grid;
-    grid-template-columns: minmax(150px, 190px) minmax(0, 1fr);
-    min-height: 100%;
-    font-size: var(--fs-m);
-  }
-  .ph-side {
-    border-inline-end: 1px solid var(--border);
-    padding: 8px 6px;
     display: flex;
     flex-direction: column;
-    gap: 2px;
+    font-size: var(--fs-m);
+  }
+  /* Short and scrollable, so the request and its result stay in view. */
+  .ph-side {
+    max-block-size: 168px;
     overflow-y: auto;
-  }
-  .ph-sec {
-    font-size: var(--fs-xs);
-    text-transform: uppercase;
-    letter-spacing: .06em;
-    color: var(--text-dim);
-    padding: 8px 6px 4px;
-  }
-  .ph-item-row {
-    display: flex;
-    align-items: center;
-  }
-  .ph-item {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    width: 100%;
-    min-width: 0;
-    padding: 4px 6px;
-    border: 0;
-    background: transparent;
-    border-radius: var(--radius-s);
-    color: var(--text);
-    font-size: var(--fs-s);
-    text-align: start;
-    cursor: pointer;
-  }
-  .ph-item:hover {
-    background: var(--hover);
-  }
-  .ph-item.active {
-    background: var(--accent-soft);
-    color: var(--accent-text);
+    padding: 8px 8px 4px;
+    border-block-end: 1px solid var(--separator);
   }
   .m {
     font-size: var(--fs-xs);
@@ -596,15 +568,5 @@
   }
   .mono {
     font-family: var(--font-mono);
-  }
-  @media (max-width: 640px) {
-    .ph {
-      grid-template-columns: minmax(0, 1fr);
-    }
-    .ph-side {
-      border-inline-end: 0;
-      border-block-end: 1px solid var(--border);
-      max-block-size: 180px;
-    }
   }
 </style>

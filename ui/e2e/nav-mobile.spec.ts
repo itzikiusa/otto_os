@@ -5,7 +5,8 @@ import { test, expect, type Page } from '@playwright/test';
 //   • the Navigator drawer has its OWN open-state — closed on every load, even
 //     when the desktop "sidebar expanded" preference (otto_rail_expanded=1) is
 //     set on the device (it used to reuse that flag and open over every page);
-//   • the top-bar title is the registry label, not the raw route id
+//   • the phone's one header row (the page's PageHeader, or the shell bar on
+//     a page without one) titles the page with the registry label, not the raw route id
 //     ("Mission Control", not "Mission-Control"; "Skills Lab", not "Skills-Eval");
 //   • tapping a module in the drawer navigates AND closes the drawer.
 // ─────────────────────────────────────────────────────────────────────────────
@@ -33,14 +34,11 @@ test('phone: drawer closed on load; top-bar title uses registry labels', async (
   await expect(page.locator('.shell')).toBeVisible();
   await expect(drawer(page)).toHaveCount(0);
 
-  // Pages that draw their own PageHeader aren't titled twice: the bar's title
-  // steps aside (its text is still the registry label, never the raw id).
+  // A page that draws its own PageHeader: that header IS the one row (no shell bar).
   await expect(page.getByTestId('page-header').first()).toBeVisible();
-  await expect(title(page)).toHaveText('Personal Agents');
-  await expect(title(page)).toBeHidden();
-  await page.goto('/#/skills-eval');
-  await expect(title(page)).toHaveText('Skills Lab');
-  // Agents has no PageHeader (its TabBar is the chrome): the bar titles it.
+  await expect(page.locator('.mtopbar')).toHaveCount(0);
+  await expect(page.getByTestId('page-header').first().getByRole('button', { name: 'Open navigator' })).toBeVisible();
+  // Agents has no PageHeader (its TabBar is the chrome): the shell bar titles it.
   await page.goto('/#/agents');
   await expect(page.getByTestId('page-header')).toHaveCount(0);
   await expect(title(page)).toBeVisible();
@@ -56,7 +54,7 @@ test('phone: tapping a module in the drawer navigates and closes it', async ({ p
   await drawer(page).getByRole('button', { name: 'Vault', exact: true }).click();
   await expect.poll(() => page.evaluate(() => window.location.hash)).toBe('#/vault');
   await expect(drawer(page)).toHaveCount(0);
-  await expect(title(page)).toHaveText('Vault');
+  await expect(page).toHaveTitle(/^Vault/);
 });
 
 test('phone: desktop side-panel preference never opens a drawer on load or navigation', async ({ page }) => {

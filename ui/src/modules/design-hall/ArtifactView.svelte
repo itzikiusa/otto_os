@@ -6,7 +6,7 @@
   // autosave (~1.5 s), ⌘S named versions, 409 conflict resolution, mirror adoption,
   // live design_* updates, and signals. `scene3d` and 3D `model` (GLB/glTF/OBJ)
   // open in Studio3D; `otto-site` opens in SiteStudio.
-  import { tick, untrack, type Snippet } from 'svelte';
+  import { untrack, type Snippet } from 'svelte';
   import PageHeader from '../../lib/components/PageHeader.svelte';
   import PageBody from '../../lib/components/PageBody.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
@@ -37,6 +37,7 @@
   import ArtifactStage, { d2Svg } from './ArtifactStage.svelte';
   import VersionsPanel from './VersionsPanel.svelte';
   import DetailsPanel, { type DetailsTab } from './DetailsPanel.svelte';
+  import { DetailOpen } from '../../lib/components/side/detailOpen.svelte';
   import LinksTab from './LinksTab.svelte';
   import MirrorBanner from './MirrorBanner.svelte';
   import SaveIndicator from './SaveIndicator.svelte';
@@ -99,15 +100,12 @@
   let linksError = $state<string | null>(null);
 
   let compare = $state<{ left: CompareSide; right: CompareSide } | null>(null);
-  let detailsOpen = $state(false);
-  let detailsButton: HTMLButtonElement | undefined = $state();
-  let designButton: HTMLButtonElement | undefined = $state();
-  async function setDetails(open: boolean): Promise<void> {
-    detailsOpen = open;
-    await tick();
-    const target = open ? designButton : detailsButton;
-    if (target?.getClientRects().length) target.focus();
-  }
+  // Design details is the view's Detail pane: beside the stage (while it
+  // keeps 480 px) it starts open; as a sheet over the stage it opens on
+  // request (the toolbar's Details, a hand-off to Otto, a pinned comment).
+  const detailsOpen = new DetailOpen();
+  const detailsShown = $derived(detailsOpen.open);
+  const setDetails = (open: boolean): void => detailsOpen.set(open);
   let rightTab = $state<DetailsTab>('otto');
   let refs = $state(false);
   let showSource = $state(false);
@@ -272,7 +270,8 @@
       // `#/design/a/<id>/otto` (the lobby's Generate hand-off) opens on Otto.
       rightTab = 'otto';
       refs = false;
-      detailsOpen = ottoHandoff;
+      detailsOpen.asked = ottoHandoff;
+      if (ottoHandoff) detailsOpen.inline = true;
       phase = 'loading';
       void load(target);
       void vlist.load();
@@ -858,16 +857,16 @@
       {/snippet}
       {#snippet ottoTab()}{@render ottoPanel(null)}{/snippet}
       {#snippet commentsPanel()}<CommentsTab store={comments} {versions} shownVersionId={viewing?.v.id ?? head?.id ?? null} shownVersionSeq={viewing?.v.seq ?? head?.seq ?? null} {artifact} storyId={split.uses.find((r) => r.link.dst_kind === 'story')?.link.dst_id ?? fromStory} canComment={auth.can('design', 'edit')} {meId} canDeleteAny={auth.isRoot}
-          onview={(v) => void view(v)} onpin={artifact.format === 'otto-site' ? undefined : () => void setDetails(false)} />{/snippet}
+          onview={(v) => void view(v)} onpin={artifact.format === 'otto-site' ? undefined : () => { if (detailsOpen.sheet) setDetails(false); }} />{/snippet}
       {#snippet commentsPanel3d(hooks: { onfocus3d: (pin: CommentPin3d) => void; onregenerate3d: (prompt: string) => void })}
         <CommentsTab store={comments} {versions} shownVersionId={viewing?.v.id ?? head?.id ?? null} shownVersionSeq={viewing?.v.seq ?? head?.seq ?? null} {artifact} storyId={split.uses.find((r) => r.link.dst_kind === 'story')?.link.dst_id ?? fromStory} canComment={auth.can('design', 'edit')} {meId} canDeleteAny={auth.isRoot}
           onview={(v) => void view(v)} onfocus3d={hooks.onfocus3d} onregenerate3d={hooks.onregenerate3d} />
       {/snippet}
       {#snippet details(design: Snippet | undefined)}
-        <DetailsPanel bind:tab={rightTab} bind:backButton={designButton} linkCount={split.uses.length + split.usedIn.length}
+        <DetailsPanel bind:tab={rightTab} control={detailsOpen}
+          linkCount={split.uses.length + split.usedIn.length}
           versionCount={vlist.total ?? (versions.length || null)} otto={ottoTab} versions={versionsPanel} links={linksPanel} {design}
-          comments={commentsPanel} commentCount={comments.loaded ? openCount(comments.threads) : null}
-          onback={design ? undefined : () => void setDetails(false)} />
+          comments={commentsPanel} commentCount={comments.loaded ? openCount(comments.threads) : null} />
       {/snippet}
       {#if kind === 'scene3d' || kind === 'model'}
         {#key `${artifact.id}:${viewing?.v.id ?? head?.id ?? ''}`}
@@ -879,10 +878,10 @@
         {/key}
       {:else if artifact.format === 'otto-site'}
         {#key artifact.id}
-          <SiteStudio {artifact} source={shownSource} {dirty} readonly={stageReadonly} onchange={(s) => (source = s)} {notices} {details} />
+          <SiteStudio {artifact} source={shownSource} {dirty} readonly={stageReadonly} onchange={(s) => (source = s)} {notices} {details} detailsShown={detailsShown} ontoggledetails={setDetails} />
         {/key}
       {:else}
-      <div class="studio" class:wide-right={rightTab === 'otto'} class:details-open={detailsOpen}>
+      <div class="studio">
         <section class="center" aria-label="Design">
           <div class="toolbar">
             {#if kind === 'html'}
@@ -899,7 +898,8 @@
             {/if}
             <span class="fmt">{formatLabel(artifact.format)} · {studioInfo(artifact.studio).name}</span>
             <span class="grow"></span>
-            <button class="btn small ghost compact-details" aria-label="Show design details" bind:this={detailsButton} onclick={() => void setDetails(true)}><Icon name="info" size={12} /> Details</button>
+            <!-- The Detail pane's toggle (⌥⌘B): what it holds, not the panel glyph. -->
+            <button class="btn small ghost" class:on={detailsShown} aria-pressed={detailsShown} aria-label={detailsShown ? 'Hide design details' : 'Show design details'} title="Design details: Otto, versions, links, comments (⌥⌘B)" onclick={() => setDetails(!detailsShown)} data-testid="design-details-toggle"><Icon name="info" size={12} /> Details</button>
             {@render notices()}
           </div>
           <PinHost store={comments} versionId={viewing?.v.id ?? head?.id ?? null} canComment={auth.can('design', 'edit')} onshow={() => openTab('comments')}>
@@ -955,17 +955,14 @@
   .pad {
     padding: 20px;
   }
+  /* The stage and the Detail pane at the end of the row. */
   .studio {
     flex: 1;
     min-height: 0;
-    display: grid;
-    grid-template-columns: minmax(0, 1fr) 320px;
-  }
-  /* The Otto tab holds a conversation and a variants tray: a little wider. */
-  .studio.wide-right {
-    grid-template-columns: minmax(0, 1fr) 360px;
+    display: flex;
   }
   .center {
+    flex: 1;
     min-width: 0;
     min-height: 0;
     display: flex;
@@ -1015,17 +1012,5 @@
   }
   .linkbtn:hover {
     text-decoration: underline;
-  }
-  .compact-details { display: none; }
-  @container (max-width: 900px) {
-    .studio,
-    .studio.wide-right {
-      grid-template-columns: minmax(0, 1fr);
-      grid-template-rows: minmax(0, 1fr);
-      overflow: hidden;
-    }
-    .compact-details { display: inline-flex; }
-    .studio:not(.details-open) > :global(.right),
-    .studio.details-open .center { display: none; }
   }
 </style>

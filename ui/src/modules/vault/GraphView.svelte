@@ -23,10 +23,9 @@
   import LoadState from '../../lib/components/LoadState.svelte';
   import { loadErrorText } from '../../lib/loadError';
   import { confirmer } from '../../lib/confirm.svelte';
-  import { ui } from '../../lib/stores/ui.svelte';
   import { viewport } from '../../lib/stores/viewport.svelte';
-  import { paneResizer, pxWide, RESIZE_TITLE } from '../../lib/paneResizer';
-  import { startMouseDrag } from '../../lib/dragCursor';
+  import DetailPane from '../../lib/components/side/DetailPane.svelte';
+  import { DetailOpen } from '../../lib/components/side/detailOpen.svelte';
   import type { GraphWorkerIn, GraphWorkerOut } from './graph.worker';
   import { carrySeed } from './graphSeed';
   import { truncationNote, type TruncationNote } from './graphTruncation';
@@ -97,30 +96,10 @@
   let hoverTip = $state({ x: 0, y: 0, title: '', meta: '' });
   let draggingNode = $state(false); // suppresses the tooltip while dragging
   let dataRev = $state(0); // bumped per adopted payload (re-runs dependent effects)
-  let panelOpen = $state(!viewport.isPhone);
+  // The controls are the Graph view's Detail pane: beside the graph (while it
+  // keeps 480 px) they start open; as a sheet over it they open on request.
+  const panel = new DetailOpen();
 
-  // Panel width is drag-resizable and persisted: service/tag names are long and
-  // a fixed 210px truncated most of them. The handle is on the panel's LEFT edge
-  // (the panel is anchored right), so dragging left widens it.
-  let panelResizing = $state(false);
-  function startPanelResize(e: MouseEvent): void {
-    e.stopPropagation();
-    panelResizing = true;
-    const startX = e.clientX;
-    const startW = ui.vaultGraphPanelWidth;
-    // Anchored to the right edge, so a leftward drag (negative dx) GROWS it.
-    // Mirrored under RTL, where the panel sits on the left instead.
-    const dir = document.dir === 'rtl' ? 1 : -1;
-    // lib/dragCursor (r3-03-08): overlay cursor, per-frame moves, one persist.
-    startMouseDrag(e, {
-      cursor: 'col-resize',
-      onMove: (ev) => ui.setVaultGraphPanelWidth(startW + dir * (ev.clientX - startX), false),
-      onEnd: () => {
-        panelResizing = false;
-        ui.setVaultGraphPanelWidth(ui.vaultGraphPanelWidth);
-      },
-    });
-  }
   let rawNodeCount = $state(0); // pre-filter totals, for the "312 / 9,179" readout
   let rawEdgeCount = $state(0);
 
@@ -1323,6 +1302,7 @@
 
 <!-- The canvas is pointer-only; the labelled region tells assistive tech
      what it shows and where the keyboard path is (tree / search). -->
+<div class="graph-row">
 <div
   class="graph-root"
   bind:this={rootEl}
@@ -1383,237 +1363,11 @@
     {/if}
   </div>
 
-  <!-- Controls panel (collapsible, top-right, drag-resizable). -->
-  <div class="panel" class:resizing={panelResizing} style="width: {ui.vaultGraphPanelWidth}px">
-    <!-- Drag handle on the panel's outer edge. Its own element (not a border) so
-         it has a comfortable grab area without shifting the panel's layout.
-         Mirrors .graph-resizer / .refs-resizer on the Git page. -->
-    <div
-      class="panel-resizer"
-      role="separator"
-      aria-label="Resize the graph controls panel"
-      title={RESIZE_TITLE}
-      use:paneResizer={{ value: ui.vaultGraphPanelWidth, min: 200, max: 560, invert: true, onChange: (w) => ui.setVaultGraphPanelWidth(w), onReset: () => ui.setVaultGraphPanelWidth(210), onDragStart: startPanelResize, text: pxWide }}
-    ></div>
-    <button class="panel-head" onclick={() => (panelOpen = !panelOpen)} aria-expanded={panelOpen}>
-      <span>Graph</span>
-      <span class="tri"><Icon name={panelOpen ? 'chevronDown' : 'chevronRight'} size={12} /></span>
+  {#if !panel.open}
+    <button class="mini panel-open" onclick={() => panel.set(true)} aria-label="Graph controls" title="Graph controls: filter, focus, forces, display (⌥⌘B)" data-testid="vault-graph-controls">
+      <Icon name="filter" size={12} /> Controls
     </button>
-    {#if panelOpen}
-      <div class="panel-body">
-        <input dir="ltr" class="filter" type="text" placeholder="Filter titles…" aria-label="Filter titles" bind:value={filter} />
-
-        <div class="sec">
-          Focus
-          {#if hasFocus}
-            <button class="link" onclick={resetFocus}>reset</button>
-          {/if}
-        </div>
-
-        <!-- Anchors: keep only what's within N hops of these notes. -->
-        {#if anchorPaths.length}
-          <div class="chips">
-            {#each anchorPaths as a (a)}
-              <button
-                class="ftoken"
-                title={a}
-                onclick={() => (anchorPaths = anchorPaths.filter((x) => x !== a))}
-              >
-                <span class="ftoken-t">{a.split('/').pop()?.replace(/\.md$/, '')}</span>
-                <Icon name="x" size={12} />
-              </button>
-            {/each}
-          </div>
-          <label class="row">
-            <span>Hops</span>
-            <input type="range" min="0" max="3" step="1" bind:value={hops} />
-            <span class="val">{hops}</span>
-          </label>
-        {/if}
-        <div class="typeahead">
-          <input dir="auto"
-            class="filter"
-            type="text"
-            placeholder="Anchor on a note…"
-            aria-label="Anchor on a note"
-            bind:value={anchorQuery}
-          />
-          {#if anchorHits.length}
-            <ul class="hits">
-              {#each anchorHits as h (h.path)}
-                <li>
-                  <button onclick={() => addAnchor(h.path)} title={h.path}>{h.title}</button>
-                </li>
-              {/each}
-            </ul>
-          {/if}
-        </div>
-
-        <!-- Services (top-level bundles). -->
-        {#if serviceFacets.length > 1}
-          <div class="sec sub">
-            Services
-            {#if selServices.length}
-              <button class="link" onclick={() => (selServices = [])}>all</button>
-            {/if}
-          </div>
-          {#if serviceFacets.length > 8}
-            <input dir="auto" class="filter" type="text" placeholder="Find service…" aria-label="Find service" bind:value={svcQuery} />
-          {/if}
-          <div class="facets">
-            {#each svcShown as f (f.label)}
-              <label class="chk">
-                <input
-                  type="checkbox"
-                  checked={selServices.includes(f.label)}
-                  onchange={() => (selServices = toggleIn(selServices, f.label))}
-                />
-                <span class="fl" title={f.label}>{f.label}</span>
-                <span class="fc">{f.count.toLocaleString()}</span>
-              </label>
-            {/each}
-          </div>
-        {/if}
-
-        <!-- Types (OKF frontmatter `type`, case-folded server-side). -->
-        {#if typeFacets.length > 1}
-          <div class="sec sub">
-            Types
-            {#if selTypes.length}
-              <button class="link" onclick={() => (selTypes = [])}>all</button>
-            {/if}
-          </div>
-          <div class="facets">
-            {#each typeFacets as f (f.label)}
-              <label class="chk">
-                <input
-                  type="checkbox"
-                  checked={selTypes.includes(f.label)}
-                  onchange={() => (selTypes = toggleIn(selTypes, f.label))}
-                />
-                <span class="fl" title={f.label}>{f.label}</span>
-                <span class="fc">{f.count.toLocaleString()}</span>
-              </label>
-            {/each}
-          </div>
-        {/if}
-
-        <!-- Tags (cut across services). -->
-        {#if tagFacets.length}
-          <div class="sec sub">
-            Tags
-            {#if selTags.length}
-              <button class="link" onclick={() => (selTags = [])}>all</button>
-            {/if}
-          </div>
-          {#if tagFacets.length > 8}
-            <input dir="auto" class="filter" type="text" placeholder="Find tag…" aria-label="Find tag" bind:value={tagQuery} />
-          {/if}
-          <div class="facets">
-            {#each tagShown as f (f.label)}
-              <label class="chk">
-                <input
-                  type="checkbox"
-                  checked={selTags.includes(f.label)}
-                  onchange={() => (selTags = toggleIn(selTags, f.label))}
-                />
-                <span class="fl" title={f.label}>#{f.label}</span>
-                <span class="fc">{f.count.toLocaleString()}</span>
-              </label>
-            {/each}
-          </div>
-        {/if}
-
-        <div class="sec">View</div>
-        <label class="row">
-          <span>Roll up</span>
-          <select
-            value={rollup}
-            onchange={(e) => {
-              rollup = e.currentTarget.value as 'none' | 'service' | 'type';
-              expandedGroups = [];
-            }}
-          >
-            <option value="none">off — notes</option>
-            <option value="service">by service</option>
-            <option value="type">by type</option>
-          </select>
-        </label>
-        {#if rollup !== 'none'}
-          <div class="hint">Click a node to expand that group into its notes.</div>
-          {#if expandedGroups.length}
-            <div class="chips">
-              {#each expandedGroups as g (g)}
-                <button class="ftoken" title="Collapse {g}" onclick={() => toggleGroup(g)}><span class="ftoken-t">{g}</span> <Icon name="x" size={12} /></button>
-              {/each}
-            </div>
-          {/if}
-        {/if}
-        <label class="row">
-          <span>Color by</span>
-          <select
-            value={colorBy}
-            onchange={(e) => (colorBy = e.currentTarget.value as 'service' | 'type')}
-          >
-            <option value="service">service</option>
-            <option value="type">type</option>
-          </select>
-        </label>
-
-        <div class="sec">Include</div>
-        <label class="chk"><input type="checkbox" bind:checked={showTags} /> Tag nodes</label>
-        <label class="chk"><input type="checkbox" bind:checked={showOrphans} /> Orphans</label>
-        <label class="chk"><input type="checkbox" bind:checked={showGhosts} /> Unresolved</label>
-        <label class="chk"><input type="checkbox" bind:checked={showReserved} /> Reserved files</label>
-        {#if local}
-          <label class="row">
-            <span>Depth</span>
-            <input type="range" min="1" max="3" step="1" bind:value={depth} />
-            <span class="val">{depth}</span>
-          </label>
-        {/if}
-
-        <div class="sec">Forces</div>
-        <label class="row">
-          <span>Center</span>
-          <input type="range" min="0" max="1" step="0.01" bind:value={fCenter} />
-          <span class="val">{fCenter.toFixed(2)}</span>
-        </label>
-        <label class="row">
-          <span>Repel</span>
-          <input type="range" min="0" max="2" step="0.05" bind:value={fRepel} />
-          <span class="val">{fRepel.toFixed(2)}</span>
-        </label>
-        <label class="row">
-          <span>Link</span>
-          <input type="range" min="0" max="2" step="0.05" bind:value={fLink} />
-          <span class="val">{fLink.toFixed(2)}</span>
-        </label>
-        <label class="row">
-          <span>Distance</span>
-          <input type="range" min="10" max="300" step="5" bind:value={fDist} />
-          <span class="val">{fDist}</span>
-        </label>
-
-        <div class="sec">Display</div>
-        <label class="row">
-          <span>Node size</span>
-          <input type="range" min="0.3" max="3" step="0.1" bind:value={nodeScale} />
-          <span class="val">{nodeScale.toFixed(1)}</span>
-        </label>
-        <label class="row">
-          <span>Link width</span>
-          <input type="range" min="0.2" max="3" step="0.1" bind:value={linkWidth} />
-          <span class="val">{linkWidth.toFixed(1)}</span>
-        </label>
-        <label class="row">
-          <span>Text fade</span>
-          <input type="range" min="0.2" max="4" step="0.1" bind:value={labelZoom} />
-          <span class="val">{labelZoom.toFixed(1)}</span>
-        </label>
-      </div>
-    {/if}
-  </div>
+  {/if}
 
   <!-- Hover tooltip (title). -->
   {#if hoverIdx >= 0 && !draggingNode && hoverTip.title}
@@ -1622,11 +1376,250 @@
     </div>
   {/if}
 </div>
+<DetailPane
+  module="vault"
+  pane="graph"
+  title="Graph"
+  control={panel}
+  legacy={{ w: 'otto_vault_graph_panel_width' }}
+  testid="vault-graph-panel"
+>
+    <div class="panel-body">
+      <input dir="ltr" class="filter" type="text" placeholder="Filter titles…" aria-label="Filter titles" bind:value={filter} />
+
+      <div class="sec">
+        Focus
+        {#if hasFocus}
+          <button class="link" onclick={resetFocus}>reset</button>
+        {/if}
+      </div>
+
+      <!-- Anchors: keep only what's within N hops of these notes. -->
+      {#if anchorPaths.length}
+        <div class="chips">
+          {#each anchorPaths as a (a)}
+            <button
+              class="ftoken"
+              title={a}
+              onclick={() => (anchorPaths = anchorPaths.filter((x) => x !== a))}
+            >
+              <span class="ftoken-t">{a.split('/').pop()?.replace(/\.md$/, '')}</span>
+              <Icon name="x" size={12} />
+            </button>
+          {/each}
+        </div>
+        <label class="row">
+          <span>Hops</span>
+          <input type="range" min="0" max="3" step="1" bind:value={hops} />
+          <span class="val">{hops}</span>
+        </label>
+      {/if}
+      <div class="typeahead">
+        <input dir="auto"
+          class="filter"
+          type="text"
+          placeholder="Anchor on a note…"
+          aria-label="Anchor on a note"
+          bind:value={anchorQuery}
+        />
+        {#if anchorHits.length}
+          <ul class="hits">
+            {#each anchorHits as h (h.path)}
+              <li>
+                <button onclick={() => addAnchor(h.path)} title={h.path}>{h.title}</button>
+              </li>
+            {/each}
+          </ul>
+        {/if}
+      </div>
+
+      <!-- Services (top-level bundles). -->
+      {#if serviceFacets.length > 1}
+        <div class="sec sub">
+          Services
+          {#if selServices.length}
+            <button class="link" onclick={() => (selServices = [])}>all</button>
+          {/if}
+        </div>
+        {#if serviceFacets.length > 8}
+          <input dir="auto" class="filter" type="text" placeholder="Find service…" aria-label="Find service" bind:value={svcQuery} />
+        {/if}
+        <div class="facets">
+          {#each svcShown as f (f.label)}
+            <label class="chk">
+              <input
+                type="checkbox"
+                checked={selServices.includes(f.label)}
+                onchange={() => (selServices = toggleIn(selServices, f.label))}
+              />
+              <span class="fl" title={f.label}>{f.label}</span>
+              <span class="fc">{f.count.toLocaleString()}</span>
+            </label>
+          {/each}
+        </div>
+      {/if}
+
+      <!-- Types (OKF frontmatter `type`, case-folded server-side). -->
+      {#if typeFacets.length > 1}
+        <div class="sec sub">
+          Types
+          {#if selTypes.length}
+            <button class="link" onclick={() => (selTypes = [])}>all</button>
+          {/if}
+        </div>
+        <div class="facets">
+          {#each typeFacets as f (f.label)}
+            <label class="chk">
+              <input
+                type="checkbox"
+                checked={selTypes.includes(f.label)}
+                onchange={() => (selTypes = toggleIn(selTypes, f.label))}
+              />
+              <span class="fl" title={f.label}>{f.label}</span>
+              <span class="fc">{f.count.toLocaleString()}</span>
+            </label>
+          {/each}
+        </div>
+      {/if}
+
+      <!-- Tags (cut across services). -->
+      {#if tagFacets.length}
+        <div class="sec sub">
+          Tags
+          {#if selTags.length}
+            <button class="link" onclick={() => (selTags = [])}>all</button>
+          {/if}
+        </div>
+        {#if tagFacets.length > 8}
+          <input dir="auto" class="filter" type="text" placeholder="Find tag…" aria-label="Find tag" bind:value={tagQuery} />
+        {/if}
+        <div class="facets">
+          {#each tagShown as f (f.label)}
+            <label class="chk">
+              <input
+                type="checkbox"
+                checked={selTags.includes(f.label)}
+                onchange={() => (selTags = toggleIn(selTags, f.label))}
+              />
+              <span class="fl" title={f.label}>#{f.label}</span>
+              <span class="fc">{f.count.toLocaleString()}</span>
+            </label>
+          {/each}
+        </div>
+      {/if}
+
+      <div class="sec">View</div>
+      <label class="row">
+        <span>Roll up</span>
+        <select
+          value={rollup}
+          onchange={(e) => {
+            rollup = e.currentTarget.value as 'none' | 'service' | 'type';
+            expandedGroups = [];
+          }}
+        >
+          <option value="none">off — notes</option>
+          <option value="service">by service</option>
+          <option value="type">by type</option>
+        </select>
+      </label>
+      {#if rollup !== 'none'}
+        <div class="hint">Click a node to expand that group into its notes.</div>
+        {#if expandedGroups.length}
+          <div class="chips">
+            {#each expandedGroups as g (g)}
+              <button class="ftoken" title="Collapse {g}" onclick={() => toggleGroup(g)}><span class="ftoken-t">{g}</span> <Icon name="x" size={12} /></button>
+            {/each}
+          </div>
+        {/if}
+      {/if}
+      <label class="row">
+        <span>Color by</span>
+        <select
+          value={colorBy}
+          onchange={(e) => (colorBy = e.currentTarget.value as 'service' | 'type')}
+        >
+          <option value="service">service</option>
+          <option value="type">type</option>
+        </select>
+      </label>
+
+      <div class="sec">Include</div>
+      <label class="chk"><input type="checkbox" bind:checked={showTags} /> Tag nodes</label>
+      <label class="chk"><input type="checkbox" bind:checked={showOrphans} /> Orphans</label>
+      <label class="chk"><input type="checkbox" bind:checked={showGhosts} /> Unresolved</label>
+      <label class="chk"><input type="checkbox" bind:checked={showReserved} /> Reserved files</label>
+      {#if local}
+        <label class="row">
+          <span>Depth</span>
+          <input type="range" min="1" max="3" step="1" bind:value={depth} />
+          <span class="val">{depth}</span>
+        </label>
+      {/if}
+
+      <div class="sec">Forces</div>
+      <label class="row">
+        <span>Center</span>
+        <input type="range" min="0" max="1" step="0.01" bind:value={fCenter} />
+        <span class="val">{fCenter.toFixed(2)}</span>
+      </label>
+      <label class="row">
+        <span>Repel</span>
+        <input type="range" min="0" max="2" step="0.05" bind:value={fRepel} />
+        <span class="val">{fRepel.toFixed(2)}</span>
+      </label>
+      <label class="row">
+        <span>Link</span>
+        <input type="range" min="0" max="2" step="0.05" bind:value={fLink} />
+        <span class="val">{fLink.toFixed(2)}</span>
+      </label>
+      <label class="row">
+        <span>Distance</span>
+        <input type="range" min="10" max="300" step="5" bind:value={fDist} />
+        <span class="val">{fDist}</span>
+      </label>
+
+      <div class="sec">Display</div>
+      <label class="row">
+        <span>Node size</span>
+        <input type="range" min="0.3" max="3" step="0.1" bind:value={nodeScale} />
+        <span class="val">{nodeScale.toFixed(1)}</span>
+      </label>
+      <label class="row">
+        <span>Link width</span>
+        <input type="range" min="0.2" max="3" step="0.1" bind:value={linkWidth} />
+        <span class="val">{linkWidth.toFixed(1)}</span>
+      </label>
+      <label class="row">
+        <span>Text fade</span>
+        <input type="range" min="0.2" max="4" step="0.1" bind:value={labelZoom} />
+        <span class="val">{labelZoom.toFixed(1)}</span>
+      </label>
+    </div>
+</DetailPane>
+</div>
 
 <style>
+  .graph-row {
+    display: flex;
+    width: 100%;
+    height: 100%;
+    min-width: 0;
+    min-height: 0;
+  }
+  .panel-open {
+    position: absolute;
+    top: 8px;
+    inset-inline-end: 8px;
+    z-index: 3;
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+  }
   .graph-root {
     position: relative;
-    width: 100%;
+    flex: 1;
+    min-width: 0;
     height: 100%;
     overflow: hidden;
     background: var(--bg);
@@ -1705,43 +1698,10 @@
     border-radius: var(--radius-m);
     box-shadow: var(--shadow-card);
   }
-  .panel {
-    position: absolute;
-    top: 8px;
-    inset-inline-end: 8px;
-    /* Width comes from the store (drag-resizable); this is the fallback. */
-    width: 210px;
-    max-width: calc(100% - 16px);
-    background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: var(--radius-m);
-    box-shadow: var(--shadow-card);
-    font-size: var(--fs-xs);
-    color: var(--text);
-    /* Never taller than the view above the status strip (floating-UI rule). */
-    max-height: calc(100% - 52px);
-    display: flex;
-    flex-direction: column;
-  }
-  .panel-head {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    width: 100%;
-    padding: 6px 10px;
-    background: none;
-    border: none;
-    color: var(--text);
-    font-size: var(--fs-xs);
-    font-weight: 600;
-    cursor: pointer;
-  }
-  .tri {
-    display: inline-flex;
-    color: var(--text-dim);
-  }
   .panel-body {
-    padding: 0 10px 10px;
+    padding-block: 10px 12px;
+    padding-inline: 16px;
+    font-size: var(--fs-xs);
     display: flex;
     flex-direction: column;
     gap: 4px;
@@ -1760,25 +1720,6 @@
      scroll" is meant to remove, not introduce. */
   .panel-body > * {
     flex-shrink: 0;
-  }
-  /* Grab area on the panel's outer edge. Sits just outside the panel so it never
-     overlaps the controls, and widens the pointer target beyond the 1px border. */
-  .panel-resizer {
-    position: absolute;
-    inset-block: 0;
-    inset-inline-start: -3px;
-    width: 7px;
-    cursor: col-resize;
-    z-index: 2;
-    background: transparent;
-  }
-  .panel-resizer:hover,
-  .panel.resizing .panel-resizer {
-    background: var(--accent-line);
-  }
-  /* Suspend hover affordances mid-drag so the pointer doesn't flicker. */
-  .panel.resizing {
-    user-select: none;
   }
   .filter {
     width: 100%;

@@ -39,8 +39,65 @@ export interface NormalizedNotebookOutput {
   mime?: string;
   dataUri?: string;
   text: string;
+  /** `text` split into ANSI-coloured runs (streams and tracebacks). */
+  segments?: AnsiSegment[];
+  /** Shown under the output, e.g. why a widget renders as text. */
+  note?: string;
   ename?: string;
   evalue?: string;
+}
+
+/** One run of text with its ANSI SGR colour (a token-backed class) and weight. */
+export interface AnsiSegment {
+  text: string;
+  color?: 'danger' | 'success' | 'warning' | 'info' | 'accent' | 'dim';
+  bold?: boolean;
+}
+
+const ANSI_COLORS: Record<number, AnsiSegment['color']> = {
+  0: 'dim', 1: 'danger', 2: 'success', 3: 'warning', 4: 'info', 5: 'accent', 6: 'info',
+};
+
+/** Split terminal text into coloured runs (SGR codes only; every other escape
+ *  sequence is dropped). Colours map onto semantic tokens, never raw hex. */
+export function ansiSegments(raw: string): AnsiSegment[] {
+  const out: AnsiSegment[] = [];
+  let color: AnsiSegment['color'];
+  let bold = false;
+  // eslint-disable-next-line no-control-regex
+  const re = /\x1b\[([0-9;?]*)([a-zA-Z])/g;
+  let last = 0;
+  const push = (text: string) => {
+    if (!text) return;
+    const prev = out[out.length - 1];
+    if (prev && prev.color === color && Boolean(prev.bold) === bold) prev.text += text;
+    else out.push({ text, ...(color ? { color } : {}), ...(bold ? { bold } : {}) });
+  };
+  for (let mt = re.exec(raw); mt; mt = re.exec(raw)) {
+    push(raw.slice(last, mt.index));
+    last = re.lastIndex;
+    if (mt[2] !== 'm') continue;
+    const codes = (mt[1] || '0').split(';').map((c) => Number(c) || 0);
+    for (let i = 0; i < codes.length; i++) {
+      const c = codes[i];
+      if (c === 0) { color = undefined; bold = false; }
+      else if (c === 1) bold = true;
+      else if (c === 22) bold = false;
+      else if (c === 39) color = undefined;
+      else if (c >= 30 && c <= 37) color = c === 37 ? undefined : ANSI_COLORS[c - 30];
+      else if (c >= 90 && c <= 97) color = c === 97 ? undefined : ANSI_COLORS[c - 90];
+      else if (c === 38 || c === 48) {
+        // 38;5;n (256 colours: the first 16 map onto the base set) / 38;2;r;g;b.
+        if (codes[i + 1] === 5) {
+          const n = codes[i + 2] ?? 0;
+          if (c === 38) color = n < 16 && n % 8 !== 7 ? ANSI_COLORS[n % 8] : undefined;
+          i += 2;
+        } else if (codes[i + 1] === 2) i += 4;
+      }
+    }
+  }
+  push(raw.slice(last));
+  return out;
 }
 
 function joinLines(val: unknown): string {
@@ -61,6 +118,13 @@ let cellSeq = 1;
 function nextCellId(): string {
   cellSeq += 1;
   return `cell-${Date.now().toString(36)}-${cellSeq}`;
+}
+
+/** Restart (and Restart & Run All) stay available while a cell runs on a Jupyter
+ *  kernel: when Interrupt can't stop it, restarting is the way out (the daemon
+ *  ends the waiting cell). The built-in kernel keeps them off while busy. */
+export function canRestartKernel(o: { readOnly: boolean; busy: boolean; jupyter: boolean }): boolean {
+  return !o.readOnly && (!o.busy || o.jupyter);
 }
 
 export function stripAnsiCodes(raw: string): string {
@@ -281,25 +345,32 @@ export function normalizeNotebookOutputs(outputs: readonly NotebookOutput[]): No
   for (const out of outputs ?? []) {
     if (!out || typeof out !== 'object') continue;
     if (out.output_type === 'stream') {
-      const text = stripAnsiCodes(joinLines(out.text));
+      const raw = joinLines(out.text);
       const streamName = out.name === 'stderr' ? 'stderr' : 'stdout';
-      items.push({ kind: 'stream', streamName, text });
+      items.push({ kind: 'stream', streamName, text: stripAnsiCodes(raw), segments: ansiSegments(raw) });
       continue;
     }
     if (out.output_type === 'error') {
-      const tb = Array.isArray(out.traceback)
-        ? out.traceback.map((l) => stripAnsiCodes(String(l))).join('\n')
+      const raw = Array.isArray(out.traceback) && out.traceback.length > 0
+        ? out.traceback.map((l) => String(l)).join('\n')
         : `${out.ename ?? 'Error'}: ${out.evalue ?? ''}`;
       items.push({
         kind: 'error',
         ename: out.ename ?? 'Error',
         evalue: out.evalue ?? '',
-        text: tb,
+        text: stripAnsiCodes(raw),
+        segments: ansiSegments(raw),
       });
       continue;
     }
     if (out.output_type === 'execute_result' || out.output_type === 'display_data') {
       const data = out.data ?? {};
+      // Widgets and JavaScript never run: show the richest other MIME type.
+      if (data['application/vnd.jupyter.widget-view+json'] !== undefined) {
+        const plain = stripAnsiCodes(joinLines(data['text/plain']));
+        items.push({ kind: 'text', mime: 'text/plain', text: plain, note: 'Widgets aren’t supported in Otto notebooks.' });
+        continue;
+      }
       const png = joinLines(data['image/png']).trim();
       if (png) {
         items.push({ kind: 'image', mime: 'image/png', dataUri: `data:image/png;base64,${png}`, text: '' });
@@ -333,8 +404,45 @@ export function normalizeNotebookOutputs(outputs: readonly NotebookOutput[]): No
       const plain = joinLines(data['text/plain']);
       if (plain) {
         items.push({ kind: 'text', mime: 'text/plain', text: stripAnsiCodes(plain) });
+      } else if (data['application/javascript'] !== undefined) {
+        items.push({ kind: 'text', text: '', note: 'JavaScript outputs don’t run in Otto notebooks.' });
       }
     }
   }
   return items;
+}
+
+/** Apply one streamed `/ide/notebooks/stream` output event to a cell's live outputs. */
+export function applyNotebookStreamOutput(
+  outputs: readonly NotebookOutput[],
+  ev: { kind: 'output'; index: number; output: Record<string, unknown> } | { kind: 'clear_output' },
+): NotebookOutput[] {
+  if (ev.kind === 'clear_output') return [];
+  const next = [...outputs];
+  next[ev.index] = ev.output as unknown as NotebookOutput;
+  return next.filter((o) => o !== undefined);
+}
+
+interface KernelChoice { id: string; kind: string; language: string; spec_name?: string | null; active: boolean }
+
+/** The kernel a notebook opens on: its `metadata.kernelspec.name`, else the
+ *  first Jupyter kernel of the same language (Jupyter's rule), else the active one. */
+export function pickNotebookKernel(kernels: readonly KernelChoice[], metadata: Record<string, unknown>): string {
+  const spec = (metadata?.kernelspec ?? {}) as { name?: unknown; language?: unknown };
+  const lang = typeof spec.language === 'string' ? spec.language.toLowerCase() : '';
+  const byName = typeof spec.name === 'string' ? kernels.find((k) => k.kind === 'jupyter' && k.spec_name === spec.name) : undefined;
+  const byLang = lang ? kernels.find((k) => k.kind === 'jupyter' && k.language.toLowerCase() === lang) : undefined;
+  return (byName ?? byLang ?? kernels.find((k) => k.active) ?? kernels[0])?.id ?? '';
+}
+
+/** Write the chosen Jupyter kernel into the notebook metadata, as Jupyter does. */
+export function withKernelspecMetadata(
+  doc: NotebookDoc,
+  kernel: { kind: string; spec_name?: string | null; display_name: string; language: string },
+): NotebookDoc {
+  if (kernel.kind !== 'jupyter' || !kernel.spec_name) return doc;
+  const kernelspec = { display_name: kernel.display_name, language: kernel.language, name: kernel.spec_name };
+  const cur = doc.metadata?.kernelspec as Record<string, unknown> | undefined;
+  if (cur && cur.name === kernelspec.name && cur.display_name === kernelspec.display_name && cur.language === kernelspec.language) return doc;
+  return { ...doc, metadata: { ...doc.metadata, kernelspec } };
 }

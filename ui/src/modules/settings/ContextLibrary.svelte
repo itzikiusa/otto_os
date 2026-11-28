@@ -23,8 +23,9 @@
   import { toasts } from '../../lib/toast.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
-  import PaneDivider from '../../lib/components/PaneDivider.svelte';
-  import { LIST_PANE, loadPaneWidth } from '../../lib/paneResizer';
+  import ListDetail from '../../lib/components/side/ListDetail.svelte';
+  import ListPane from '../../lib/components/side/ListPane.svelte';
+  import SideRow from '../../lib/components/side/SideRow.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import CodeEditor from '../../lib/components/CodeEditor.svelte';
   import { loadErrorText } from '../../lib/loadError';
@@ -44,8 +45,8 @@
   }
 
   let tab: Tab = $state('skills');
-  /** Entry list width — the shared list-pane default/range, remembered. */
-  let listW = $state(loadPaneWidth('settings.contextLibrary.listW', LIST_PANE.default, LIST_PANE.min, LIST_PANE.max));
+  /** Phone: the editor is pushed over the list ("‹ Skills"). */
+  let phoneOpen = $state(false);
   let entries: Entry[] = $state([]);
   let defaultSoul: string | null = $state(null);
   let loading = $state(false);
@@ -172,11 +173,13 @@
     closeEditor();
     isNew = true;
     selected = '';
+    phoneOpen = true;
     editorKey++;
     queueMicrotask(() => document.getElementById('lib-name')?.focus());
   }
 
   async function pickEntry(name: string): Promise<void> {
+    phoneOpen = true;
     if (name === selected && !isNew) return;
     if (!(await okToLeave())) return;
     void openEntry(name);
@@ -316,105 +319,76 @@
         </button>
       {/if}
     {/snippet}
-  </PageHeader>
-  <PageBody width="readable">
-  <SectionIntro>The single source of truth materialized into each workspace’s CLIs. Edits here reach agents at the <strong>next session spawn</strong>, not running sessions. This is the raw file view: install or update bundled skills in <button type="button" class="intro-link" onclick={() => router.go('skills-eval/bundled')}>Skills Lab → Bundled</button>, and edit, test or evaluate one in <button type="button" class="intro-link" onclick={() => router.go('skills-eval')}>Skills Lab</button> — all three read and write this same library.</SectionIntro>
-
-  <!-- Tabs (a real tablist: ←/→, Home/End) -->
-  <div class="segmented lib-tabs" role="tablist" aria-label="Library">
-    {#each TABS as t (t)}
-      <button
-        id={`lib-tab-${t}`}
-        role="tab"
-        aria-selected={tab === t}
-        aria-controls="lib-panel"
-        tabindex={tab === t ? 0 : -1}
-        class:active={tab === t}
-        onclick={() => void switchTab(t)}
-        onkeydown={onTabKey}
-      >
-        {TAB_META[t].label}
-      </button>
-    {/each}
-  </div>
-
-  <div id="lib-panel" role="tabpanel" aria-labelledby={`lib-tab-${tab}`}>
-    <!-- Default soul selector (souls tab only) -->
-    {#if tab === 'souls' && entries.length > 0}
-      <div class="default-soul field">
-        <label for="lib-default-soul">Global default soul</label>
-        <select
-          id="lib-default-soul"
-          class="input"
-          value={defaultSoul ?? ''}
-          onchange={(e) => setDefaultSoul(e.currentTarget.value)}
-        >
-          <option value="">None</option>
-          {#each entries as e (e.name)}
-            <option value={e.name}>{e.name}</option>
-          {/each}
-        </select>
-        <span class="hint">Used by any workspace whose soul is set to “Global default”.</span>
+    {#snippet tabs()}
+      <!-- A real tablist: ←/→, Home/End. -->
+      <div class="segmented" role="tablist" aria-label="Library">
+        {#each TABS as t (t)}
+          <button
+            id={`lib-tab-${t}`}
+            role="tab"
+            aria-selected={tab === t}
+            aria-controls="lib-panel"
+            tabindex={tab === t ? 0 : -1}
+            class:active={tab === t}
+            onclick={() => void switchTab(t)}
+            onkeydown={onTabKey}
+          >
+            {TAB_META[t].label}
+          </button>
+        {/each}
       </div>
-    {/if}
-
-    <LoadState what={`library ${meta.label.toLowerCase()}`} {loading} error={loadError} empty={entries.length === 0 && !isNew} rows={4} onretry={() => void loadTab(tab)}>
-      {#snippet emptyView()}
-        <EmptyState
-          variant="panel"
-          icon="book"
-          title={`No ${meta.label.toLowerCase()} yet`}
-          body={tab === 'skills'
-            ? 'Library skills are materialized into every workspace’s agent CLIs. Install bundled ones from Skills Lab → Skills, or write your own.'
-            : tab === 'souls'
-              ? 'A soul is a persona injected into every interaction in a workspace.'
-              : 'Context snippets are reusable markdown blocks added to agent context.'}
-          actionLabel={`New ${meta.singular}`}
-          actionIcon="plus"
-          onaction={() => void startNew()}
-        />
-      {/snippet}
-      <div class="lib-body">
-        <!-- List pane -->
-        <div class="list-pane" style="--list-pane-w:{listW}px">
-          <div class="list-head">
-            <h2 class="section-title">{meta.label} <span class="count">{entries.length}</span></h2>
-            <button
-              class="icon-btn"
-              onclick={() => void startNew()}
-              aria-label={`New ${meta.singular}`}
-              title={`New ${meta.singular}`}
-            >
-              <Icon name="plus" size={14} />
-            </button>
-          </div>
-          <div class="entry-list" role="group" aria-label={meta.label}>
+    {/snippet}
+  </PageHeader>
+  <PageBody fill padded={false}>
+  <div id="lib-panel" class="lib-panel" role="tabpanel" aria-labelledby={`lib-tab-${tab}`}>
+    <LoadState what={`library ${meta.label.toLowerCase()}`} {loading} error={loadError} empty={loading || !!loadError} rows={4} onretry={() => void loadTab(tab)}>
+      <ListDetail module="settings" pane="context-library" name={meta.label} open={phoneOpen} onback={() => (phoneOpen = false)} empty={entries.length === 0 && !isNew} legacy={{ w: 'settings.contextLibrary.listW' }}>
+        {#snippet list()}
+          <ListPane count={entries.length} primary={{ icon: 'plus', label: `New ${meta.singular}`, onclick: () => void startNew() }} testid="context-library-list">
             {#if isNew}
-              <div class="entry active new" aria-current="true">
-                <span class="entry-name mono">{editName.trim() || `New ${meta.singular}`}</span>
-                <span class="entry-desc dim">Not saved yet</span>
-              </div>
+              <SideRow title={editName.trim() || `New ${meta.singular}`} meta="Not saved yet" selected onclick={() => {}} />
             {/if}
             {#each entries as e (e.name)}
-              <button
-                class="entry"
-                aria-current={selected === e.name && !isNew ? 'true' : undefined}
-                class:active={selected === e.name && !isNew}
-                title={e.description ? `${e.name} — ${e.description}` : e.name}
-                onclick={() => void pickEntry(e.name)}
-              >
-                <span class="entry-name mono">{e.name}</span>
-                {#if e.description}
-                  <span class="entry-desc dim">{e.description}</span>
-                {/if}
-              </button>
+              <SideRow title={e.name} meta={e.description || undefined} tip={e.description ? `${e.name} — ${e.description}` : e.name} selected={selected === e.name && !isNew} onclick={() => void pickEntry(e.name)} />
             {/each}
-          </div>
-        </div>
-        <PaneDivider bind:width={listW} storageKey="settings.contextLibrary.listW" label="Resize the library list" />
-
-        <!-- Editor pane -->
-        <div class="editor-pane">
+          </ListPane>
+        {/snippet}
+        <div class="lib-content">
+          <SectionIntro>The single source of truth materialized into each workspace’s CLIs. Edits here reach agents at the <strong>next session spawn</strong>, not running sessions. This is the raw file view: install or update bundled skills in <button type="button" class="intro-link" onclick={() => router.go('skills-eval/bundled')}>Skills Lab → Bundled</button>, and edit, test or evaluate one in <button type="button" class="intro-link" onclick={() => router.go('skills-eval')}>Skills Lab</button> — all three read and write this same library.</SectionIntro>
+          <!-- Default soul selector (souls tab only) -->
+          {#if tab === 'souls' && entries.length > 0}
+            <div class="default-soul field">
+              <label for="lib-default-soul">Global default soul</label>
+              <select
+                id="lib-default-soul"
+                class="input"
+                value={defaultSoul ?? ''}
+                onchange={(e) => setDefaultSoul(e.currentTarget.value)}
+              >
+                <option value="">None</option>
+                {#each entries as e (e.name)}
+                  <option value={e.name}>{e.name}</option>
+                {/each}
+              </select>
+              <span class="hint">Used by any workspace whose soul is set to “Global default”.</span>
+            </div>
+          {/if}
+          {#if entries.length === 0 && !isNew}
+            <EmptyState
+              variant="panel"
+              icon="book"
+              title={`No ${meta.label.toLowerCase()} yet`}
+              body={tab === 'skills'
+                ? 'Library skills are materialized into every workspace’s agent CLIs. Install bundled ones from Skills Lab → Skills, or write your own.'
+                : tab === 'souls'
+                  ? 'A soul is a persona injected into every interaction in a workspace.'
+                  : 'Context snippets are reusable markdown blocks added to agent context.'}
+              actionLabel={`New ${meta.singular}`}
+              actionIcon="plus"
+              onaction={() => void startNew()}
+            />
+          {:else}
+          <div class="editor-pane">
           {#if selected === null}
             <EmptyState
               icon="book"
@@ -483,8 +457,10 @@
               {/if}
             </div>
           {/if}
+          </div>
+          {/if}
         </div>
-      </div>
+      </ListDetail>
     </LoadState>
   </div>
   </PageBody>
@@ -498,12 +474,24 @@
     height: 100%;
     min-height: 0;
   }
-  .lib-tabs {
-    margin-bottom: 14px;
+  .lib-panel {
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+  }
+  .lib-content {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+    padding: 20px 24px 32px;
   }
   .default-soul {
     max-width: 360px;
-    margin-bottom: 16px;
+    margin: 0;
   }
   .hint {
     font-size: var(--fs-xs);
@@ -513,80 +501,8 @@
     font-size: var(--fs-xs);
     color: var(--danger);
   }
-  .lib-body {
-    display: flex;
-    gap: 16px;
-    max-width: 1000px;
-  }
-  .list-pane {
-    flex: none;
-    inline-size: var(--list-pane-w, 280px);
-    max-inline-size: 45%;
-    align-self: start;
-    display: flex;
-    flex-direction: column;
-    gap: 6px;
-    min-width: 0;
-  }
-  .list-head {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-  }
-  .list-head .section-title {
-    margin: 0;
-  }
-  .count {
-    font-weight: 500;
-  }
-  .entry-list {
-    display: flex;
-    flex-direction: column;
-    border: 1px solid var(--border);
-    border-radius: var(--radius-m);
-    background: var(--surface);
-    overflow: hidden auto;
-    max-height: 520px;
-  }
-  .entry {
-    display: flex;
-    flex-direction: column;
-    gap: 2px;
-    text-align: start;
-    padding: 6px 10px;
-    border: none;
-    background: transparent;
-    color: var(--text);
-    cursor: pointer;
-    min-width: 0;
-    font: inherit;
-  }
-  .entry + .entry {
-    border-top: 1px solid var(--border);
-  }
-  .entry:hover {
-    background: var(--hover);
-  }
-  .entry.active {
-    background: var(--accent-soft);
-  }
-  .entry-name {
-    font-size: var(--fs-s);
-    font-weight: 500;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-  .entry-desc {
-    font-size: var(--fs-xs);
-    color: var(--text-dim);
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
   .editor-pane {
-    flex: 1;
-    align-self: start;
+    max-width: 1000px;
     display: flex;
     flex-direction: column;
     gap: 10px;
@@ -620,16 +536,8 @@
     flex-wrap: wrap;
   }
   @media (max-width: 640px) {
-    .lib-body {
-      flex-direction: column;
-    }
-    .list-pane {
-      inline-size: auto;
-      max-inline-size: none;
-      align-self: stretch;
-    }
-    .entry-list {
-      max-height: 240px;
+    .lib-content {
+      padding: 14px 16px 24px;
     }
   }
 </style>

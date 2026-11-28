@@ -251,11 +251,13 @@
   }
 </script>
 
+<!-- The registry | Rules (the Detail pane), one row. -->
+<div class="srv-row">
 <div class="servers">
   <div class="bar">
     <span class="count">{plural(servers.length, 'server')}</span>
     <span class="grow"></span>
-    <button class="btn small" data-testid="mcp-rules-btn" onclick={() => (rulesOpen = true)}>Rules</button>
+    <button class="btn small" data-testid="mcp-rules-btn" aria-pressed={rulesOpen} onclick={() => (rulesOpen = !rulesOpen)}>Rules</button>
     <button class="btn small" onclick={() => void onReload()} title="Refresh">
       <Icon name="refresh" size={13} /> Refresh
     </button>
@@ -393,6 +395,10 @@
     </div>
   {/if}
 </div>
+{#if rulesOpen}
+  <RulesDrawer {wsId} {servers} onClose={() => (rulesOpen = false)} />
+{/if}
+</div>
 
 {#if accessId}<Modal title="MCP server access" width={820} onclose={() => accessId=null}><ResourceAccess kind="mcp_server" resourceId={accessId} /></Modal>{/if}
 
@@ -424,15 +430,17 @@
   <ServerForm {wsId} onclose={() => (formOpen = false)} onsaved={() => void onReload()} />
 {/if}
 
-{#if rulesOpen}
-  <RulesDrawer {wsId} {servers} onClose={() => (rulesOpen = false)} />
-{/if}
-
 <style>
+  .srv-row {
+    display: flex;
+    height: 100%;
+    min-height: 0;
+  }
   .servers {
+    flex: 1;
+    min-width: 0;
     display: flex;
     flex-direction: column;
-    height: 100%;
     min-height: 0;
   }
   .bar {

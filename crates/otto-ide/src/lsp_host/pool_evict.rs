@@ -104,6 +104,24 @@ impl LspPool {
         }
     }
 
+    /// Stop local `lang` servers at or under `root` (the project's toolchain
+    /// changed); attached editors reattach and get a server on the new binary.
+    pub fn evict_local_lang_under_root(&self, lang: &str, root: &str) {
+        let root = Path::new(root.trim_end_matches('/'));
+        let evicted: Vec<Entry> = {
+            let mut entries = self.lock();
+            let keys: Vec<PoolKey> = entries
+                .keys()
+                .filter(|k| {
+                    k.lang == lang && k.ssh.is_none() && Path::new(&k.root).starts_with(root)
+                })
+                .cloned()
+                .collect();
+            keys.iter().filter_map(|k| entries.remove(k)).collect()
+        };
+        Self::finish_evicted_entries(evicted, EvictReason::ToolchainChanged);
+    }
+
     pub(super) fn evict_stale_go_servers(&self) {
         let local_go_keys: Vec<PoolKey> = self
             .lock()

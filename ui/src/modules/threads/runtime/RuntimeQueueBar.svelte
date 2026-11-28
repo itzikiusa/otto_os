@@ -6,6 +6,7 @@
   // "Revive" line for a closed or dormant agent. The background line has
   // "Stop all" (confirmed, naming how many): the composer's Stop ends only a turn.
   import { announceShown } from '../../../lib/announce.svelte';
+  import { viewport } from '../../../lib/stores/viewport.svelte';
   import Icon from '../../../lib/components/Icon.svelte';
   import { confirmer } from '../../../lib/confirm.svelte';
   import { plural } from '../../../lib/plural';
@@ -45,17 +46,9 @@
   /** The tasks the daemon can stop one by one (not a swarm member or a turn's own subagent). */
   const stoppable = $derived(background.filter((b) => b.stopId));
   let stoppingAll = $state(false);
-  // A phone (or a short window) folds several queued messages into one line.
-  let small = $state(false);
+  // A phone (or one on its side) folds several queued messages into one line.
+  const small = $derived(viewport.navDrawer);
   let showQueued = $state(false);
-  $effect(() => {
-    if (typeof matchMedia !== 'function') return;
-    const mq = matchMedia('(max-width: 640px), (max-height: 500px)');
-    small = mq.matches;
-    const on = (): void => void (small = mq.matches);
-    mq.addEventListener('change', on);
-    return () => mq.removeEventListener('change', on);
-  });
   const foldQueued = $derived(small && !showQueued && queued.length > 1);
 
   async function stopAll(): Promise<void> {

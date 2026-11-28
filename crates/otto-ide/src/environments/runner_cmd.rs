@@ -4,6 +4,8 @@
 mod runner_cmd_langs;
 #[path = "runner_java.rs"]
 pub(crate) mod runner_java;
+#[path = "runner_kotest.rs"]
+pub(crate) mod runner_kotest;
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -1405,60 +1407,24 @@ pub(crate) fn build_runner_command(
         IdeRunnerKind::Playwright => build_playwright_cmd(cfg, cmd_opt, args, build_flags, filter),
         IdeRunnerKind::Karma => build_karma_cmd(cfg, target_kind, cwd, cmd_opt, args, build_flags),
         IdeRunnerKind::JavaMain => build_java_main_cmd(cfg, cmd_opt, args, build_flags, filter),
-        IdeRunnerKind::JavaJunit => {
-            // BUG-16: On Gradle-only projects (including Kotest suites), `JavaJunit`
-            // must dispatch to Gradle (`./gradlew test --tests ...`) rather than Maven —
-            // on BOTH local and remote SSH targets.
-            if target_kind == IdeTargetKind::Ssh && cmd_opt.is_none() {
-                let (_, g_args) = build_gradle_cmd(
-                    cfg,
-                    target_kind,
-                    cwd,
-                    Some("gradle"),
-                    args.clone(),
-                    build_flags.clone(),
-                    filter,
-                );
-                let (_, m_args) = build_maven_cmd(
-                    cfg,
-                    target_kind,
-                    cwd,
-                    Some("mvn"),
-                    args,
-                    build_flags,
-                    filter,
-                );
-                let gq = g_args
-                    .iter()
-                    .map(|a| shell_words::quote(a).into_owned())
-                    .collect::<Vec<_>>()
-                    .join(" ");
-                let mq = m_args
-                    .iter()
-                    .map(|a| shell_words::quote(a).into_owned())
-                    .collect::<Vec<_>>()
-                    .join(" ");
-                let script = format!(
-                    "if [ ! -f pom.xml ] && {{ [ -f build.gradle.kts ] || [ -f build.gradle ] || [ -f gradlew ] || [ -f ../gradlew ] || [ -f settings.gradle.kts ] || [ -f settings.gradle ]; }}; then \
-                       set -- {gq}; {}; \
-                     else \
-                       set -- {mq}; {}; \
-                     fi",
-                    ssh_wrapper_exec("gradlew", "gradle"),
-                    ssh_wrapper_exec("mvnw", "mvn"),
-                );
-                return ("sh".into(), vec!["-c".into(), script]);
-            }
-            let is_gradle_only = target_kind == IdeTargetKind::Local
-                && !Path::new(cwd).join("pom.xml").is_file()
-                && (Path::new(cwd).join("build.gradle.kts").is_file()
-                    || Path::new(cwd).join("build.gradle").is_file());
-            if is_gradle_only {
-                build_gradle_cmd(cfg, target_kind, cwd, cmd_opt, args, build_flags, filter)
-            } else {
-                build_maven_cmd(cfg, target_kind, cwd, cmd_opt, args, build_flags, filter)
-            }
-        }
+        IdeRunnerKind::JavaJunit => jvm_test_cmd(
+            cfg,
+            target_kind,
+            cwd,
+            cmd_opt,
+            (args.clone(), filter),
+            (args, filter),
+            build_flags,
+        ),
+        IdeRunnerKind::Kotest => jvm_test_cmd(
+            cfg,
+            target_kind,
+            cwd,
+            cmd_opt,
+            (runner_kotest::kotest_gradle_args(cfg, args.clone()), None),
+            (args, Some(&runner_kotest::kotest_maven_filter(cfg))),
+            build_flags,
+        ),
         IdeRunnerKind::Maven => {
             build_maven_cmd(cfg, target_kind, cwd, cmd_opt, args, build_flags, filter)
         }
@@ -1469,9 +1435,92 @@ pub(crate) fn build_runner_command(
         IdeRunnerKind::Xcode => build_xcode_cmd(env_map, cmd_opt, args, build_flags),
         IdeRunnerKind::Flutter => build_flutter_cmd(env_map, cmd_opt, args, build_flags),
         IdeRunnerKind::ReactNative => build_react_native_cmd(env_map, cmd_opt, args, build_flags),
-        IdeRunnerKind::Compound | IdeRunnerKind::Custom => {
+        // UnityAttach never runs: start_run refuses it (debug-only).
+        IdeRunnerKind::Compound | IdeRunnerKind::Custom | IdeRunnerKind::UnityAttach => {
             build_custom_cmd(cmd_opt, args, build_flags)
         }
+    }
+}
+
+/// A local module with a Gradle build and no POM.
+fn local_gradle_only(target_kind: IdeTargetKind, cwd: &str) -> bool {
+    target_kind == IdeTargetKind::Local
+        && !Path::new(cwd).join("pom.xml").is_file()
+        && (Path::new(cwd).join("build.gradle.kts").is_file()
+            || Path::new(cwd).join("build.gradle").is_file())
+}
+
+/// A JVM test run through the project's build tool, each with its own args and filter:
+/// Gradle on a Gradle-only project, else Maven. On SSH the remote shell picks (BUG-16).
+fn jvm_test_cmd(
+    cfg: &IdeRunConfig,
+    target_kind: IdeTargetKind,
+    cwd: &str,
+    cmd_opt: Option<&str>,
+    (g_args, g_filter): (Vec<String>, Option<&str>),
+    (m_args, m_filter): (Vec<String>, Option<&str>),
+    build_flags: Vec<String>,
+) -> (String, Vec<String>) {
+    if target_kind == IdeTargetKind::Ssh && cmd_opt.is_none() {
+        let (_, g_args) = build_gradle_cmd(
+            cfg,
+            target_kind,
+            cwd,
+            Some("gradle"),
+            g_args,
+            build_flags.clone(),
+            g_filter,
+        );
+        let (_, m_args) = build_maven_cmd(
+            cfg,
+            target_kind,
+            cwd,
+            Some("mvn"),
+            m_args,
+            build_flags,
+            m_filter,
+        );
+        let gq = g_args
+            .iter()
+            .map(|a| shell_words::quote(a).into_owned())
+            .collect::<Vec<_>>()
+            .join(" ");
+        let mq = m_args
+            .iter()
+            .map(|a| shell_words::quote(a).into_owned())
+            .collect::<Vec<_>>()
+            .join(" ");
+        let script = format!(
+            "if [ ! -f pom.xml ] && {{ [ -f build.gradle.kts ] || [ -f build.gradle ] || [ -f gradlew ] || [ -f ../gradlew ] || [ -f settings.gradle.kts ] || [ -f settings.gradle ]; }}; then \
+               set -- {gq}; {}; \
+             else \
+               set -- {mq}; {}; \
+             fi",
+            ssh_wrapper_exec("gradlew", "gradle"),
+            ssh_wrapper_exec("mvnw", "mvn"),
+        );
+        return ("sh".into(), vec!["-c".into(), script]);
+    }
+    if local_gradle_only(target_kind, cwd) {
+        build_gradle_cmd(
+            cfg,
+            target_kind,
+            cwd,
+            cmd_opt,
+            g_args,
+            build_flags,
+            g_filter,
+        )
+    } else {
+        build_maven_cmd(
+            cfg,
+            target_kind,
+            cwd,
+            cmd_opt,
+            m_args,
+            build_flags,
+            m_filter,
+        )
     }
 }
 

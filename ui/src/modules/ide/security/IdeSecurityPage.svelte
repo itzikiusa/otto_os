@@ -64,6 +64,12 @@
   const passiveRunReady = $derived(!!passive?.confirmed && passive.candidates.some((candidate) =>
     candidate.run_config_id === passive?.confirmed?.run_config_id && candidate.url === passive?.confirmed?.url));
   const active = $derived(overview?.scans.find((scan) => scan.status === 'running' || scan.status === 'queued'));
+  const grant = $derived(passive?.active_schedule.grant ?? null);
+  const scheduledActiveOn = $derived(!!grant && !grant.invalidated_at);
+  const day = (date: string) => new Date(date).toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' });
+  const scheduledActiveLine = $derived(scheduledActiveOn && grant ? `On for ${grant.target_url} until ${day(grant.expires_at)}`
+    : grant?.invalid_reason ? `Paused: ${grant.invalid_reason}`
+    : passive?.active_schedule.blocked ? `Off · ${passive.active_schedule.blocked}` : 'Off');
   const visible = $derived((detail?.findings ?? []).filter((finding) =>
     (severity === 'all' || finding.severity === severity)
     && (showSuppressed || !detail?.annotations.suppressions[finding.fingerprint])));
@@ -193,6 +199,38 @@
   function revokePassive() {
     void action(async () => {
       await api.del(`${base}/dast`);
+      await refreshPassive();
+    });
+  }
+
+  async function toggleScheduledActive(input: HTMLInputElement) {
+    const offer = passive?.active_schedule.offer;
+    if (!input.checked) {
+      await action(async () => {
+        await api.del(`${base}/dast/schedule`);
+        await refreshPassive();
+      });
+      return;
+    }
+    input.checked = false;
+    if (!offer) return;
+    const config = passive?.candidates.find((candidate) => candidate.run_config_id === offer.run_config_id);
+    const runs = overview?.schedule?.cron === offer.cron ? overview.schedule.next_runs.slice(0, 3) : [];
+    const until = day(new Date(Date.now() + 30 * 86_400_000).toISOString());
+    const accepted = await confirmer.ask([
+      `Target: ${offer.url}${config ? ` · run configuration “${config.run_config_name}”` : ''} · confirmed ${when(offer.confirmed_at)}`,
+      `Resolves to: ${offer.addresses.join(', ')}`,
+      `How often: on the schedule ${offer.cron} (${offer.timezone})${runs.length ? `, next ${runs.map((run) => when(run, offer.timezone)).join(', ')}` : ''}`,
+      'Checks: Nuclei exposure templates (configs, files, APIs, logs). DoS, fuzzing, intrusive and brute-force templates are excluded. At most 20 requests per second. No external callbacks.',
+      `Runs as you until ${until}.`,
+      'Each run sends test HTTP requests to this target while it is running in Otto. Any change to the target, its addresses or the schedule stops scheduled active checks until you allow them again.',
+    ].join('\n\n'), {
+      title: 'Allow scheduled active checks?',
+      confirmLabel: 'Allow scheduled active checks',
+    });
+    if (!accepted) return;
+    await action(async () => {
+      await api.put(`${base}/dast/schedule`, offer);
       await refreshPassive();
     });
   }
@@ -417,6 +455,15 @@
               <input type="checkbox" bind:checked={passiveScheduled} />
               Include passive audit in scheduled scans
             </label>
+            {#if passive?.confirmed}
+              <label class="audit-toggle">
+                <input type="checkbox" role="switch" checked={scheduledActiveOn}
+                  disabled={acting || (!scheduledActiveOn && !passive.active_schedule.offer)}
+                  onchange={(event) => void toggleScheduledActive(event.currentTarget)} />
+                Also run the active check on this schedule
+              </label>
+              <p class="muted" data-testid="scheduled-active-state">{scheduledActiveLine}</p>
+            {/if}
             <div class="actions">
               <button type="button" class="btn small" onclick={() => void confirmPassive()} disabled={acting || !passiveCandidate}>
                 {passive?.confirmed ? 'Update confirmation' : 'Review and confirm'}
@@ -462,7 +509,7 @@
         <div class="scan-controls">
           <label>Scan<select value={selected} onchange={(event) => { limit = 100; void refresh(event.currentTarget.value); }}>
             {#each overview.scans as scan (scan.id)}
-              <option value={scan.id}>{when(scan.created_at)} · {scan.status} · {scan.count} findings</option>
+              <option value={scan.id}>{when(scan.created_at)}{scan.trigger === 'scheduled' ? ' · scheduled' : ''}{scan.engines.some((run) => run.name === 'nuclei') ? ' · active' : ''} · {scan.status} · {scan.count} findings</option>
             {/each}
           </select></label>
           {#if detail?.scan.status === 'completed'}
@@ -488,6 +535,9 @@
             <p class="muted">{detail.scan.engines.map((run) =>
               `${run.name} · ${run.mode} · ${(run.metrics.wall_ms / 1000).toFixed(1)} s`).join(' / ')}</p>
           {/if}
+          {#each detail.scan.skipped ?? [] as note (note.engine)}
+            <p class={note.failed ? 'error' : 'muted'}>{note.failed ? note.reason : `Active checks skipped: ${note.reason}`}</p>
+          {/each}
           {#if visible.length === 0}
             <EmptyState icon="shield" title={detail.findings.length ? 'No matching findings' : 'No findings in this scan'} />
           {:else}

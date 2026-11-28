@@ -1,24 +1,18 @@
 <script lang="ts">
   // The running turn's plan above the composer (T3 Code's plan steps):
   // done steps tick green, the running one reads full strength. On a phone
-  // (or a short window) it is one line — "Plan 2/4 · the current step" — and
+  // (or one on its side) it is one line — "Plan 2/4 · the current step" — and
   // a tap opens every step, so a running turn's chrome stays small.
   import Icon from '../../../lib/components/Icon.svelte';
   import type { PlanArtifact } from '../../../lib/api/types';
+  import { viewport } from '../../../lib/stores/viewport.svelte';
 
   let { plan }: { plan: PlanArtifact } = $props();
   const done = $derived(plan.steps.filter((s) => s.status === 'completed').length);
   const current = $derived(plan.steps.find((s) => s.status === 'running') ?? plan.steps.find((s) => s.status === 'pending'));
-  let small = $state(false);
+  // A phone, or one on its side (the shell's one signal).
+  const small = $derived(viewport.navDrawer);
   let open = $state(false);
-  $effect(() => {
-    if (typeof matchMedia !== 'function') return;
-    const mq = matchMedia('(max-width: 640px), (max-height: 500px)');
-    small = mq.matches;
-    const on = (): void => void (small = mq.matches);
-    mq.addEventListener('change', on);
-    return () => mq.removeEventListener('change', on);
-  });
 </script>
 
 {#if small && !open}

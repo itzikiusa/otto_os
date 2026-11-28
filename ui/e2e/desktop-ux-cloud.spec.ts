@@ -89,12 +89,13 @@ test('Kubernetes detail arrow keys move selection and focus together', async ({ 
 test('AWS detail arrow keys move selection and focus together', async ({ page }) => {
   await openPage(page, 'aws/ux-account/ec2');
   await page.getByRole('cell', { name: 'checkout-api', exact: true }).click();
-  const tabs = page.getByTestId('aws-drawer').getByRole('tab');
-  await tabs.filter({ hasText: /^Overview$/ }).focus();
+  // By accessible name: the shared <Tabs> pads each tab's text with whitespace.
+  const tab = (name: string) => page.getByTestId('aws-drawer').getByRole('tab', { name, exact: true });
+  await tab('Overview').focus();
   await page.keyboard.press('ArrowRight');
-  await expect(tabs.filter({ hasText: /^Metrics$/ })).toBeFocused();
+  await expect(tab('Metrics')).toBeFocused();
   await page.keyboard.press('ArrowRight');
-  await expect(tabs.filter({ hasText: /^Raw JSON$/ })).toBeFocused();
+  await expect(tab('Raw JSON')).toBeFocused();
 });
 
 for (const variant of [
@@ -115,7 +116,7 @@ for (const variant of [
     await page.getByRole('cell', { name: 'checkout-api', exact: true }).click();
     await expect(page.getByTestId('aws-drawer')).toBeVisible();
     await expectNoHorizontalOverflow(page);
-    // The ✕ sits in the drawer chrome (DockedDrawer), outside the testid'd body on a phone sheet.
+    // The ✕ sits in the drawer chrome (DetailPane), outside the testid'd body on a phone sheet.
     await expectFullyInViewport(page, page.getByRole('button', { name: 'Close instance details' }));
     await page.screenshot({ path: `/tmp/otto-ux-cloud-${variant.name}-aws-loaded.png` });
     await openPage(page, `kubernetes/ux-cluster/pods/default/${pod.name}`);
@@ -182,7 +183,7 @@ test('Kubernetes setup source selection works with arrow keys', async ({ page })
 test('phone Kubernetes details cover navigation and contain keyboard focus', async ({ page }) => {
   await page.setViewportSize({ width: 375, height: 812 });
   await openPage(page, `kubernetes/ux-cluster/pods/default/${pod.name}`);
-  // Phone: DockedDrawer presents the shell Drawer sheet (the dialog wraps the testid'd body).
+  // Phone: DetailPane presents the shell Drawer sheet (the dialog wraps the testid'd body).
   const drawer = page.getByRole('dialog', { name: 'Pod details' });
   await expect(page.getByTestId('k8s-drawer')).toBeVisible();
   await expect(drawer).toHaveAttribute('aria-modal', 'true');

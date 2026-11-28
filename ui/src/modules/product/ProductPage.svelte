@@ -30,8 +30,8 @@
   import { lazyComponent } from '../../lib/lazy-component.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
   import type { ProductStory, TreeKind } from './types';
-  import { LIST_PANE, loadPaneWidth } from '../../lib/paneResizer';
-  import PaneDivider from '../../lib/components/PaneDivider.svelte';
+  import ListDetail from '../../lib/components/side/ListDetail.svelte';
+  import ListPane from '../../lib/components/side/ListPane.svelte';
   import PageBody from '../../lib/components/PageBody.svelte';
 
   // Split-out tabs and the import dialog: one promise each, with a designed
@@ -96,11 +96,13 @@
   }
 
   /** Toolbar **New ▾** → Draft · Epic. */
-  function newMenu(e: MouseEvent): void {
-    ctxMenu.show(e, [
-      { label: 'Draft', icon: 'file', action: () => void createDraft() },
-      { label: 'Epic', icon: 'folder', action: () => void createEpic() },
-    ]);
+  function newMenu(e: MouseEvent | Element | null): void {
+    const items = [
+      { label: 'Draft', icon: 'file' as const, action: () => void createDraft() },
+      { label: 'Epic', icon: 'folder' as const, action: () => void createEpic() },
+    ];
+    if (e instanceof MouseEvent) ctxMenu.show(e, items);
+    else ctxMenu.showAt(e, items);
   }
 
   /** Inside an epic: **Add child ▾** → Story · Doc (a folder is asked for). */
@@ -260,11 +262,8 @@
     }
   }
 
-  // Learnings is one full-width view (its own filter control): no list pane,
-  // and on a phone its content section is the one that's open.
-  $effect(() => {
-    if (product.view === 'learnings') untrack(() => (mobileSection = 'content'));
-  });
+  // Learnings is one full-width view (its own filter control): ListDetail's
+  // empty rule gives it the page, so the Stories list keeps its phone state.
 
   // Tag filter state
   let activeTagFilter = $state<string | null>(null);
@@ -327,7 +326,7 @@
     if (product.stories.length === 0) return;
     untrack(() => {
       autoPickedFor = w;
-      if (product.selectedId || viewport.isPhone) return;
+      if (product.selectedId || viewport.navDrawer) return;
       // A routed story (`#/product/<id>`) opens from the route instead.
       if (router.parts[0] === 'product' && router.parts[1]) return;
       const last = recallSelection('product');
@@ -575,33 +574,35 @@
       : [],
   );
 
-  // ── Sidebar width (drag-resizable, persisted) ─────────────────────────────
-  // Mirrors the DatabasePage sidebar idiom: the chosen width survives reloads.
-  // Applied via a CSS var so the phone accordion (full-width bands) still wins.
-  let sideW = $state(loadPaneWidth('product.sideW', LIST_PANE.default, LIST_PANE.min, LIST_PANE.max));
+  // The empty rule: no stories (or the list failed with nothing to show, or
+  // the Learnings view) → no list pane; the content owns the page.
+  const listEmpty = $derived(product.view === 'learnings' || noStories || (!!storiesError && product.stories.length === 0));
 </script>
 
 {#snippet storyRow(s: ProductStory, node?: TreeNode, depth: number = 0)}
   <!-- One tree row: an epic (▾/▸ + 🗂 + count), a top-level story (unchanged
        look) or an indented child (depth 1 = unfiled, 2 = inside a folder). -->
   <div use:rowMenu
-    class="story-row-wrap"
+    class="story-row-wrap side-row"
+    class:selected={product.selectedId === s.id}
     class:active={product.selectedId === s.id}
     class:child={depth > 0}
     class:epic={node?.isEpic}
-    style={depth ? `--depth:${depth}` : undefined}
+    style:--side-depth={depth}
     role="presentation"
     oncontextmenu={(e) => storyMenu(e, s, node)}
   >
     {#if node?.isEpic}
-      <button class="tree-toggle" onclick={() => toggleEpic(s.id)} aria-label={collapsedEpics[s.id] ? 'Expand epic' : 'Collapse epic'} title={collapsedEpics[s.id] ? 'Expand epic' : 'Collapse epic'} aria-expanded={!collapsedEpics[s.id]}>
+      <button class="tree-toggle side-twisty" tabindex="-1" data-side-toggle onclick={() => toggleEpic(s.id)} aria-label={collapsedEpics[s.id] ? 'Expand epic' : 'Collapse epic'} title={collapsedEpics[s.id] ? 'Expand epic' : 'Collapse epic'} aria-expanded={!collapsedEpics[s.id]}>
         <Icon name={collapsedEpics[s.id] ? 'chevronRight' : 'chevronDown'} size={12} />
       </button>
     {/if}
     <button
-      class="story-row"
+      class="story-row side-row-main"
       class:active={product.selectedId === s.id}
+      data-side-row
       aria-current={product.selectedId === s.id ? 'true' : undefined}
+      aria-expanded={node?.isEpic ? !collapsedEpics[s.id] : undefined}
       onclick={() => selectStory(s)}
       title={s.source_kind === 'draft' ? s.title : `${s.source_key} · ${s.title}`}
     >
@@ -635,7 +636,8 @@
     <!-- ONE row action: the ⋯ menu (move, folder, epic role, Delete) — the
          same menu a right-click opens. -->
     <button
-      class="row-menu-btn"
+      class="icon-btn side-row-more row-menu-btn"
+      tabindex="-1"
       onclick={(e) => storyMenu(e, s, node)}
       aria-label="More actions for {s.title}"
       title="More actions"
@@ -659,17 +661,12 @@
 {:else}
 <div class="product-shell">
 <PageHeader tabsPlacement="start"
-  title={viewport.isPhone && mobileSection === 'list' ? 'Product' : headerTitle}
-  crumbs={viewport.isPhone && mobileSection === 'list' ? [] : headerCrumbs}
+  title={headerTitle}
+  crumbs={headerCrumbs}
   subtitle={product.view === 'stories' && selectedStory ? undefined : 'Jira / Confluence stories — analyze, plan, test, publish back'}
 >
-  {#snippet leading()}
-    {#if viewport.isPhone && product.view === 'stories' && mobileSection === 'content'}
-      <button class="btn ghost" onclick={() => (mobileSection = 'list')} aria-label="Back to stories" title="Back to stories"><Icon name="chevronLeft" size={16} /> Back</button>
-    {/if}
-  {/snippet}
   {#snippet badge()}
-    {#if product.view === 'stories' && selectedStory && (!viewport.isPhone || mobileSection === 'content')}
+    {#if product.view === 'stories' && selectedStory}
       <!-- Open story: its stage (or tree role), folder and source key sit beside
            the title — the old breadcrumb row is folded into the header. -->
       {#if selectedIsEpic}
@@ -697,63 +694,71 @@
           <Icon name="plus" size={12} /> Add child <Icon name="chevronDown" size={12} />
         </button>
       {/if}
-      <!-- The ONE import affordance — secondary, before the one primary (the empty state owns it while the list is empty). -->
-      {#if !noStories}
-        <button class="btn small" onclick={() => (importOpen = true)} title="Import an existing Jira issue / Confluence page">
-          <Icon name="download" size={12} /> Import
+      <!-- New and Import live in the Stories list pane (its ＋ and ⋯); with no
+           stories there is no pane, so New stays here beside the empty
+           state's Import. -->
+      {#if listEmpty && product.view === 'stories'}
+        <button
+          class="btn small"
+          onclick={newMenu}
+          title="New: a blank draft or an epic that groups stories/docs in folders"
+          disabled={draftCreating}
+          data-label="New draft or epic…"
+        >
+          <Icon name="plus" size={12} /> {draftCreating ? 'Creating…' : 'New'} <Icon name="chevronDown" size={12} />
         </button>
       {/if}
-      <button
-        class="btn small"
-        class:primary={!noStories && !product.selectedId}
-        onclick={newMenu}
-        title="New: a blank draft or an epic that groups stories/docs in folders"
-        disabled={draftCreating}
-        data-label="New draft or epic…"
-      >
-        <Icon name="plus" size={12} /> {draftCreating ? 'Creating…' : 'New'} <Icon name="chevronDown" size={12} />
-      </button>
     {/if}
   {/snippet}
 </PageHeader>
 <PageBody fill padded={false}>
-<div class="product-page" class:no-stories={noStories} class:learn-view={product.view === 'learnings'} class:m-list-open={mobileSection === 'list'} class:m-content-open={mobileSection === 'content'} style={`--product-side-w:${sideW}px`}>
-  <!-- ── Left sidebar — always rendered to avoid layout jump ───────────── -->
-  <aside class="product-side">
-    {#if product.view === 'stories'}
-      <!-- Stories sidebar (the header's Stories|Learnings toggle names it). -->
-      <!-- Tag filter row (only when tags exist) -->
-      {#if allTags.length > 0}
-        <div class="tag-filter-row">
-          <button
-            class="tag-filter-btn"
-            class:active={activeTagFilter === null}
-            aria-pressed={activeTagFilter === null}
-            onclick={() => (activeTagFilter = null)}
-          >All</button>
-          {#each allTags as tag (tag)}
+<!-- .product-page and its m-*-open markers are kept for the specs that read them. -->
+<div class="product-page" class:m-list-open={mobileSection === 'list'} class:m-content-open={mobileSection === 'content'}>
+<ListDetail
+  module="product"
+  name="Stories"
+  open={mobileSection === 'content'}
+  onback={() => (mobileSection = 'list')}
+  empty={listEmpty}
+  legacy={{ w: 'product.sideW' }}
+>
+  {#snippet list()}
+    <ListPane
+      count={product.stories.length}
+      primary={{ icon: 'plus', label: draftCreating ? 'Creating…' : 'New draft or epic', onclick: () => newMenu(document.querySelector('[data-testid="product-new"]')), testid: 'product-new' }}
+      menu={() => [
+        { label: 'Import story…', icon: 'download', action: () => (importOpen = true) },
+        { label: 'Refresh', icon: 'refresh', action: () => void loadStories() },
+      ]}
+      loading={product.loadingStories && product.stories.length === 0}
+      testid="product-stories"
+    >
+      {#snippet filterRow()}
+        {#if allTags.length > 0}
+          <div class="tag-filter-row" role="group" aria-label="Filter by tag">
             <button
               class="tag-filter-btn"
-              class:active={activeTagFilter === tag}
-              aria-pressed={activeTagFilter === tag}
-              onclick={() => (activeTagFilter = activeTagFilter === tag ? null : tag)}
-            >{tag}</button>
-          {/each}
-        </div>
-      {/if}
-
+              class:active={activeTagFilter === null}
+              aria-pressed={activeTagFilter === null}
+              onclick={() => (activeTagFilter = null)}
+            >All</button>
+            {#each allTags as tag (tag)}
+              <button
+                class="tag-filter-btn"
+                class:active={activeTagFilter === tag}
+                aria-pressed={activeTagFilter === tag}
+                onclick={() => (activeTagFilter = activeTagFilter === tag ? null : tag)}
+              >{tag}</button>
+            {/each}
+          </div>
+        {/if}
+      {/snippet}
       <div class="story-list">
-        {#if (product.loadingStories || storiesError) && product.stories.length === 0}
-          <LoadState what="stories" variant="compact" loading={product.loadingStories} error={storiesError} empty onretry={() => void loadStories()} />
-        {:else if product.stories.length === 0}
-          <EmptyState icon="file" title="No stories yet" body="Import one or start a blank draft from New." />
-        {:else if storiesError}
+        {#if storiesError}
           <!-- A refresh failed: keep the last good list, say so, offer Retry. -->
           <LoadState what="stories" variant="compact" loading={product.loadingStories} error={storiesError} onretry={() => void loadStories()} />
         {/if}
-        {#if product.stories.length === 0}
-          <!-- the loading / error / empty states above own it -->
-        {:else if filteredStories.length === 0}
+        {#if filteredStories.length === 0}
           <EmptyState
             icon="filter"
             title={`No stories tagged “${activeTagFilter}”`}
@@ -769,6 +774,7 @@
                 {#if f.name}
                   <button
                     class="folder-head" data-epic-id={node.story.id}
+                    data-side-row
                     onclick={() => toggleFolder(node.story.id, f.name)}
                     aria-expanded={!collapsedFolders[`${node.story.id}/${f.name}`]}
                   >
@@ -788,12 +794,8 @@
           {/each}
         {/if}
       </div>
-
-    {/if}
-  </aside>
-  {#if product.view === 'stories' && !noStories}
-    <PaneDivider bind:width={sideW} storageKey="product.sideW" label="Resize stories sidebar" />
-  {/if}
+    </ListPane>
+  {/snippet}
 
   <!-- ── Main area ──────────────────────────────────────────────────────── -->
   <div class="product-main">
@@ -914,6 +916,7 @@
       {/if}
     </div>
   </div>
+</ListDetail>
 </div>
 </PageBody>
 </div>
@@ -941,27 +944,7 @@
     display: flex;
     min-height: 0;
   }
-  /* With no stories, onboarding owns the entire page, including on phones. */
-  .product-page.no-stories .product-side {
-    display: none;
-  }
-  /* Learnings has no list pane (and no phone accordion): the view fills it. */
-  .product-page.learn-view .product-side {
-    display: none;
-  }
-
-  /* ── Sidebar ─────────────────────────────────────────────────── */
-  .product-side {
-    /* Default width; an inline `--product-side-w` (drag-resizable, persisted)
-       overrides it. The phone accordion below falls back to full width. */
-    width: var(--product-side-w, 280px);
-    flex-shrink: 0;
-    border-inline-end: 1px solid var(--border);
-    display: flex;
-    flex-direction: column;
-    min-height: 0;
-    position: relative;
-  }
+  /* ── Stories list pane (ListPane): rows on the shared .side-row look ── */
   /* Tree-role / draft markers are metadata, not selection: neutral. */
   .draft-badge {
     font-size: var(--fs-xs);
@@ -972,98 +955,21 @@
     color: var(--text-dim);
   }
   .story-list {
-    flex: 1;
-    overflow-y: auto;
-    padding: 6px 8px;
     display: flex;
     flex-direction: column;
-    gap: 2px;
-    min-height: 0;
+    gap: 1px;
   }
-  /* Wrapper handles hover background + reveals the row's ⋯ button */
-  .story-row-wrap {
-    display: flex;
-    align-items: center;
-    border-radius: var(--radius-s);
-    transition: background var(--dur-fast) ease-out;
-    position: relative;
-  }
-  .story-row-wrap:hover {
-    background: var(--hover);
-  }
-  .story-row-wrap.active {
-    background: var(--accent-soft);
-  }
+  /* Three lines (title, status, tags): taller than the shared two-line row. */
   .story-row {
-    display: flex;
     align-items: flex-start;
-    gap: 8px;
-    flex: 1;
-    min-width: 0;
-    padding: 6px 8px;
-    border: none;
-    border-radius: var(--radius-s);
-    background: transparent;
-    color: var(--text);
-    cursor: pointer;
-    text-align: start;
+    padding-block: 6px;
   }
-  /* Selection is the row tint (set on the wrap); text stays --text. */
-  .story-row.active .story-title {
+  .story-row-wrap.active .story-title {
     font-weight: 600;
   }
   /* ── Epic tree rows ─────────────────────────────────────────── */
-  .row-menu-btn {
-    display: grid;
-    place-items: center;
-    flex-shrink: 0;
-    width: 22px;
-    height: 22px;
-    border: none;
-    border-radius: var(--radius-s);
-    background: transparent;
-    color: transparent;
-    cursor: pointer;
-    margin-inline-end: 6px;
-    padding: 0;
-    transition: color var(--dur-fast), background var(--dur-fast);
-  }
-  .story-row-wrap:hover .row-menu-btn,
-  .story-row-wrap:focus-within .row-menu-btn,
-  .story-row-wrap.active .row-menu-btn,
-  .row-menu-btn:focus-visible {
-    color: var(--text-dim);
-  }
-  /* Touch has no hover: the ⋯ is always visible there. */
-  @media (hover: none) {
-    .row-menu-btn {
-      color: var(--text-dim);
-    }
-  }
-  .row-menu-btn:hover {
-    background: var(--accent-soft);
-    color: var(--accent-text);
-  }
-  .tree-toggle {
-    display: grid;
-    place-items: center;
-    flex-shrink: 0;
-    width: 18px;
-    height: 22px;
-    margin-inline-start: 2px;
-    border: none;
-    background: transparent;
-    color: var(--text-dim);
-    cursor: pointer;
-    padding: 0;
-  }
-  .story-row-wrap.epic > .story-row {
-    padding-inline-start: 2px;
-  }
-  /* Children indent by depth (1 = unfiled under the epic, 2 = inside a folder). */
-  .story-row-wrap.child {
-    margin-inline-start: calc(var(--depth, 1) * 14px);
-  }
+  /* Children indent by depth (--side-depth: 1 = unfiled under the epic, 2 =
+     inside a folder); the shared row pads them. */
   .story-row-wrap.child .story-row {
     padding-block: 4px;
   }
@@ -1074,9 +980,10 @@
     display: flex;
     align-items: center;
     gap: 4px;
-    width: calc(100% - 14px);
-    margin-inline-start: 14px;
-    padding: 4px 6px 2px;
+    width: 100%;
+    padding-block: 4px 2px;
+    padding-inline: 20px 6px;
+    border-radius: var(--radius-s);
     border: none;
     background: transparent;
     color: var(--text-dim);
@@ -1116,7 +1023,7 @@
     margin-top: 2px;
   }
   .story-row-wrap.active .story-icon {
-    color: var(--accent-text);
+    color: var(--text);
   }
   .story-info {
     flex: 1;
@@ -1150,9 +1057,6 @@
     align-items: center;
     flex-wrap: wrap;
     gap: 4px;
-    padding: 4px 8px 4px;
-    border-bottom: 1px solid var(--border);
-    flex-shrink: 0;
   }
   .tag-filter-btn {
     padding: 1px 6px;
@@ -1366,43 +1270,8 @@
     color: var(--text-dim);
   }
 
-  /* Phone push navigation: the header's Back action returns to the list. */
+  /* Phone (ListDetail pushes the story): bigger text and touch sizes. */
   @media (max-width: 640px) {
-    .product-page { flex-direction: column; }
-    /* Panels: collapsed by default; the open one gets the remaining height and
-       scrolls on its own. */
-    .product-side {
-      width: 100%;
-      border-inline-end: none;
-      max-height: none;
-      min-height: 0;
-      overflow: hidden;
-      flex: 0 0 0;
-      height: 0;
-    }
-    .product-main {
-      min-height: 0;
-      overflow: hidden;
-      flex: 0 0 0;
-      height: 0;
-    }
-    .m-list-open .product-side {
-      flex: 1 1 auto;
-      height: auto;
-      overflow-y: auto;
-    }
-    .no-stories .product-main,
-    .m-content-open .product-main {
-      flex: 1 1 auto;
-      height: auto;
-      overflow: hidden; /* inner .product-body owns the scroll */
-    }
-
-    /* The list's own internal scroller fills the expanded panel. */
-    .m-list-open .story-list {
-      flex: 1 1 auto;
-    }
-
     /* ── Bigger, more legible text on phones ───────────────────────────── */
     .story-title { font-size: var(--fs-l); }
     .story-key, .story-meta, .tag-filter-btn, .story-tag-chip { font-size: var(--fs-s); }
@@ -1411,8 +1280,6 @@
     /* Keep the sub-nav touch-friendly while staying visually subordinate. */
     .sub-tab-strip .st { min-height: var(--hit-min); font-size: var(--fs-m); padding: 0 10px; }
     .product-body { padding: 14px; }
-    /* Comfortable touch target for the per-row ⋯ and epic expand buttons. */
-    .row-menu-btn, .tree-toggle { width: var(--hit-min); height: var(--hit-min); }
-    .story-row { padding: 10px 8px; }
+    .story-row { padding-block: 10px; }
   }
 </style>

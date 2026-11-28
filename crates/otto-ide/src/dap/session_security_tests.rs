@@ -243,3 +243,86 @@ async fn dap_manager_tracks_session_ownership_without_external_map_drift() {
     assert!(mgr.list_sessions_for_user(&bob).is_empty());
     assert_eq!(mgr.list_sessions_for_user(&root).len(), 1);
 }
+
+/// Boot a mock adapter session (`attach` when `attach_port` is set), press
+/// Stop, and return every `(command, arguments)` the adapter received.
+async fn stop_and_record(attach_port: Option<u16>) -> Vec<(String, serde_json::Value)> {
+    use crate::dap::wire::{DapMessage, DapReader, DapWriter};
+    use crate::types::{IdeDebugAction, IdeDebugCommandReq, IdeDebugState};
+    use serde_json::json;
+    use std::sync::{Arc, Mutex};
+
+    let tmp = tempfile::tempdir().unwrap();
+    let seen: Arc<Mutex<Vec<(String, serde_json::Value)>>> = Arc::default();
+    let seen_srv = Arc::clone(&seen);
+    let (client_io, server_io) = tokio::io::duplex(16384);
+    let server = tokio::spawn(async move {
+        let (r, w) = tokio::io::split(server_io);
+        let mut reader = DapReader::new(r);
+        let mut writer = DapWriter::new(w);
+        while let Ok(Some(DapMessage::Request(req))) = reader.next_message().await {
+            let args = req.arguments.clone().unwrap_or(json!({}));
+            seen_srv.lock().unwrap().push((req.command.clone(), args));
+            let caps = json!({ "supportsTerminateRequest": true });
+            let body = if req.command == "initialize" {
+                caps
+            } else {
+                json!({})
+            };
+            let _ = writer
+                .send_response(req.seq, &req.command, Ok(Some(body)))
+                .await;
+            match req.command.as_str() {
+                "attach" | "launch" => {
+                    let _ = writer.send_event("initialized", Some(json!({}))).await;
+                }
+                "disconnect" => break,
+                _ => {}
+            }
+        }
+    });
+    let mgr = DapManager::new(tmp.path().to_path_buf());
+    let req = IdeStartDebugReq {
+        target: IdeTargetSpec::local(tmp.path().to_string_lossy().into_owned()),
+        language: "go".into(),
+        launch: IdeDebugLaunchSpec {
+            program: tmp.path().join("main.go").to_string_lossy().into_owned(),
+            attach_port,
+            ..IdeDebugLaunchSpec::default()
+        },
+        ..IdeStartDebugReq::default()
+    };
+    let snap = mgr
+        .start_session_with_stream(req, "dlv", client_io, true)
+        .await
+        .unwrap();
+    let stop = IdeDebugCommandReq {
+        action: IdeDebugAction::Stop,
+        thread_id: None,
+        frame_id: None,
+        path: None,
+        line: None,
+    };
+    let stopped = mgr.command(&snap.id, stop).await.unwrap();
+    assert_eq!(stopped.state, IdeDebugState::Terminated);
+    server.await.unwrap();
+    seen.lock().map(|v| v.clone()).unwrap()
+}
+
+#[tokio::test]
+async fn stop_detaches_an_attach_session_and_never_ends_its_debuggee() {
+    let seen = stop_and_record(Some(4711)).await;
+    assert!(seen.iter().any(|(c, _)| c == "attach"));
+    assert!(
+        !seen.iter().any(|(c, _)| c == "terminate"),
+        "an attached process is not Otto's to terminate: {seen:?}"
+    );
+    let (_, disconnect) = seen.iter().find(|(c, _)| c == "disconnect").unwrap();
+    assert_eq!(disconnect["terminateDebuggee"], serde_json::json!(false));
+
+    // A launched debuggee is Otto's: Stop still ends it.
+    let seen = stop_and_record(None).await;
+    assert!(seen.iter().any(|(c, _)| c == "terminate"));
+    let (_, disconnect) = seen.iter().find(|(c, _)| c == "disconnect").unwrap();
+    assert_eq!(disconnect["terminateDebuggee"], serde_json::json!(true));
+}

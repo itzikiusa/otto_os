@@ -1,12 +1,13 @@
 <!--
-  The agent's side panel beside its chat — one calm scroll:
+  The agent's Routines, the body of the page's Detail pane beside its chat
+  (a full-width sheet on a phone) — one calm scroll:
   · a pending "update instructions?" proposal (only when there is one);
   · Routines — what it runs on a schedule, in plain words and local time,
     with the next run on the same line; ⋯ per routine (Run now, Pause, Edit,
     Delete); "Add routine" opens the form (or ask the agent in chat);
-  · Now — only while something runs (runs, threads, hand-offs);
-  · Recent runs — the last few, each opens its report or thread.
-  Who it is, personality, model, memory, Slack and rules live in Settings.
+  · Now — only while something runs (runs, threads, hand-offs).
+  Past runs are in History; who it is, personality, model, memory, Slack and
+  rules live in Settings.
 -->
 <script lang="ts">
   import { untrack } from 'svelte';
@@ -22,15 +23,12 @@
   import { confirmRunAndDeliver } from '../../lib/confirmOutward';
   import { ctxMenu } from '../../lib/contextmenu.svelte';
   import { loadErrorText } from '../../lib/loadError';
-  import { runStatus } from '../../lib/status';
   import { now } from '../../lib/stores/now.svelte';
   import { routineLabel, runBadge } from '../../lib/personalAgentBadges';
   import { auth } from '../../lib/stores/auth.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { browserTz, routineWhen, scheduleForDays, workdays } from './cadence';
-  import { firstLine, nextRunWords } from './agentHome';
-  import { leadLine } from '../../lib/plainText';
-  import RunReport from '../../lib/components/RunReport.svelte';
+  import { nextRunWords } from './agentHome';
   import RoutineForm from './RoutineForm.svelte';
   import type {
     PersonalAgent,
@@ -42,17 +40,14 @@
 
   interface Props {
     agent: PersonalAgent;
-    embedded?: boolean;
-    onclose: () => void;
   }
-  let { agent, onclose, embedded = false }: Props = $props();
+  let { agent }: Props = $props();
 
   const schedules = $derived(personalAgents.schedulesByAgent[agent.id] ?? []);
   const runs = $derived(personalAgents.runsByAgent[agent.id] ?? []);
   const running = $derived(runs.filter((r) => r.status === 'running'));
   /** A run event can land before the runs list refetches: say so anyway. */
   const runStarting = $derived(!!personalAgents.runningByAgent[agent.id] && running.length === 0);
-  const recent = $derived(runs.filter((r) => r.status !== 'running').slice(0, 5));
   /** Busy threads that are not a running run's own thread (listed above). */
   const runThreadIds = $derived(new Set(running.map((r) => r.session_id).filter(Boolean)));
   const busyThreads = $derived(
@@ -231,44 +226,13 @@
     }
   }
 
-  /** The run's routine name ('' for a run without one). */
-  function routineOf(r: PersonalAgentRun): string {
-    const s = r.schedule_id ? schedules.find((x) => x.id === r.schedule_id) : undefined;
-    return s ? routineLabel(s.directive) : '';
-  }
-
   function runName(r: PersonalAgentRun): string {
     const s = r.schedule_id ? schedules.find((x) => x.id === r.schedule_id) : undefined;
     return runBadge(r, s ? routineLabel(s.directive) : null).label;
   }
-
-  // --- Report viewer ---------------------------------------------------------
-  let reportRun = $state<PersonalAgentRun | null>(null);
-  function openRun(r: PersonalAgentRun): void {
-    reportRun = r;
-  }
-  // A finished run reads as its result; anything else as its name, with the
-  // reason (stopped / failed) in the subline.
-  const ok = (r: PersonalAgentRun) => r.status === 'ok';
-  const summaryOf = (r: PersonalAgentRun): string => (ok(r) && leadLine(r.summary)) || runName(r);
-  const sublineOf = (r: PersonalAgentRun): string => (ok(r) ? runName(r) : firstLine(r.error ?? '') || runStatus(r.status).label);
 </script>
 
-<svelte:window onkeydown={(e) => {
-  // Where the panel overlays the chat (narrow windows), Escape closes it —
-  // unless a dialog of its own is open (that dialog takes the Escape).
-  if (!embedded && e.key === 'Escape' && !e.defaultPrevented && !reportRun && !form && window.matchMedia('(max-width: 1024px)').matches) onclose();
-}} />
-
-<aside class="sp" class:embedded aria-label="{agent.name}: routines and runs" data-testid="pa-side-panel">
-  {#if !embedded}
-  <div class="sp-head">
-    <h2><span class="sp-who" dir="auto">{agent.name}</span> · Routines &amp; runs</h2>
-    <button type="button" class="icon-btn" aria-label="Settings for {agent.name}" title="Settings" onclick={() => router.go(`personal-agents/${agent.id}/about`)}><Icon name="gear" size={14} /></button>
-    <button type="button" class="icon-btn" aria-label="Close panel" title="Close panel" onclick={onclose}><Icon name="x" size={14} /></button>
-  </div>
-
-  {/if}
+<section class="sp" aria-label="{agent.name}: routines and runs" data-testid="pa-side-panel">
   <div class="sp-body">
     {#if prop?.proposal}
       <section class="sp-sec sp-card" data-testid="pa-proposal">
@@ -375,55 +339,15 @@
       </section>
     {/if}
 
-    {#if !embedded}
-    <section class="sp-sec" data-testid="pa-recent">
-      <h3>Recent runs</h3>
-      {#if personalAgents.runsByAgent[agent.id] === undefined}
-        <Skeleton rows={3} height={36} label="recent runs" />
-      {:else if personalAgents.runsError[agent.id] && runs.length === 0}
-        <LoadState what="recent runs" error={personalAgents.runsError[agent.id]} empty onretry={() => void personalAgents.loadRuns(agent.id)} />
-      {:else if recent.length === 0}
-        <p class="sp-dim">{running.length > 0 || runStarting ? 'Its result lands here when it’s done.' : 'No runs yet. When a routine runs, its result lands in the chat and here.'}</p>
-      {:else}
-        <ul class="sp-list">
-          {#each recent as r (r.id)}
-            <li class="sp-item">
-              <button type="button" class="sp-item-main" title={r.report_rel ? 'Open the report' : 'Open the run'} onclick={() => openRun(r)}>
-                <span class="sp-st sp-st-{runStatus(r.status).tone}" aria-hidden="true"></span>
-                <span class="sp-item-t">
-                  <span class="ellipsis" dir="auto">{summaryOf(r)}</span>
-                  <span class="sp-dim ellipsis" dir="auto">{sublineOf(r)} · <RelTime iso={r.finished_at ?? r.started_at} /></span>
-                </span>
-              </button>
-            </li>
-          {/each}
-        </ul>
-        <button type="button" class="linklike" onclick={() => router.go(`personal-agents/${agent.id}/runs`)}>All runs</button>
-      {/if}
-    </section>
-    {/if}
   </div>
-
-</aside>
+</section>
 
 {#if form}
   <RoutineForm {agent} routine={form === 'new' ? null : form} onclose={() => (form = null)} />
 {/if}
 
-{#if reportRun}
-  <RunReport run={reportRun} routine={routineOf(reportRun)} name={runName(reportRun)} onclose={() => (reportRun = null)} />
-{/if}
-
 <style>
-  .sp {
-    display: flex; flex-direction: column; min-block-size: 0; inline-size: 320px; flex: none;
-    border-inline-start: 1px solid var(--border); background: var(--surface);
-  }
-  .sp.embedded { position: static; inline-size: 100%; border: 0; box-shadow: none; }
-  .sp.embedded .sp-body { padding: 0; overflow: visible; }
-  .sp-head { display: flex; align-items: center; gap: 8px; padding: 10px 12px; border-block-end: 1px solid var(--border); }
-  .sp-head h2 { flex: 1; min-inline-size: 0; margin: 0; font-size: var(--fs-m); font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .sp-body { flex: 1; overflow-y: auto; padding: 12px; display: flex; flex-direction: column; gap: 20px; min-block-size: 0; }
+  .sp-body { padding: 12px 16px; display: flex; flex-direction: column; gap: 20px; }
   .sp-sec { display: flex; flex-direction: column; gap: 8px; }
   .sp-sec h3 { margin: 0; font-size: var(--fs-s); font-weight: 600; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.06em; }
   .sp-dim { margin: 0; color: var(--text-dim); font-size: var(--fs-s); }
@@ -452,16 +376,10 @@
   .sp-item-main:focus-visible { outline: 2px solid var(--accent-text); outline-offset: -2px; }
   .sp-item-main :global(svg) { flex: none; color: var(--text-dim); }
   .sp-item-t { display: flex; flex-direction: column; min-inline-size: 0; font-size: var(--fs-s); }
-  .sp-st { flex: none; inline-size: 8px; block-size: 8px; border-radius: 50%; background: var(--text-dim); }
-  .sp-st-success { background: var(--success); }
-  .sp-st-danger { background: var(--danger); }
-  .sp-st-warning { background: var(--warning); }
-  .sp-st-info { background: var(--info); }
   .sp-row { display: flex; gap: 6px; align-items: center; }
   .sp-row > :global(.input) { flex: 1; min-inline-size: 0; }
   .sp-sec-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
   .sp-routine-t { display: flex; align-items: center; gap: 6px; min-inline-size: 0; }
-  .sp-who { font-weight: 600; }
   .sp-card { border: 1px solid var(--accent-line); border-radius: var(--radius-m); padding: 10px; background: var(--accent-faint); }
   .sp-card h3 { color: var(--text); text-transform: none; letter-spacing: 0; font-size: var(--fs-m); }
   .sp-diff { display: grid; gap: 4px; }
@@ -469,12 +387,6 @@
   .sp-pre.from { color: var(--text-dim); }
   .linklike { align-self: flex-start; border: 0; background: none; padding: 0; color: var(--accent-text); font: inherit; font-size: var(--fs-s); cursor: pointer; text-align: start; }
   .linklike:hover { text-decoration: underline; }
-  @media (max-width: 1024px) {
-    .sp { position: absolute; inset-block: 0; inset-inline-end: 0; z-index: 3; box-shadow: var(--glass-shadow); }
-  }
-  @media (max-width: 640px) {
-    .sp { inline-size: 100%; }
-  }
   .sp-tag { display: inline-block; padding: 0 6px; border: 1px solid var(--border); border-radius: var(--radius-s); font-size: var(--fs-xs); color: var(--text-dim); }
   .sp-suggest {
     display: flex;

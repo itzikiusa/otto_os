@@ -48,6 +48,9 @@ export interface SecurityScanSummary {
   error: string | null;
   count: number;
   engines: SecurityEngineRun[];
+  trigger: 'manual' | 'scheduled';
+  /** Engines refused (`failed: false`) or failed without failing the scan. */
+  skipped: { engine: string; reason: string; failed: boolean }[];
 }
 
 export interface SecurityScanDetail {
@@ -104,6 +107,42 @@ export interface PassiveAuditTarget {
 export interface ProjectPassiveAudit {
   confirmed: PassiveAuditTarget | null;
   candidates: PassiveAuditCandidate[];
+  active_schedule: ActiveScheduleState;
+}
+
+/** The exact identity a person allows for scheduled active checks. */
+export interface ActiveScheduleRequest {
+  run_config_id: string;
+  url: string;
+  confirmed_at: string;
+  addresses: string[];
+  cron: string;
+  timezone: string;
+  armed_at: string;
+  template_policy: string;
+}
+
+export interface ActiveScheduleGrant {
+  granted_by: string;
+  granted_at: string;
+  expires_at: string;
+  target_run_config_id: string;
+  target_url: string;
+  target_confirmed_at: string;
+  addresses: string[];
+  schedule_cron: string;
+  schedule_timezone: string;
+  schedule_armed_at: string;
+  template_policy: string;
+  invalidated_at: string | null;
+  invalid_reason: string | null;
+}
+
+export interface ActiveScheduleState {
+  grant: ActiveScheduleGrant | null;
+  /** What may be allowed now; null with `blocked` naming the missing condition. */
+  offer: ActiveScheduleRequest | null;
+  blocked: string | null;
 }
 
 export type ConfirmPassiveAudit = Omit<PassiveAuditTarget, 'confirmed_at'>;

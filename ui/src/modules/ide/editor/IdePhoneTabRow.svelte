@@ -1,13 +1,14 @@
 <script lang="ts">
-  // The open-files row on a phone (stacked layout): Back, the active file — a tap lists
+  // The open-files row on a phone (stacked layout): the active file — a tap lists
   // every open file ("N open"), with Editor | Preview and the close actions — and the
-  // editor's command menu (⋯: Go to definition, Find usages, docs, Rename, Find in file,
-  // Go to line, Text size…). No split buttons: a phone never shows two editors. On a
-  // phone on its side the same row sits inside the page header (`inHeader`).
+  // editor's command menu (⋯: Go to definition, Navigate Back, Find usages, docs, Rename,
+  // Find in file, Go to line, Text size…). No ‹ of its own: one Back per screen, the page
+  // header's. No split buttons: a phone never shows two editors. On a phone on its side
+  // the same row sits inside the page header (`inHeader`).
   import Icon from '../../../lib/components/Icon.svelte';
   import { ide } from '../ideStore.svelte';
   import { ideDiskChange } from '../store/ideDiskChange.svelte';
-  import { canIdeNavigateBack, formatIdeTabDisplayName, navigateIdeBack } from './ideEditorStoreBridge.svelte';
+  import { formatIdeTabDisplayName } from './ideEditorStoreBridge.svelte';
   import { openIdeEditorTouchMenu } from './ideEditorTouchMenu';
   import IdePreviewModeToggle from './IdePreviewModeToggle.svelte';
 
@@ -30,17 +31,6 @@
 
 {#if tab}
   <div class="ide-phone-row" class:in-header={inHeader} data-testid="ide-phone-file-row">
-    <button
-      type="button"
-      class="icon-btn ide-phone-btn"
-      aria-label="Navigate back"
-      title="Back"
-      disabled={!canIdeNavigateBack()}
-      onclick={() => void navigateIdeBack()}
-      data-testid="ide-nav-back"
-    >
-      <Icon name="chevronLeft" size={16} />
-    </button>
     <div class="ide-tabs-strip ide-phone-strip" role="group" aria-label="Open files" data-testid="ide-tabs-strip">
       <div class="ide-tab active">
         <button

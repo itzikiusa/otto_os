@@ -1,10 +1,9 @@
 <script lang="ts">
-  // Workspace allowlists and policy-as-code stay close to the server registry,
-  // but behind a side drawer so the common server/tool flow remains compact.
-  // The slide-over itself (scrim, Esc/outside close, focus trap, modal
-  // registration) is the shared shell/Drawer.
+  // Workspace allowlists and policy-as-code stay close to the server registry:
+  // the Servers section's Detail pane (inline beside the list while it keeps
+  // 480 px, else a right sheet — resizable, Esc, focus return).
   import Icon from '../../lib/components/Icon.svelte';
-  import Drawer from '../../shell/Drawer.svelte';
+  import DetailPane from '../../lib/components/side/DetailPane.svelte';
   import type { McpServerDetail } from '../../lib/api/types';
   import AllowlistsTab from './AllowlistsTab.svelte';
   import PoliciesTab from './PoliciesTab.svelte';
@@ -18,48 +17,39 @@
 
   let allowlistsOpen = $state(true);
   let policiesOpen = $state(false);
-
-  // The parent mounts this only while it is wanted; the Drawer closes itself
-  // (✕, Esc, scrim) by flipping `open`, which unmounts us via onClose.
-  let open = $state(true);
-  $effect(() => {
-    if (!open) onClose();
-  });
 </script>
 
-<Drawer bind:open side="right" title="Rules" width="min(720px, 100%)">
-  <div class="rules" data-testid="mcp-rules-drawer">
-    <section class="rule-section">
-      <button
-        class="section-head"
-        type="button"
-        aria-expanded={allowlistsOpen}
-        onclick={() => (allowlistsOpen = !allowlistsOpen)}
-      >
-        <Icon name={allowlistsOpen ? 'chevronDown' : 'chevronRight'} size={13} />
-        <span>Allowlists</span>
-      </button>
-      {#if allowlistsOpen}
-        <div class="section-body"><AllowlistsTab {wsId} {servers} /></div>
-      {/if}
-    </section>
+<DetailPane open module="mcp" pane="rules" title="Rules" onclose={onClose} testid="mcp-rules-drawer">
+  <section class="rule-section">
+    <button
+      class="section-head"
+      type="button"
+      aria-expanded={allowlistsOpen}
+      onclick={() => (allowlistsOpen = !allowlistsOpen)}
+    >
+      <Icon name={allowlistsOpen ? 'chevronDown' : 'chevronRight'} size={13} />
+      <span>Allowlists</span>
+    </button>
+    {#if allowlistsOpen}
+      <div class="section-body"><AllowlistsTab {wsId} {servers} /></div>
+    {/if}
+  </section>
 
-    <section class="rule-section">
-      <button
-        class="section-head"
-        type="button"
-        aria-expanded={policiesOpen}
-        onclick={() => (policiesOpen = !policiesOpen)}
-      >
-        <Icon name={policiesOpen ? 'chevronDown' : 'chevronRight'} size={13} />
-        <span>Policies</span>
-      </button>
-      {#if policiesOpen}
-        <div class="section-body"><PoliciesTab {wsId} {servers} /></div>
-      {/if}
-    </section>
-  </div>
-</Drawer>
+  <section class="rule-section">
+    <button
+      class="section-head"
+      type="button"
+      aria-expanded={policiesOpen}
+      onclick={() => (policiesOpen = !policiesOpen)}
+    >
+      <Icon name={policiesOpen ? 'chevronDown' : 'chevronRight'} size={13} />
+      <span>Policies</span>
+    </button>
+    {#if policiesOpen}
+      <div class="section-body"><PoliciesTab {wsId} {servers} /></div>
+    {/if}
+  </section>
+</DetailPane>
 
 <style>
   .rule-section {

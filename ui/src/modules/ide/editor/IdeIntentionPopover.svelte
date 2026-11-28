@@ -5,6 +5,7 @@
   import { tick } from 'svelte';
   import { placeAnchored, type AnchorPlacement } from '../../../lib/anchorPlace';
   import Icon from '../../../lib/components/Icon.svelte';
+  import { viewport } from '../../../lib/stores/viewport.svelte';
   import { extractGoBuildTagsFromSource } from '../../../lib/goBuildTags';
   import { detectManifestEcosystem, executeIdeDepAction, type IdeDepItem } from '../../../lib/components/cm-ide-deps';
   import { previewConcreteEdits, type IdeConcreteTextEdit, type IdeQuickFixAction } from '../../../lib/components/cm-ide-quickfix';
@@ -73,11 +74,11 @@
     if (restoreFocus && returnFocusEl?.isConnected) returnFocusEl.focus({ preventScroll: true });
   }
 
-  let stacked = $state(typeof window !== 'undefined' && window.innerWidth <= 640);
+  // A phone stacks the preview (the one phone signal, not a private width).
+  const stacked = $derived(viewport.isPhone);
 
   function updatePlacement(): void {
     if (typeof window === 'undefined' || !anchorEl || !popEl) return;
-    stacked = window.innerWidth <= 640;
     maxW = Math.min(560, Math.max(260, window.innerWidth - 16));
     pos = placeAnchored(anchorEl, popEl, { prefer: 'below', align: 'start', gap: 4 });
   }

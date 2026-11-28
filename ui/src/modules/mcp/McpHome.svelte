@@ -13,7 +13,7 @@
   import InboxFold from '../../lib/components/InboxFold.svelte';
   import InboxRow from '../../lib/components/InboxRow.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
-  import Modal from '../../lib/components/Modal.svelte';
+  import DetailPane from '../../lib/components/side/DetailPane.svelte';
   import { mcpCpApi } from '../../lib/api/mcp';
   import type { McpApproval, McpOttoServerStatus, McpServerDetail } from '../../lib/api/types';
   import { loadErrorText } from '../../lib/loadError';
@@ -123,6 +123,9 @@
   }
 </script>
 
+<!-- The inbox | the open request (the Detail pane: inline beside it, a sheet when there is no room). -->
+<div class="home-row">
+<div class="home-scroll">
 <div class="home read-col" data-testid="mcp-home">
   {#if outage}
     <!-- One outage, one line, one Retry (it reloads everything this view reads). -->
@@ -163,31 +166,62 @@
     </section>
   {/if}
 </div>
+</div>
 
-{#if open}
-  {@const a = open}
-  <Modal bottom title={a.tool ?? a.title} width={520} onclose={() => (open = null)}>
-    <dl class="facts">
-      <dt>Who asks</dt><dd dir="auto">{who(a)}</dd>
-      <dt>What it will do</dt><dd dir="auto">{a.detail ?? a.title}</dd>
-      {#if a.server_name}<dt>Server</dt><dd>{a.server_name}</dd>{/if}
-      {#if a.expires_at}<dt>Expires</dt><dd>{rel(a.expires_at)}</dd>{/if}
-    </dl>
-    {#if a.args_redacted_json && a.args_redacted_json !== '{}'}<pre class="args">{prettyArgs(a.args_redacted_json)}</pre>{/if}
-    <p class="dim small">Values are redacted. To stop being asked for this tool, use “Approve &amp; always allow…” in <button class="link" onclick={() => { open = null; router.go('mcp/activity'); }}>Activity</button>.</p>
+  <DetailPane module="mcp" pane="approval" open={!!open} title={open?.tool ?? open?.title ?? 'Request'} onclose={() => (open = null)} testid="mcp-home-approval-detail">
+    {#if open}
+      {@const a = open}
+      <div class="req">
+        <dl class="facts">
+          <dt>Who asks</dt><dd dir="auto">{who(a)}</dd>
+          <dt>What it will do</dt><dd dir="auto">{a.detail ?? a.title}</dd>
+          {#if a.server_name}<dt>Server</dt><dd>{a.server_name}</dd>{/if}
+          {#if a.expires_at}<dt>Expires</dt><dd>{rel(a.expires_at)}</dd>{/if}
+        </dl>
+        {#if a.args_redacted_json && a.args_redacted_json !== '{}'}<pre class="args">{prettyArgs(a.args_redacted_json)}</pre>{/if}
+        <p class="dim small">Values are redacted. To stop being asked for this tool, use “Approve &amp; always allow…” in <button class="link" onclick={() => { open = null; router.go('mcp/activity'); }}>Activity</button>.</p>
+      </div>
+    {/if}
     {#snippet footer()}
-      <ApprovalActions size="normal" busy={busy[a.id] ?? null} disabled={!canDecide(a)} disabledReason={triageBlockedReason(a, auth.me?.id)}
+      {#if open}
+        {@const a = open}
+        <div class="req-actions">
+  <ApprovalActions size="normal" busy={busy[a.id] ?? null} disabled={!canDecide(a)} disabledReason={triageBlockedReason(a, auth.me?.id)}
         denyTarget="this {a.kind === 'human_ask' ? 'request' : 'tool call'}" onapprove={() => decide(a, true)} ondeny={(reason) => decide(a, false, reason)} />
+        </div>
+      {/if}
     {/snippet}
-  </Modal>
-{/if}
+  </DetailPane>
+</div>
 
 <style>
+  .home-row {
+    flex: 1;
+    min-height: 0;
+    display: flex;
+  }
+  .home-scroll {
+    flex: 1;
+    min-width: 0;
+    overflow-y: auto;
+  }
   .home {
     display: flex;
     flex-direction: column;
     gap: var(--sp-6);
     padding-block: var(--sp-6);
+  }
+  /* A touch screen: Approve / Deny take a finger, as in the old sheet. */
+  @media (pointer: coarse) {
+    .req-actions :global(.btn) {
+      min-block-size: 44px;
+    }
+  }
+  .req {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    padding: 12px 16px;
   }
   .appr {
     display: flex;

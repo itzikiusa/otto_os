@@ -2,8 +2,8 @@
   import { announce } from '../../lib/announce.svelte';
   import { plural } from '../../lib/plural';
   import { toastError } from '../../lib/toastError';
-  import { LIST_PANE, loadPaneWidth } from '../../lib/paneResizer';
-  import PaneDivider from '../../lib/components/PaneDivider.svelte';
+  import ListDetail from '../../lib/components/side/ListDetail.svelte';
+  import ListPane from '../../lib/components/side/ListPane.svelte';
   import { untrack } from 'svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import { api, ApiError } from '../../lib/api/client';
@@ -60,8 +60,8 @@
   let dryRunResult = $state<DryRunResp | null>(null);
   const blockedBy = $derived(resetWarning(dryRunResult, selected)); // the preview's refusal warning
 
-  // Resizable list (PaneDivider, width persisted); phones / narrow panes stack it full-width.
-  let listW = $state(loadPaneWidth('brokers.groupsListW', LIST_PANE.default, LIST_PANE.min, LIST_PANE.max));
+  // Phone: the group list is the page until one is tapped (pushed, "‹ Groups").
+  let phoneOpen = $state(false);
 
   $effect(() => {
     void cluster.id;
@@ -302,48 +302,60 @@
 </script>
 
 <div class="groups-container">
-<div class="groups">
-  <div
-    class="list"
-    class:windowed={groupsTw.active(groups.length)}
-    style="--groups-list-w:{listW}px"
-    bind:this={groupsEl}
-    bind:clientHeight={groupsTw.viewH}
-    onscroll={groupsTw.onscroll}
-  >
-    {#if accessDenied}
-      <div class="acl-denied pad">
-        <p class="acl-title">Consumer-group access not granted</p>
-        <p class="muted">{accessMsg}</p>
-        <p class="muted">
-          Lag and connected consumers need <code>DescribeGroup</code> permission on the broker.
-          Otto probed once and won’t keep retrying (so it stops hitting the broker with denied
-          requests); grant the ACL and re-test the cluster, and this tab will populate.
-        </p>
+<ListDetail
+  module="brokers"
+  pane="groups"
+  name="Groups"
+  open={phoneOpen && !!selected}
+  onback={() => (phoneOpen = false)}
+  empty={!loading && !loadError && groups.length === 0}
+  legacy={{ w: 'brokers.groupsListW' }}
+>
+  {#snippet list()}
+    <ListPane
+      count={groups.length}
+      menu={() => [{ label: 'Refresh', icon: 'refresh', action: () => loadGroups() }]}
+      loading={loading && groups.length === 0}
+      error={groups.length === 0 ? loadError : null}
+      onretry={() => loadGroups()}
+      testid="brokers-groups-list"
+    >
+      <div
+        class="list"
+        class:windowed={groupsTw.active(groups.length)}
+        bind:this={groupsEl}
+        bind:clientHeight={groupsTw.viewH}
+        onscroll={groupsTw.onscroll}
+      >
+        {#if groupsWin.top}<div class="tw-spacer" aria-hidden="true" style="height:{groupsWin.top}px"></div>{/if}
+        {#each groups.slice(groupsWin.start, groupsWin.end) as g (g.group_id)}
+          {@const sel = selected === g.group_id}
+          <div class="side-row two-line" class:selected={sel}>
+            <button
+              type="button"
+              class="side-row-main grow-row"
+              data-side-row
+              aria-current={sel ? 'true' : undefined}
+              onclick={() => {
+                open(g.group_id);
+                phoneOpen = true;
+              }}
+            >
+              <span class="side-row-text">
+                <span class="side-row-title gid" title={g.group_id}>{g.group_id}</span>
+                <span class="side-row-meta badges">
+                  <span class="state {stateClass(g.state)}">{g.state}</span>
+                  <span>{plural(g.members, 'member')}</span>
+                  <GroupLagBadge group={g} />
+                </span>
+              </span>
+            </button>
+          </div>
+        {/each}
+        {#if groupsWin.bottom}<div class="tw-spacer" aria-hidden="true" style="height:{groupsWin.bottom}px"></div>{/if}
       </div>
-    {:else}
-      <!-- First load: skeleton; failed load: inline error (or a stale bar over
-           the last good list); a refresh keeps the rows on screen. -->
-      <LoadState what="consumer groups" variant="compact" {loading} error={loadError} empty={groups.length === 0} onretry={() => loadGroups()}>
-        {#snippet emptyView()}<p class="muted pad">No consumer groups on this cluster.</p>{/snippet}
-      {#if groupsWin.top}<div class="tw-spacer" aria-hidden="true" style="height:{groupsWin.top}px"></div>{/if}
-      {#each groups.slice(groupsWin.start, groupsWin.end) as g (g.group_id)}
-        <button class="grow-row" class:sel={selected === g.group_id} onclick={() => open(g.group_id)}>
-          <span class="gid" title={g.group_id}>{g.group_id}</span>
-          <span class="badges">
-            <span class="state {stateClass(g.state)}">{g.state}</span>
-            <span class="muted">{plural(g.members, 'member')}</span>
-            <GroupLagBadge group={g} />
-          </span>
-        </button>
-      {/each}
-      {#if groupsWin.bottom}<div class="tw-spacer" aria-hidden="true" style="height:{groupsWin.bottom}px"></div>{/if}
-      </LoadState>
-    {/if}
-  </div>
-
-  <!-- display:contents wrapper so the stacked (narrow-container) layout can hide the divider. -->
-  <div class="divider-slot"><PaneDivider bind:width={listW} storageKey="brokers.groupsListW" label="Resize the group list" /></div>
+    </ListPane>
+  {/snippet}
 
   <div class="detail">
     {#if (detailLoading || detailError) && !detail && selected}
@@ -532,60 +544,36 @@
           {#if !blockedBy}<p class="muted small">Click <strong>Reset</strong> above to apply after reviewing.</p>{/if}
         </div>
       {/if}
-    {:else}
+    {:else if accessDenied}
+      <div class="acl-denied pad">
+        <p class="acl-title">Consumer-group access not granted</p>
+        <p class="muted">{accessMsg}</p>
+        <p class="muted">
+          Lag and connected consumers need <code>DescribeGroup</code> permission on the broker.
+          Otto probed once and won’t keep retrying (so it stops hitting the broker with denied
+          requests); grant the ACL and re-test the cluster, and this tab will populate.
+        </p>
+      </div>
+    {:else if !loading && !loadError && groups.length === 0}
+      <EmptyState icon="people" title="No consumer groups" body="No consumer groups on this cluster yet." />
+    {:else if !loading && groups.length > 0}
       <EmptyState icon="people" title="Pick a consumer group" body={`${groups.length} ${groups.length === 1 ? 'group' : 'groups'} in this cluster. Select one to see its members and lag.`} />
     {/if}
   </div>
-</div>
+</ListDetail>
 </div>
 
 <style>
   .groups-container {
     container-type: inline-size;
+    display: flex;
     height: 100%;
     min-width: 0;
   }
-  .groups {
-    display: flex;
-    height: 100%;
-    min-height: 0;
-  }
+  /* The windowed scroller fills the list pane's body. */
   .list {
-    /* Default width; drag-resizable via the PaneDivider (persisted). The
-       narrow-container query below overrides back to a full-width band. */
-    width: var(--groups-list-w, 280px);
-    max-width: 45%;
-    border-inline-end: 1px solid var(--border);
-    overflow: auto;
-    flex: none;
-  }
-  .divider-slot {
-    display: contents;
-  }
-  .grow-row {
-    width: 100%;
-    text-align: start;
-    border: none;
-    background: transparent;
-    padding: 8px 12px;
-    display: flex;
-    flex-direction: column;
-    gap: 2px;
-    cursor: pointer;
-    border-inline-start: 2px solid transparent;
-  }
-  .grow-row:hover {
-    background: color-mix(in srgb, var(--text-dim) 8%, transparent);
-  }
-  .grow-row.sel {
-    background: var(--accent-soft);
-    border-inline-start-color: var(--accent);
-  }
-  /* Windowed rows must be uniform: one-line ids (full id in the title). */
-  .list.windowed .gid {
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
+    block-size: 100%;
+    overflow-y: auto;
   }
   /* The offsets table scrolls on its own only while windowed (the detail
      pane holds more above/below it). */
@@ -604,8 +592,6 @@
   }
   .gid {
     font-family: var(--font-mono);
-    font-size: var(--fs-m);
-    word-break: break-all;
   }
   .gid.big {
     font-size: var(--fs-l);
@@ -821,23 +807,6 @@
 
   /* Follow the actual content width, including resizable app/cluster panes. */
   @container (max-width: 760px) {
-    .groups {
-      flex-direction: column;
-    }
-    .list {
-      width: 100%;
-      max-width: none;
-      max-height: 35vh;
-      border-inline-end: none;
-      border-bottom: 1px solid var(--border);
-    }
-    /* Stacked layout — nothing to drag sideways. */
-    .divider-slot {
-      display: none;
-    }
-    .detail {
-      min-height: 200px;
-    }
     .reset-bar select,
     .reset-bar input {
       flex: 1 1 auto;

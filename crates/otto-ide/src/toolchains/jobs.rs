@@ -210,6 +210,12 @@ impl ToolchainManager {
         tokio::fs::create_dir_all(&root)
             .await
             .map_err(|e| format!("create toolchains dir: {e}"))?;
+        if component == IdeInstallComponent::UnityDap {
+            if eco != EcosystemKind::Dotnet {
+                return Err("The Unity debugger is a .NET component".into());
+            }
+            return super::installer_unity::install_local_unity_dap(self, job_id, &root).await;
+        }
         let mut final_path = root.join(eco.as_str()).to_string_lossy().into_owned();
         if matches!(
             component,
@@ -276,6 +282,12 @@ impl ToolchainManager {
         requested_version: Option<&str>,
         zig_home: Option<&str>,
     ) -> std::result::Result<String, String> {
+        if component == IdeInstallComponent::UnityDap {
+            return Err(
+                "The Unity debugger installs on this Mac only (the Unity Editor is a desktop app)."
+                    .into(),
+            );
+        }
         let zls_release = if eco == EcosystemKind::Zig
             && matches!(
                 component,

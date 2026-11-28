@@ -20,7 +20,8 @@ test.beforeEach(async ({}, info) => {
 
 const nav = (page: Page) => page.locator('.settings-nav');
 const filter = (page: Page) => page.getByRole('searchbox', { name: 'Filter settings' });
-const title = (page: Page) => page.locator('.settings-body h1.ph-title');
+// One header across the page (design.md §7.16): "Settings / <section>".
+const title = (page: Page) => page.locator('.settings h1.ph-title .ph-title-text');
 const activeRow = (page: Page) => nav(page).locator('.settings-nav-item[aria-current="page"] .settings-nav-label');
 
 async function boot(page: Page, route: string): Promise<void> {

@@ -342,6 +342,9 @@ class _LldbDapBridge:
                 self.process.Continue()
         _send({'type': 'response', 'request_seq': rseq, 'success': True, 'command': 'setBreakpoints', 'body': {'breakpoints': ack}})
 
+    def _detach_on_stop(self, cmd, args):
+        return getattr(self, 'is_attach', False) and cmd == 'disconnect' and not args.get('terminateDebuggee', False)
+
     def handle(self, req):
         cmd = req.get('command')
         rseq = req.get('seq', 0)
@@ -593,7 +596,12 @@ class _LldbDapBridge:
         elif cmd in ('disconnect', 'terminate'):
             with _state_lock:
                 if self.process and self.process.IsValid():
-                    self.process.Kill()
+                    # Stop on an attach session detaches (DAP terminateDebuggee
+                    # defaults to false for attach); only a launch is killed.
+                    if self._detach_on_stop(cmd, args):
+                        self.process.Detach()
+                    else:
+                        self.process.Kill()
             _send({'type': 'response', 'request_seq': rseq, 'success': True, 'command': cmd, 'body': {}})
             _send({'type': 'event', 'event': 'terminated', 'body': {}})
             lldb.SBDebugger.Destroy(self.dbg)
@@ -606,7 +614,107 @@ while True:
     m = _recv()
     if m is None:
         if bridge.process and bridge.process.IsValid():
-            bridge.process.Kill()
+            if getattr(bridge, 'is_attach', False):
+                bridge.process.Detach()
+            else:
+                bridge.process.Kill()
         os._exit(0)
     bridge.handle(m)
 "#;
+
+#[cfg(all(test, unix))]
+mod tests {
+    use std::process::Stdio;
+    use std::time::Duration;
+
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::process::Command;
+
+    fn frame(v: serde_json::Value) -> Vec<u8> {
+        let body = v.to_string();
+        format!("Content-Length: {}\r\n\r\n{body}", body.len()).into_bytes()
+    }
+
+    /// RC6-DBG-3: Stop on an attach session detaches; the process keeps running.
+    #[tokio::test]
+    async fn disconnect_detaches_an_attached_process_instead_of_killing_it() {
+        let Ok(p) = Command::new("lldb").arg("-P").output().await else {
+            return; // no lldb on this host
+        };
+        let py_dir = String::from_utf8_lossy(&p.stdout).trim().to_string();
+        let tmp = tempfile::tempdir().unwrap();
+        let spin = tmp.path().join("spin");
+        let mut cc = Command::new("cc")
+            .args(["-x", "c", "-", "-o"])
+            .arg(&spin)
+            .stdin(Stdio::piped())
+            .spawn();
+        let Ok(cc) = cc.as_mut() else { return };
+        let mut stdin = cc.stdin.take().unwrap();
+        stdin
+            .write_all(b"#include <unistd.h>\nint main(void) { for (;;) sleep(1); }\n")
+            .await
+            .unwrap();
+        drop(stdin);
+        if !p.status.success() || py_dir.is_empty() || !cc.wait().await.unwrap().success() {
+            return;
+        }
+        let mut target = Command::new(&spin).kill_on_drop(true).spawn().unwrap();
+        let pid = target.id().unwrap();
+        // The interpreter lldb's Python module is built for, as the adapter picks it.
+        let python = [
+            "/usr/bin/python3",
+            "/Library/Developer/CommandLineTools/usr/bin/python3",
+        ]
+        .into_iter()
+        .find(|p| std::path::Path::new(p).is_file())
+        .unwrap_or("python3");
+        let Ok(mut bridge) = Command::new(python)
+            .arg("-c")
+            .arg(super::LLDB_PYTHON_DAP_BRIDGE)
+            .env("PYTHONPATH", &py_dir)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+        else {
+            return;
+        };
+        let mut to = bridge.stdin.take().unwrap();
+        let mut from = bridge.stdout.take().unwrap();
+        for req in [
+            serde_json::json!({"seq": 1, "type": "request", "command": "initialize", "arguments": {}}),
+            serde_json::json!({"seq": 2, "type": "request", "command": "attach", "arguments": {"pid": pid}}),
+            serde_json::json!({"seq": 3, "type": "request", "command": "configurationDone"}),
+        ] {
+            to.write_all(&frame(req)).await.unwrap();
+        }
+        let mut seen = String::new();
+        let attached = tokio::time::timeout(Duration::from_secs(30), async {
+            let mut buf = [0u8; 4096];
+            while !seen.contains("\"configurationDone\"") {
+                let n = from.read(&mut buf).await.unwrap_or(0);
+                if n == 0 {
+                    break;
+                }
+                seen.push_str(&String::from_utf8_lossy(&buf[..n]));
+            }
+        })
+        .await;
+        if attached.is_err()
+            || !seen.contains("\"success\": true, \"command\": \"configurationDone\"")
+        {
+            eprintln!("attach not possible on this host: {seen}");
+            return;
+        }
+        let stop = serde_json::json!({"seq": 4, "type": "request", "command": "disconnect", "arguments": {"terminateDebuggee": false}});
+        to.write_all(&frame(stop)).await.unwrap();
+        let _ = tokio::time::timeout(Duration::from_secs(15), bridge.wait()).await;
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        assert!(
+            target.try_wait().unwrap().is_none(),
+            "the attached process must keep running after Stop"
+        );
+        let _ = target.kill().await;
+    }
+}

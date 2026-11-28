@@ -72,11 +72,22 @@ async function markHeading(page: Page, note: string): Promise<void> {
   await expect(page.locator('.notes-rail')).toContainText(note);
 }
 
+/** The agent is the Browser's Detail pane (Agent view): open it when the
+ *  window is too narrow for it to open by itself. */
+async function showAgent(page: Page): Promise<void> {
+  await expect(page.getByPlaceholder('e.g. https://example.com')).toBeVisible({ timeout: 15_000 });
+  const show = page.getByRole('button', { name: 'Show agent', exact: true });
+  if (await show.isVisible()) await show.click();
+}
+
 test('browser page: dock starts detached, attaches a session, ask sends page + marks', async ({ page }) => {
+  // Room for the page and its Detail pane side by side (no Side panel).
+  await page.addInitScript(() => localStorage.setItem('otto_right_open', '0'));
   await page.goto('/#/browser');
   await expect(page.locator('.shell')).toBeVisible({ timeout: 15_000 });
+  await showAgent(page);
 
-  const dock = page.getByRole('complementary', { name: 'Browser agent' });
+  const dock = page.getByRole('region', { name: 'Browser agent' });
   await expect(dock).toContainText('No session attached');
   // Detached → the ask bar is disabled with a hint, never a dead input.
   const ask = page.getByLabel('Ask the agent about this page');
@@ -93,7 +104,8 @@ test('browser page: dock starts detached, attaches a session, ask sends page + m
   // The binding survives a reload (persisted per workspace).
   await page.reload();
   await expect(page.locator('.shell')).toBeVisible({ timeout: 15_000 });
-  await expect(page.getByRole('complementary', { name: 'Browser agent' })).toContainText('E2E Shell');
+  await showAgent(page);
+  await expect(page.getByRole('region', { name: 'Browser agent' })).toContainText('E2E Shell');
 
   await openFixture(page);
   await markHeading(page, 'this heading');
@@ -135,9 +147,11 @@ test('browser page: dock starts detached, attaches a session, ask sends page + m
 });
 
 test('browser page: "New agent" creates a session bound to the dock without leaving the page', async ({ page }) => {
+  await page.addInitScript(() => localStorage.setItem('otto_right_open', '0'));
   await page.goto('/#/browser');
   await expect(page.locator('.shell')).toBeVisible({ timeout: 15_000 });
-  const dock = page.getByRole('complementary', { name: 'Browser agent' });
+  await showAgent(page);
+  const dock = page.getByRole('region', { name: 'Browser agent' });
 
   // The default provider is whatever the daemon reports; the test daemon's
   // shell provider is what a fresh install falls back to when no agent CLI
@@ -184,7 +198,7 @@ test('agent mode: the Session panel Browser tab embeds the module; Settings → 
   // "attach a session" one (the session is the pane beside it).
   await expect(ask).toHaveAttribute('placeholder', /Open a page first/);
   // No embedded dock inside the panel — the session IS the main pane.
-  await expect(panel.getByRole('complementary', { name: 'Browser agent' })).toHaveCount(0);
+  await expect(panel.getByRole('region', { name: 'Browser agent' })).toHaveCount(0);
 
   // Settings → Browser: the classic per-session panel.
   await openPage(page, 'settings/browser');

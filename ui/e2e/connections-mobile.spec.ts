@@ -189,18 +189,20 @@ test.describe('connections list — responsive', () => {
     await expect(menu).not.toContainText('⌘', { useInnerText: true });
     await page.keyboard.press('Escape');
     await expect(menu).toHaveCount(0);
-    // Tables: a sheet over the rows; Back closes it and stays on the workbench.
+    // Tables: "‹ Tables" pushes back to the list page (the tree); opening a
+    // key from it pushes the workbench again.
     // The header ⋯ sits inside the window (it used to poke 7 px past the edge).
     await expectFullyInViewport(page, page.getByTestId('page-header').getByRole('button', { name: 'More actions' }), 'the header ⋯');
-    // Tables is kept in the phone header (data-keep): click it, never a
-    // racy "is it visible yet, else the ⋯" branch.
-    await page.getByTestId('page-header').getByRole('button', { name: 'Tables', exact: true }).click();
-    const sheet = page.getByRole('dialog', { name: 'Tables' });
-    await expect(sheet).toBeVisible();
-    await expect(sheet.getByRole('tree', { name: 'Schema' })).toBeVisible();
-    await page.goBack();
-    await expect(sheet).toHaveCount(0);
+    await page.getByRole('button', { name: 'Back to Tables', exact: true }).tap();
+    const tree = page.getByRole('tree', { name: 'Schema' });
+    await expect(tree).toBeVisible();
+    await expect(page.getByTestId('db-conn-state')).toBeHidden();
+    // A table opens its structure: pushed back to the workbench.
+    await tree.getByRole('button', { name: 'Expand shop' }).tap();
+    await tree.getByRole('button', { name: 'Expand Tables' }).first().tap();
+    await tree.locator('.node-label', { hasText: /^orders/ }).first().tap();
     await expect(page.getByTestId('db-conn-state')).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Back to Tables', exact: true })).toBeVisible();
     await assertFitsWidth(page);
   });
 
@@ -220,7 +222,9 @@ test.describe('connections list — responsive', () => {
     await expect(page.getByRole('button', { name: 'Retry', exact: true })).toHaveCount(1);
     await banner.getByRole('button', { name: 'Retry', exact: true }).click();
     await expect(page.getByTestId('db-conn-state')).toContainText('Can’t connect', { timeout: 30_000 });
-    await expectFullyInViewport(page, page.getByTestId('page-header').getByRole('button', { name: 'Tables', exact: true }), 'Tables');
+    // Nothing to list while it can't connect: no Tables page, the error owns the page (☰ stays).
+    await expect(page.getByRole('button', { name: 'Back to Tables', exact: true })).toHaveCount(0);
+    await expectFullyInViewport(page, page.getByTestId('open-navigator'), 'the navigator button');
     await assertFitsWidth(page);
   });
 });

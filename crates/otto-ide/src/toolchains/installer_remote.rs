@@ -14,7 +14,8 @@ use crate::toolchains_catalog::{
     dotnet_sdk_major_slot, jq_binary_url, kotlin_lsp_zip_url, netcoredbg_download_asset,
     rust_analyzer_gz_url, shfmt_binary_url, CatalogSdkEntry, EcosystemKind, TargetPlatform,
     CSHARP_LS_TOOL, DEBUGPY_PKG, DLV_PKG, FSAUTOCOMPLETE_TOOL, FSAUTOCOMPLETE_VERSION, GOPLS_PKG,
-    JAVA_DEBUG_JAR_NAME, JAVA_DEBUG_JAR_URL, JDTLS_TARBALL_URL, JS_DEBUG_TARBALL_URL, PYRIGHT_PKG,
+    JAVA_DEBUG_JAR_NAME, JAVA_DEBUG_JAR_URL, JDTLS_TARBALL_URL, JS_DEBUG_SHA256,
+    JS_DEBUG_TARBALL_URL, PYRIGHT_PKG,
 };
 use crate::types::{IdeInstallComponent, IdeSshSpec};
 
@@ -198,7 +199,7 @@ pub(super) fn build_remote_install_script_with_zls(
             EcosystemKind::Zig => s.push_str(&format!("DEST=\"$TC/zig/sdks/{0}\"\nSTAGE=\"$TC/.downloads/zig-stage-{0}-$$\"\nARCH=\"$STAGE/zig.tar.xz\"\nrm -rf \"$STAGE\" && mkdir -p \"$STAGE/sdk\" \"$TC/zig/sdks\"\ndownload_and_verify {u} \"$ARCH\" '{exp_sha}'\ntar -xJf \"$ARCH\" --strip-components=1 -C \"$STAGE/sdk\"\nrm -f \"$ARCH\"\n\"$STAGE/sdk/zig\" version\nrm -rf \"$DEST\" && mv \"$STAGE/sdk\" \"$DEST\" && rm -rf \"$STAGE\"\nln -sfn \"$DEST\" \"$TC/zig/current\"\nexport PATH=\"$TC/zig/current:$PATH\"\necho \"INSTALLED_PATH:$DEST\"\n", entry.version)),
             EcosystemKind::Cpp => {
                 return Err(
-                    "C/C++ compiler toolchains (Clang / GCC / LLVM) are installed via system packages (`apt install clang` / `dnf install clang` / Homebrew), not remote archive scripts"
+                    "Managed LLVM downloads install on this Mac only. On an SSH host install clang with its package manager (`apt install clang` / `dnf install clang`) and add it with Add local toolchain."
                         .into(),
                 );
             }
@@ -239,8 +240,8 @@ pub(super) fn build_remote_install_script_with_zls(
                 ));
             }
             EcosystemKind::Cpp => {
-                let url = clangd_download_url(platform)?;
-                s.push_str(&format!("STAGE=\"$TC/.downloads/clangd-stage-$$\"\nARCH=\"$STAGE/clangd.zip\"\nrm -rf \"$STAGE\" && mkdir -p \"$STAGE/extract\" \"$TC/cpp/bin\"\ndownload_and_verify '{url}' \"$ARCH\"\nunzip -q -o \"$ARCH\" -d \"$STAGE/extract\" && rm -f \"$ARCH\"\nCD_BIN=$(find \"$STAGE/extract\" -path '*/bin/clangd' -type f | head -n 1)\n[ -n \"$CD_BIN\" ] || {{ rm -rf \"$STAGE\"; echo \"clangd archive missing bin/clangd\" >&2; exit 1; }}\nCD_ROOT=$(dirname \"$(dirname \"$CD_BIN\")\")\nrm -rf \"$TC/cpp/lsp\" && mv \"$CD_ROOT\" \"$TC/cpp/lsp\" && chmod +x \"$TC/cpp/lsp/bin/clangd\"\nln -sfn \"$TC/cpp/lsp/bin/clangd\" \"$TC/cpp/bin/clangd\" && rm -rf \"$STAGE\"\necho \"INSTALLED_PATH:$TC/cpp/bin/clangd\"\n"));
+                let (url, sha) = clangd_download_url(platform)?;
+                s.push_str(&format!("STAGE=\"$TC/.downloads/clangd-stage-$$\"\nARCH=\"$STAGE/clangd.zip\"\nrm -rf \"$STAGE\" && mkdir -p \"$STAGE/extract\" \"$TC/cpp/bin\"\ndownload_and_verify '{url}' \"$ARCH\" '{sha}'\nunzip -q -o \"$ARCH\" -d \"$STAGE/extract\" && rm -f \"$ARCH\"\nCD_BIN=$(find \"$STAGE/extract\" -path '*/bin/clangd' -type f | head -n 1)\n[ -n \"$CD_BIN\" ] || {{ rm -rf \"$STAGE\"; echo \"clangd archive missing bin/clangd\" >&2; exit 1; }}\nCD_ROOT=$(dirname \"$(dirname \"$CD_BIN\")\")\nrm -rf \"$TC/cpp/lsp\" && mv \"$CD_ROOT\" \"$TC/cpp/lsp\" && chmod +x \"$TC/cpp/lsp/bin/clangd\"\nln -sfn \"$TC/cpp/lsp/bin/clangd\" \"$TC/cpp/bin/clangd\" && rm -rf \"$STAGE\"\necho \"INSTALLED_PATH:$TC/cpp/bin/clangd\"\n"));
             }
             EcosystemKind::Kotlin => s.push_str(&format!("rm -rf \"$TC/kotlin/lsp\" && mkdir -p \"$TC/kotlin/lsp\" \"$TC/kotlin/bin\"\nARCH=\"$TC/.downloads/kotlin-language-server.zip\"\ndownload_and_verify '{}' \"$ARCH\"\nunzip -q -o \"$ARCH\" -d \"$TC/kotlin/lsp\" && rm -f \"$ARCH\"\nKLS_BIN=\"$TC/kotlin/lsp/server/bin/kotlin-language-server\"\n[ -f \"$KLS_BIN\" ] || KLS_BIN=\"$TC/kotlin/lsp/bin/kotlin-language-server\"\nchmod +x \"$KLS_BIN\" && ln -sfn \"$KLS_BIN\" \"$TC/kotlin/bin/kotlin-language-server\"\necho \"INSTALLED_PATH:$KLS_BIN\"\n", kotlin_lsp_zip_url())),
             EcosystemKind::Dotnet => {
@@ -355,7 +356,7 @@ pub(super) fn build_remote_install_script_with_zls(
                     asset.url
                 ));
             }
-            EcosystemKind::Node => s.push_str(&format!("rm -rf \"$TC/node/dap\" && mkdir -p \"$TC/node/dap\"\nARCH=\"$TC/.downloads/js-debug.tar.gz\"\ndownload_and_verify '{JS_DEBUG_TARBALL_URL}' \"$ARCH\"\ntar -xzf \"$ARCH\" -C \"$TC/node/dap\" && rm -f \"$ARCH\"\nln -sfn \"$TC/node/dap/js-debug\" \"$TC/node/js-debug\"\necho \"INSTALLED_PATH:$TC/node/dap/js-debug/src/dapDebugServer.js\"\n")),
+            EcosystemKind::Node => s.push_str(&format!("rm -rf \"$TC/node/dap\" && mkdir -p \"$TC/node/dap\"\nARCH=\"$TC/.downloads/js-debug.tar.gz\"\ndownload_and_verify '{JS_DEBUG_TARBALL_URL}' \"$ARCH\" '{JS_DEBUG_SHA256}'\ntar -xzf \"$ARCH\" -C \"$TC/node/dap\" && rm -f \"$ARCH\"\nln -sfn \"$TC/node/dap/js-debug\" \"$TC/node/js-debug\"\necho \"INSTALLED_PATH:$TC/node/dap/js-debug/src/dapDebugServer.js\"\n")),
             EcosystemKind::Python => s.push_str(&format!("\"$TC/python/bin/uv\" venv --clear \"$TC/python/dap\" && \"$TC/python/bin/uv\" pip install --python \"$TC/python/dap/bin/python\" '{DEBUGPY_PKG}'\necho \"INSTALLED_PATH:$TC/python/dap/bin/python\"\n")),
             EcosystemKind::Shell => s.push_str("mkdir -p \"$TC/shell/bin\"\nprintf '#!/usr/bin/env bash\\nexec bash -x \"$@\"\\n' > \"$TC/shell/bin/bashdb\" && chmod +x \"$TC/shell/bin/bashdb\"\necho \"INSTALLED_PATH:$TC/shell/bin/bashdb\"\n"),
             EcosystemKind::Json => s.push_str(&format!("mkdir -p \"$TC/json/bin\"\nJQ_TMP=\"$TC/.downloads/jq\"\ndownload_and_verify '{}' \"$JQ_TMP\"\nmv \"$JQ_TMP\" \"$TC/json/bin/jq\" && chmod +x \"$TC/json/bin/jq\"\necho \"INSTALLED_PATH:$TC/json/bin/jq\"\n", jq_binary_url("1.7.1", platform))),
@@ -434,6 +435,20 @@ mod tests {
         )
         .unwrap();
         assert!(shell_lsp.contains("$TC/node/current/bin"));
+    }
+
+    #[test]
+    fn remote_js_debug_install_verifies_the_pinned_sha256() {
+        let script = build_remote_install_script(
+            EcosystemKind::Node,
+            IdeInstallComponent::Dap,
+            TargetPlatform::host(),
+            None,
+        )
+        .unwrap();
+        assert!(script.contains(&format!(
+            "download_and_verify '{JS_DEBUG_TARBALL_URL}' \"$ARCH\" '{JS_DEBUG_SHA256}'"
+        )));
     }
 
     #[test]
@@ -527,6 +542,41 @@ mod tests {
             .unwrap_err();
         assert!(err.contains("exceeded 512 byte limit"), "unexpected: {err}");
         assert!(!dest.exists(), "partial oversized file must be deleted");
+        drop(server);
+    }
+
+    #[tokio::test]
+    async fn a_slow_steady_download_finishes_past_the_idle_timeout() {
+        // SEC6-5: a large archive on a slow link takes longer than any total deadline.
+        use crate::toolchains::installer::download_https_to_file_capped;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let mut req = [0u8; 1024];
+            let _ = sock.read(&mut req).await;
+            let _ = sock
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 6\r\nConnection: close\r\n\r\n")
+                .await;
+            // One byte every 400 ms: 2.4 s in all, never idle for the test's 1 s.
+            for b in b"llvm!\n" {
+                tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+                let _ = sock.write_all(&[*b]).await;
+            }
+        });
+        let tmp = tempfile::tempdir().unwrap();
+        let mgr = ToolchainManager::new(tmp.path().join("data"));
+        mgr.allow_test_loopback
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        let dest = tmp.path().join("llvm.tar.zst");
+        let url = format!("http://127.0.0.1:{port}/llvm.tar.zst");
+        download_https_to_file_capped(&mgr, "job_slow", &url, &dest, None, 10, 64)
+            .await
+            .expect("a slow but steady download completes");
+        assert_eq!(std::fs::read(&dest).unwrap(), b"llvm!\n");
         drop(server);
     }
 

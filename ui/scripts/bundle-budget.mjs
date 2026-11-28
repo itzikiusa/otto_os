@@ -38,6 +38,10 @@
 //                (e.g. a nested mermaid under @excalidraw/mermaid-to-excalidraw
 //                next to the top-level one) — pin it with package.json
 //                `overrides` instead of shipping both copies.
+//   page-header  PageHeader is on every page: what it imports must already be
+//                in the entry or the shell, so it adds no chunk but its own
+//                (a helper it took from lib/components/side/context.ts made
+//                that a chunk of its own on every page).
 
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
@@ -47,6 +51,14 @@ import { gzipSync } from 'node:zlib';
 const UI = join(dirname(fileURLToPath(import.meta.url)), '..');
 const DIST = join(UI, 'dist');
 const MANIFEST = join(DIST, '.vite', 'manifest.json');
+// rc6 (rc6-finish-ui): `entry` 115801 → 143768 B and `shell` 163163 → 131128 B
+// gzip were re-baselined by hand, only these two: the sidebar system's shared
+// blocks (lib/components/side, PageHeader, Tabs, PaneDivider, PaneControls,
+// the shell Drawer) moved out of every page into ONE always-loaded chunk
+// (vite.config.ts codeSplitting group 'side'), which sits in the entry's
+// closure. Net per document (entry + shell): 278964 → 274896 B against the old
+// budgets, and −13.2 KB against the branch before the group; every page
+// target shrank (no page budget was raised).
 const BUDGET = join(UI, 'scripts', 'bundle-budget.json');
 const PAGES = join(UI, 'src', 'shell', 'pages.svelte.ts');
 const RIGHT_PANEL = join(UI, 'src', 'shell', 'RightPanel.svelte');
@@ -236,6 +248,16 @@ for (const [name, at] of pkgLocations) {
     ruleFailures.push(
       `duplicates: ${name} is bundled from ${at.size} copies (${[...at].join(', ')}) — dedupe with package.json "overrides"`,
     );
+  }
+}
+
+// ---- page-header: PageHeader adds no chunk but its own to a page ----
+const headerKey = Object.keys(manifest).find((k) => manifest[k].name === 'PageHeader' && manifest[k].file.endsWith('.js'));
+if (headerKey) {
+  const own = new Set([manifest[headerKey].file, ...(manifest[headerKey].css ?? [])]);
+  const extra = [...minus(closure(headerKey), base)].filter((f) => !own.has(f));
+  if (extra.length) {
+    ruleFailures.push(`page-header: PageHeader adds ${extra.join(', ')} to every page — take it from a module the shell already loads`);
   }
 }
 

@@ -102,10 +102,15 @@ export async function openApiEditor(page: Page): Promise<void> {
   // only after that, or the onboarding check races the swap.
   const url = page.getByLabel('Request URL', { exact: true });
   const onboarding = page.getByText('Create your first request', { exact: true });
-  await expect(url.or(onboarding).first()).toBeVisible({ timeout: 15_000 });
+  // A phone opens on the list (Collections | Automations | History is the page).
+  const list = page.getByRole('tablist', { name: 'Show' });
+  await expect(url.or(onboarding).or(list).first()).toBeVisible({ timeout: 15_000 });
   await expect(page.locator('.api-page[aria-busy="true"]')).toHaveCount(0, { timeout: 15_000 });
   if (await onboarding.isVisible()) {
     await page.getByRole('button', { name: 'New request', exact: true }).first().click();
+  } else if ((page.viewportSize()?.width ?? 1280) <= 640 && !(await url.isVisible())) {
+    await page.getByRole('button', { name: 'More actions' }).click();
+    await page.getByRole('menuitem', { name: /New request/ }).click();
   }
   await expect(url).toBeVisible();
 }
@@ -413,12 +418,12 @@ export async function showConnectionList(page: Page): Promise<void> {
   await expect(page.locator('.conn-list')).toBeVisible({ timeout: 15_000 });
 }
 
-/** The open connection's tables: the side pane's Tables tab, or on a phone the
- *  sheet the header's Tables button opens (with the same Tables · Saved ·
- *  History tabs). */
+/** The open connection's tables: the side pane's Tables view, or on a phone
+ *  the list page "‹ <view>" goes back to (the same Tables · Saved · History
+ *  views, as the page header). */
 export async function showDbTables(page: Page): Promise<void> {
   if ((page.viewportSize()?.width ?? 0) <= 640) {
-    await page.getByTestId('page-header').getByRole('button', { name: 'Tables', exact: true }).click();
+    await page.getByTestId('page-header').getByRole('button', { name: /^Back to (Tables|Saved|History)$/ }).click();
   }
   await page.getByRole('tablist', { name: 'Sidebar view' }).getByRole('tab', { name: 'Tables', exact: true }).click();
   await expect(page.locator('.schema-tree')).toBeVisible({ timeout: 15_000 });
@@ -430,4 +435,26 @@ export async function confirmDestructiveRun(page: Page): Promise<void> {
   const dialog = page.getByRole('dialog').filter({ hasText: /Run (a destructive statement|destructive statements)\?/ });
   await dialog.getByRole('button', { name: 'Run', exact: true }).click();
   await expect(dialog).toBeHidden();
+}
+
+/** Threads' list on screen: a phone shows it as the page (‹ Threads in the
+ *  header goes back to it); desktop / tablet show the column again if it was
+ *  hidden (the header's "Show Threads"). */
+export async function showThreadList(page: Page): Promise<void> {
+  const list = page.getByTestId('threads-sidebar');
+  const back = page.getByRole('button', { name: 'Back to Threads' });
+  const show = page.getByTestId('show-list-pane');
+  await expect(list.or(back).or(show).first()).toBeVisible({ timeout: 15_000 });
+  if (await list.isVisible()) return;
+  if (await back.isVisible()) await back.click();
+  else await show.click();
+  await expect(list).toBeVisible();
+}
+
+/** Hide Threads' list column (desktop / tablet): its ⋯ › Hide Threads. */
+export async function hideThreadList(page: Page): Promise<void> {
+  const list = page.getByTestId('threads-sidebar');
+  await list.getByRole('button', { name: 'Threads actions' }).click();
+  await page.getByRole('menuitem', { name: /^Hide Threads/ }).click();
+  await expect(list).toBeHidden();
 }

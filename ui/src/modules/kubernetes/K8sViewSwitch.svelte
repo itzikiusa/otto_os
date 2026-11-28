@@ -1,9 +1,11 @@
 <script lang="ts">
-  // The cluster workspace's Resources | Monitor switch (K-2). Both views are
-  // one workspace: the same cluster stays selected, the console's row cache
-  // and namespace are kept, and each view resumes where it was left (the
-  // Monitor's state lives per cluster in the k8s store).
-  import { onTabKey } from '../../lib/tabKeys';
+  // The cluster workspace's Resources | Monitor switch (K-2): the page's
+  // sections as the shared underline tabs, one row under the header
+  // (design.md §7.14). Both views are one workspace: the same cluster stays
+  // selected, the console's row cache and namespace are kept, and each view
+  // resumes where it was left (the Monitor's state lives per cluster in the
+  // k8s store).
+  import Tabs from '../../lib/components/Tabs.svelte';
   import { router } from '../../lib/router.svelte';
   import { k8s } from '../../lib/stores/k8s.svelte';
   import { monitorPath, resourcesPath } from '../../lib/k8s/viewState';
@@ -14,8 +16,12 @@
   }
   let { clusterId, view }: Props = $props();
 
+  const VIEWS = [
+    { id: 'resources' as const, label: 'Resources', testid: 'k8s-view-resources' },
+    { id: 'monitor' as const, label: 'Monitor', title: 'Metrics, restarts and health history for this cluster', testid: 'k8s-view-monitor' },
+  ];
+
   function go(to: 'resources' | 'monitor'): void {
-    if (to === view) return;
     if (to === 'monitor') {
       router.go(monitorPath(clusterId));
       return;
@@ -26,13 +32,4 @@
   }
 </script>
 
-<div class="segmented k8s-view-switch" role="tablist" aria-label="Cluster view" data-testid="k8s-view-switch">
-  <button role="tab" class:active={view === 'resources'} aria-selected={view === 'resources'} tabindex={view === 'resources' ? 0 : -1} onkeydown={onTabKey} onclick={() => go('resources')} data-testid="k8s-view-resources">Resources</button>
-  <button role="tab" class:active={view === 'monitor'} aria-selected={view === 'monitor'} tabindex={view === 'monitor' ? 0 : -1} onkeydown={onTabKey} onclick={() => go('monitor')} title="Metrics, restarts and health history for this cluster" data-testid="k8s-view-monitor">Monitor</button>
-</div>
-
-<style>
-  .k8s-view-switch {
-    flex-shrink: 0;
-  }
-</style>
+<Tabs label="Cluster view" tabs={VIEWS} value={view} onchange={go} testid="k8s-view-switch" />

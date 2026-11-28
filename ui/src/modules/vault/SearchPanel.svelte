@@ -1,6 +1,11 @@
 <script lang="ts">
-  // Full-text search panel (left sidebar mode). FTS5 with `tag:` / `path:` /
-  // `type:` operators; snippets come highlighted with ‹› markers from bm25.
+  // The Vault's Search view — a ListPane (design.md §3): the query is its
+  // search row, the predicate chips its filter row, hits its rows. FTS5 with
+  // `tag:` / `path:` / `type:` operators; snippets come highlighted with ‹›
+  // markers from bm25.
+  import type { Snippet } from 'svelte';
+  import ListPane from '../../lib/components/side/ListPane.svelte';
+  import type { IconName } from '../../lib/components/Icon.svelte';
   import { vault } from './vault.svelte';
   import { escapeHtml } from '../../lib/html';
   import Icon from '../../lib/components/Icon.svelte';
@@ -16,6 +21,14 @@
     insertOperatorPrefix,
     togglePredicate,
   } from './searchPredicates';
+
+  interface Props {
+    views: Snippet;
+    primary: { icon: IconName; label: string; onclick: () => void };
+    /** A hit was opened (a phone pushes it). */
+    onpick: () => void;
+  }
+  let { views, primary, onpick }: Props = $props();
 
   let input = $state<HTMLInputElement | undefined>();
   // While the full-text index rebuilds, results come from the indexed part:
@@ -59,49 +72,54 @@
   }
 </script>
 
-<div class="search">
-  <input dir="auto"
-    bind:this={input}
-    bind:value={vault.searchQuery}
-    type="search"
-    placeholder="Search… (status: stale:true orphan:true tag:)"
-    aria-label="Search this vault"
-    title="Full-text search. Operators: status:, type:, tag:, path:, stale:true, orphan:true, links-to:. Press Enter to search."
-    oninput={() => {
-      if (!vault.searchQuery.trim()) void vault.runSearch();
-    }}
-    onkeydown={(e) => e.key === 'Enter' && void vault.runSearch()}
-  />
-  <div class="predicates" role="group" aria-label="Search filters" data-testid="vault-search-predicates">
-    {#each AUDIT_PREDICATES as p (p.id)}
-      {@const on = hasPredicate(vault.searchQuery, p.token)}
-      <button
-        type="button"
-        class="pred-chip"
-        class:on
-        aria-pressed={on}
-        title={p.title}
-        data-testid="vault-pred-{p.id}"
-        onclick={() => onTogglePredicate(p.token, p.exclusivePrefix)}
-      >{p.label}</button>
-    {/each}
-    {#each PREFIX_OPERATORS as op (op.id)}
-      <button
-        type="button"
-        class="pred-chip op"
-        title={op.title}
-        onclick={() => onInsertPrefix(op.prefix)}
-      >{op.label}</button>
-    {/each}
-    {#if activeCount > 0}
-      <button
-        type="button"
-        class="pred-chip clear"
-        title="Clear structured filters"
-        onclick={onClearPredicates}
-      >Clear</button>
-    {/if}
-  </div>
+<ListPane {views} {primary} testid="vault-search">
+  {#snippet searchRow()}
+    <input dir="auto"
+      class="input"
+      bind:this={input}
+      bind:value={vault.searchQuery}
+      type="search"
+      placeholder="Search… (status: stale:true orphan:true tag:)"
+      aria-label="Search this vault"
+      title="Full-text search. Operators: status:, type:, tag:, path:, stale:true, orphan:true, links-to:. Press Enter to search."
+      oninput={() => {
+        if (!vault.searchQuery.trim()) void vault.runSearch();
+      }}
+      onkeydown={(e) => e.key === 'Enter' && void vault.runSearch()}
+    />
+  {/snippet}
+  {#snippet filterRow()}
+    <div class="predicates" role="group" aria-label="Search filters" data-testid="vault-search-predicates">
+      {#each AUDIT_PREDICATES as p (p.id)}
+        {@const on = hasPredicate(vault.searchQuery, p.token)}
+        <button
+          type="button"
+          class="pred-chip"
+          class:on
+          aria-pressed={on}
+          title={p.title}
+          data-testid="vault-pred-{p.id}"
+          onclick={() => onTogglePredicate(p.token, p.exclusivePrefix)}
+        >{p.label}</button>
+      {/each}
+      {#each PREFIX_OPERATORS as op (op.id)}
+        <button
+          type="button"
+          class="pred-chip op"
+          title={op.title}
+          onclick={() => onInsertPrefix(op.prefix)}
+        >{op.label}</button>
+      {/each}
+      {#if activeCount > 0}
+        <button
+          type="button"
+          class="pred-chip clear"
+          title="Clear structured filters"
+          onclick={onClearPredicates}
+        >Clear</button>
+      {/if}
+    </div>
+  {/snippet}
   {#if vault.searching}
     <div class="dim">Searching…</div>
   {:else if vault.searchError}
@@ -116,23 +134,37 @@
     <div class="partial" use:announceShown={searchIndexNotice(partial)}><Icon name="info" size={12} /> {searchIndexNotice(partial)}</div>
   {/if}
   {#if !vault.searching && !vault.searchError && vault.searchedQuery && vault.searchQuery.trim() === vault.searchedQuery}
-    <div class="hits">
-      {#each vault.searchHits as h (h.path)}
-        <button class="hit" class:reserved={h.reserved} onclick={() => void vault.open(h.path)}>
-          <div class="t">{h.title}</div>
-          <div class="p" title={h.path}>{h.path}</div>
-          {#if h.snippet}
-            <!-- Escaped above; only <mark> tags are injected. -->
-            <div class="s">{@html renderSnippet(h.snippet)}</div>
-          {/if}
+    {#each vault.searchHits as h (h.path)}
+      {@const open = vault.centerMode === 'note' && vault.notePath === h.path}
+      <!-- The shared row look with a third line: the matched snippet. -->
+      <div class="side-row two-line" class:selected={open}>
+        <button
+          type="button"
+          class="side-row-main hit"
+          class:reserved={h.reserved}
+          data-side-row
+          aria-current={open ? 'true' : undefined}
+          onclick={() => {
+            onpick();
+            void vault.open(h.path);
+          }}
+        >
+          <span class="side-row-text">
+            <span class="side-row-title t" dir="auto">{h.title}</span>
+            <span class="side-row-meta" title={h.path}>{h.path}</span>
+            {#if h.snippet}
+              <!-- Escaped above; only <mark> tags are injected. -->
+              <span class="s">{@html renderSnippet(h.snippet)}</span>
+            {/if}
+          </span>
         </button>
-      {/each}
-      {#if vault.searchHits.length >= 50}
-        <div class="dim cap-note">Showing the first 50 matches. Narrow with status:, type:, tag:, path:, stale:true, orphan:true, or links-to:.</div>
-      {/if}
-    </div>
+      </div>
+    {/each}
+    {#if vault.searchHits.length >= 50}
+      <div class="dim cap-note">Showing the first 50 matches. Narrow with status:, type:, tag:, path:, stale:true, orphan:true, or links-to:.</div>
+    {/if}
   {/if}
-</div>
+</ListPane>
 
 <style>
   .partial {
@@ -151,23 +183,6 @@
     flex: none;
     margin-block-start: 2px;
     color: var(--info);
-  }
-  .search {
-    display: flex;
-    flex-direction: column;
-    gap: 6px;
-    min-height: 0;
-    flex: 1;
-    padding: 8px;
-  }
-  input {
-    background: var(--surface-2);
-    border: 1px solid var(--border);
-    border-radius: var(--radius-s);
-    color: var(--text);
-    font-size: var(--fs-s);
-    padding: 6px 10px;
-    width: 100%;
   }
   .predicates {
     display: flex;
@@ -204,49 +219,26 @@
   .dim {
     color: var(--text-dim);
     font-size: var(--fs-s);
-    padding: 4px 2px;
+    padding-block: 4px;
+    padding-inline: 8px;
   }
   .cap-note {
     font-size: var(--fs-xs);
     padding: 6px 8px;
   }
-  .hits {
-    overflow-y: auto;
-    min-height: 0;
-    display: flex;
-    flex-direction: column;
-    gap: 2px;
-  }
-  .hit {
-    text-align: start;
-    background: none;
-    border: none;
-    border-radius: var(--radius-s);
-    padding: 6px 8px;
-    min-height: var(--hit-min);
-    cursor: pointer;
-    color: var(--text);
-  }
-  .hit:hover {
-    background: var(--hover);
-  }
   .hit.reserved .t {
     color: var(--text-dim);
     font-style: italic;
   }
-  .t {
-    font-size: var(--fs-s);
-    font-weight: 600;
-  }
-  .p {
-    font-size: var(--fs-xs);
-    color: var(--text-dim);
-    overflow-wrap: anywhere;
-  }
   .s {
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
     font-size: var(--fs-xs);
     color: var(--text-dim);
-    margin-top: 2px;
+    white-space: normal;
   }
   .s :global(mark) {
     background: var(--accent-line);

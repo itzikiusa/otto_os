@@ -4,12 +4,12 @@ import { expectFullyInViewport, expectNoHorizontalOverflow } from './helpers';
 // ─────────────────────────────────────────────────────────────────────────────
 // The PR's agent thread, embedded in the PR workspace (desktop-browser, MOCK
 // mode — ui/src/lib/api/mock-runtime.ts answers the runtime routes). Explain
-// opens the thread in the left column instead of navigating away; each PR has
-// its own thread; it maximises over the workspace and comes back; detaching
-// leaves an "Open here again" placeholder; files and diff lines can be asked
-// about, each message carrying the PR's context. Before a thread exists the
-// dock is the Threads start composer: agent, model and access are picked
-// there, and New thread brings it back.
+// opens the thread in the workspace's Detail pane (the Agent view) instead of
+// navigating away; each PR has its own thread; it widens and narrows;
+// detaching leaves an "Open here again" placeholder; files and diff lines can
+// be asked about, each message carrying the PR's context. Before a thread
+// exists the pane is the Threads start composer: agent, model and access are
+// picked there, and New thread brings it back.
 // ─────────────────────────────────────────────────────────────────────────────
 
 test.beforeEach(async ({ page }, testInfo) => {
@@ -41,8 +41,9 @@ test('Explain opens the PR’s thread in place; another PR has its own; maximise
   await page.goto('/#/git');
   await openPr(page, 51);
   const panel = page.getByTestId('pr-agent-panel');
-  // Folded until first used, and nothing is created by opening a PR.
-  await expect(panel.getByRole('button', { name: 'Agent' })).toHaveAttribute('aria-expanded', 'false');
+  // The pane opens on the details until the agent is used; opening a PR creates nothing.
+  await expect(panel).toHaveCount(0);
+  await expect(page.getByTestId('pr-details-card')).toBeVisible();
   expect((await mockLog(page)).creates).toHaveLength(0);
 
   await menu(page, 'Explain this PR');
@@ -63,12 +64,15 @@ test('Explain opens the PR’s thread in place; another PR has its own; maximise
   expect(log.prompts[0].text).toContain('cloned at /Users/dev/otto');
   expect(log.prompts[0].text).toContain('#51');
 
-  // Maximise: the conversation takes the workspace; Back returns to the PR.
+  // Maximise: the pane widens to all the room the PR leaves; ⋯ › Narrow brings it back.
+  const pane = page.getByTestId('pr-pane');
+  const w0 = (await pane.boundingBox())!.width;
   await panel.getByTestId('embedded-thread-maximize').click();
-  await expect(page.locator('.prw-detail')).toBeHidden();
-  await expect(panel.getByTestId('embedded-runtime-thread')).toBeVisible();
-  await panel.getByTestId('pr-agent-restore').click();
+  await expect.poll(async () => (await pane.boundingBox())!.width).toBeGreaterThan(w0 + 100);
   await expect(page.locator('.prd-title')).toBeVisible();
+  await pane.getByRole('button', { name: 'Agent · PR #51 actions' }).click();
+  await page.locator('.ctx-menu').getByText('Narrow', { exact: true }).click();
+  await expect.poll(async () => (await pane.boundingBox())!.width).toBeLessThan(w0 + 2);
   await expect(panel.getByTestId('embedded-runtime-thread')).toBeVisible();
 
   // Another PR: its own panel, empty — no thread until something is asked.
@@ -147,30 +151,30 @@ test('Explain a file from the Files panel and lines from the diff', async ({ pag
   expect((await mockLog(page)).creates).toHaveLength(1); // the same thread
 });
 
-test('at 800 px tall the list, the files and the opened thread all fit the column', async ({ page }) => {
-  // Folded on purpose last time: a new ask must still unfold it.
-  await page.addInitScript(() => localStorage.setItem('otto_pr_agent_folded', '1'));
-  await page.setViewportSize({ width: 1280, height: 800 });
+test('at 1440×800 an ask opens the closed pane beside the PR; the list and the files keep their column', async ({ page }) => {
+  // Closed on purpose last time: a new ask must still open it.
+  await page.addInitScript(() => localStorage.setItem('otto.pane.git.pr.view', ''));
+  await page.setViewportSize({ width: 1440, height: 800 });
   await page.goto('/#/git');
   await openPr(page, 51);
+  await expect(page.getByTestId('pr-pane')).toHaveCount(0);
   await menu(page, 'Explain this PR');
   const panel = page.getByTestId('pr-agent-panel');
   await expect(panel.getByTestId('embedded-runtime-thread')).toBeVisible({ timeout: 10_000 });
-  const box = (await page.locator('.prw-agent').boundingBox())!;
-  expect(box.height).toBeGreaterThanOrEqual(200);
+  await expect(page.getByRole('dialog', { name: 'Agent · PR #51' })).toHaveCount(0); // inline, not a sheet
+  const box = (await page.getByTestId('pr-pane').boundingBox())!;
   expect(box.y + box.height).toBeLessThanOrEqual(800);
-  await expect(page.locator('.prw-list-main')).toBeVisible();
+  await expect(page.locator('.pr-search')).toBeVisible();
   await page.getByRole('tab', { name: 'Files', exact: true }).click(); // the tree shows beside Files
   await expect(page.getByRole('region', { name: 'Files in pull request #51' })).toBeVisible();
   await expect(panel.getByTestId('embedded-runtime-thread')).toBeVisible();
-  expect((await page.locator('.prw-list-main').boundingBox())!.height).toBeGreaterThanOrEqual(140);
 });
 
 test('before a thread the dock is the start composer: pick the agent, model and access, then ask; New thread starts over', async ({ page }) => {
   await page.goto('/#/git');
   await openPr(page, 51);
   const panel = page.getByTestId('pr-agent-panel');
-  await panel.getByRole('button', { name: 'Agent' }).click();
+  await page.getByTestId('pr-agent-open').click();
   const draft = panel.getByTestId('embedded-runtime-draft');
   await expect(draft).toBeVisible({ timeout: 10_000 });
   await expect(draft.getByRole('button', { name: 'Explain this PR' })).toBeVisible();
@@ -219,12 +223,13 @@ test('before a thread the dock is the start composer: pick the agent, model and 
   await expectNoHorizontalOverflow(page);
 });
 
-test('at the dock’s narrowest the start composer keeps both chips reachable', async ({ page }) => {
+test('at 1100 px (the pane is a sheet) the start composer keeps both chips reachable', async ({ page }) => {
   await page.setViewportSize({ width: 1100, height: 800 });
   await page.goto('/#/git');
   await openPr(page, 51);
   const panel = page.getByTestId('pr-agent-panel');
-  await panel.getByRole('button', { name: 'Agent' }).click();
+  await page.getByTestId('pr-agent-open').click();
+  await expect(page.getByRole('dialog', { name: 'Agent · PR #51' })).toBeVisible();
   const draft = panel.getByTestId('embedded-runtime-draft');
   await expect(draft).toBeVisible({ timeout: 10_000 });
   for (const id of ['picker-agent', 'runtime-access', 'new-thread-send-btn']) {

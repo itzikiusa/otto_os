@@ -1,15 +1,20 @@
 <script lang="ts">
-  // Structured Test Runner & Streaming Output panel: resizable left test tree
-  // with suite grouping + Fix with Agent, and right `IdeConsoleView` with
-  // structured JSON log formatting, clickable file:line links, wrap, and filter.
+  // Structured Test Runner & Streaming Output panel: the tests are the list of
+  // a ListDetail nested in the tool window (suites are tree nodes, a failed
+  // test keeps Debug and Fix with Agent and its message), beside
+  // `IdeConsoleView` (structured JSON logs, file:line links, wrap, filter). A
+  // phone pushes: the tests fill the tool, a tapped test shows the output with
+  // "‹ Tests" in the page header (the one Back).
   import Badge from '../../lib/components/Badge.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import Icon from '../../lib/components/Icon.svelte';
-  import PaneDivider from '../../lib/components/PaneDivider.svelte';
+  import ListPane from '../../lib/components/side/ListPane.svelte';
+  import ListDetail from '../../lib/components/side/ListDetail.svelte';
+  import SideRow from '../../lib/components/side/SideRow.svelte';
   import { ctxMenu } from '../../lib/contextmenu.svelte';
   import { router } from '../../lib/router.svelte';
   import { formatSeconds } from '../../lib/metric-format';
-  import { loadPaneWidth } from '../../lib/paneResizer';
+  import { viewport } from '../../lib/stores/viewport.svelte';
   import type { BadgeTone } from '../../lib/status';
   import {
     ide,
@@ -28,10 +33,7 @@
   } from './devices/ideDevServerDetect';
   import { ideDevices } from './devices/ideDevicesState.svelte';
   import { planFailedTestDebug, type FailedTestDebugPlan } from './debug/ideFailedTestDebug';
-  import { ideLayout } from './shell/ideLayout.svelte';
   import { runOutputSeqBase } from './store/ideDebugSnapshotSync';
-
-  const LS_RUN_TREE_W = 'otto.ide.runTreeW';
 
   let selectedRunId = $state<string | null>(null);
   let filterMode = $state<'all' | 'failed'>('all');
@@ -40,7 +42,8 @@
   let selectedTestKey = $state<string | null>(null);
   let debuggingTestKey = $state<string | null>(null);
   let showTestsPane = $state(true);
-  let treeW = $state(loadPaneWidth(LS_RUN_TREE_W, 320, 200, 620));
+  const phone = $derived(viewport.navDrawer);
+  let phoneOpen = $state(false);
 
   let lastActiveId = '';
   $effect(() => {
@@ -175,6 +178,11 @@
   }
 
   function onSelectTest(t: IdeTestResult, key: string): void {
+    phoneOpen = true; // a push (phone, or a tool window too narrow for the list)
+    if (phone) {
+      selectedTestKey = key;
+      return;
+    }
     selectedTestKey = selectedTestKey === key ? null : key;
     if (t.file) void ide.openFile(t.file, { line: t.line ?? 1 });
   }
@@ -263,16 +271,6 @@
           title={showTestsPane ? 'Hide test tree column' : 'Show test tree column'}
           onclick={() => (showTestsPane = !showTestsPane)}
         >Tests ({tests.length})</button>
-        {#if showTestsPane}
-          <div class="segmented run-seg" role="group" aria-label="Filter tests by status">
-            <button type="button" aria-pressed={filterMode === 'all'} onclick={() => (filterMode = 'all')}>All</button>
-            <button type="button" aria-pressed={filterMode === 'failed'} onclick={() => (filterMode = 'failed')}>Failed ({failedCount})</button>
-          </div>
-          <div class="input-group run-filter">
-            <Icon name="search" size={12} />
-            <input type="search" dir="ltr" aria-label="Filter tests by name" placeholder="Filter tests…" bind:value={query} />
-          </div>
-        {/if}
       {/if}
 
       <button
@@ -344,52 +342,60 @@
     {/if}
 
     <div class="run-flex">
-      {#if tests.length > 0 && showTestsPane}
-        <section
-          class="run-tree"
-          style:inline-size={!ideLayout.stack ? `${treeW}px` : undefined}
-          aria-label="Structured test results"
-        >
-          {#if filteredTests.length === 0}
-            <div class="run-filter-empty">
-              <p class="dim">No matching tests.</p>
-              <button
-                type="button"
-                class="btn small ghost"
-                onclick={() => {
-                  filterMode = 'all';
-                  query = '';
-                }}
-              >Show all tests</button>
-            </div>
-          {:else}
-            {#each suiteGroups as group (group.suite)}
-              {@const collapsed = Boolean(collapsedSuites[group.suite])}
-              <div class="run-suite">
+      <ListDetail module="ide" pane="runTree" name="Tests" open={phoneOpen} onback={() => (phoneOpen = false)} empty={!(tests.length > 0 && showTestsPane)} defaultWidth={320} legacy={{ w: 'otto.ide.runTreeW' }}>
+        {#snippet list()}
+          <ListPane count={tests.length}>
+            {#snippet searchRow()}
+              <div class="input-group">
+                <Icon name="search" size={12} />
+                <input type="search" dir="ltr" aria-label="Filter tests by name" placeholder="Filter tests…" bind:value={query} />
+              </div>
+            {/snippet}
+            {#snippet filterRow()}
+              <div class="segmented" role="group" aria-label="Filter tests by status">
+                <button type="button" aria-pressed={filterMode === 'all'} onclick={() => (filterMode = 'all')}>All</button>
+                <button type="button" aria-pressed={filterMode === 'failed'} onclick={() => (filterMode = 'failed')}>Failed ({failedCount})</button>
+              </div>
+            {/snippet}
+            {#if filteredTests.length === 0}
+              <div class="run-filter-empty">
+                <p class="dim">No tests match.</p>
                 <button
                   type="button"
-                  class="run-suite-head"
-                  aria-expanded={!collapsed}
-                  onclick={() => toggleSuite(group.suite)}
-                >
-                  <Icon name={collapsed ? 'chevronRight' : 'chevronDown'} size={12} />
-                  <span class="run-suite-name ellipsis" dir="ltr" title={group.suite}>{group.suite}</span>
-                  <Badge
-                    tone={group.failed > 0 ? 'bad' : 'ok'}
-                    variant="outline"
-                    label={group.failed > 0 ? `${group.failed} failed` : `${group.passed}/${group.items.length}`}
-                  />
-                </button>
-                {#if !collapsed}
-                  {#each group.items as t, idx (testKey(t, idx))}
-                    {@const k = testKey(t, idx)}
-                    {@const showMsg = Boolean(t.message) && (t.status === 'failed' || selectedTestKey === k)}
-                    <div class="run-test-wrap">
-                      <div class="run-test-head" class:is-selected={selectedTestKey === k}>
+                  class="btn small ghost"
+                  onclick={() => {
+                    filterMode = 'all';
+                    query = '';
+                  }}
+                >Clear filter</button>
+              </div>
+            {:else}
+              <div role="tree" aria-label="Structured test results">
+                {#each suiteGroups as group (group.suite)}
+                  {@const collapsed = Boolean(collapsedSuites[group.suite])}
+                  <SideRow
+                    tree
+                    title={group.suite}
+                    tip={group.suite}
+                    expanded={!collapsed}
+                    ontoggle={() => toggleSuite(group.suite)}
+                    onclick={() => toggleSuite(group.suite)}
+                  >
+                    {#snippet trailing()}{group.failed > 0 ? `${group.failed} failed` : `${group.passed}/${group.items.length}`}{/snippet}
+                  </SideRow>
+                  {#if !collapsed}
+                    {#each group.items as t, idx (testKey(t, idx))}
+                      {@const k = testKey(t, idx)}
+                      {@const showMsg = Boolean(t.message) && (t.status === 'failed' || selectedTestKey === k)}
+                      <div class="side-row" class:two-line={!!t.file} class:selected={selectedTestKey === k} style:--side-depth={1}>
                         <button
                           type="button"
-                          class="run-test-row"
-                          aria-pressed={selectedTestKey === k}
+                          class="side-row-main"
+                          data-side-row
+                          role="treeitem"
+                          aria-level={2}
+                          aria-selected={selectedTestKey === k}
+                          title={t.file ? `${t.name} — ${t.file}:${t.line ?? 1}` : t.name}
                           onclick={() => onSelectTest(t, k)}
                         >
                           {#if t.status === 'passed'}
@@ -401,16 +407,14 @@
                           {:else}
                             <span class="run-icon dim" aria-hidden="true"><Icon name="dot" size={12} /></span>
                           {/if}
-                          <span class="run-test-name mono ellipsis" dir="ltr" title={t.name}>{t.name}</span>
-                          <span class="run-test-status" class:is-ok={t.status === 'passed'} class:is-bad={t.status === 'failed'}>{t.status}</span>
-                          {#if t.file}
-                            <span class="run-test-loc mono dim" dir="ltr" title={`${t.file}:${t.line ?? 1}`}>
-                              {ideBasename(t.file)}{t.line ? `:${t.line}` : ''}
-                            </span>
-                          {/if}
-                          {#if t.duration_ms != null}
-                            <span class="run-test-dur dim">{formatSeconds(t.duration_ms / 1000)}</span>
-                          {/if}
+                          <span class="side-row-text">
+                            <span class="side-row-title mono" dir="ltr">{t.name}</span>
+                            {#if t.file}<span class="side-row-meta mono" dir="ltr">{ideBasename(t.file)}{t.line ? `:${t.line}` : ''}</span>{/if}
+                          </span>
+                          <span class="side-row-trailing">
+                            <span class="run-test-status" class:is-ok={t.status === 'passed'} class:is-bad={t.status === 'failed'}>{t.status}</span>
+                            {#if t.duration_ms != null}<span>{formatSeconds(t.duration_ms / 1000)}</span>{/if}
+                          </span>
                         </button>
                         {#if t.status === 'failed'}
                           {@const debugPlan = ide.hasTarget && !ide.collabIsGuest
@@ -427,21 +431,20 @@
                           {#if debugPlan}
                             <button
                               type="button"
-                              class="btn small ghost run-debug-btn"
+                              class="icon-btn"
                               aria-label="Debug {t.name}"
                               title={ide.debugLoading || debuggingTestKey !== null ? 'Starting debug session…' : `Debug ${t.name}`}
                               disabled={ide.debugLoading || debuggingTestKey !== null}
                               onclick={() => void debugFailedTest(debugPlan, k)}
                               data-testid="ide-test-debug-btn"
                             >
-                              <Icon name="bug" size={12} />
-                              <span>{debuggingTestKey === k ? 'Starting…' : 'Debug'}</span>
+                              {#if debuggingTestKey === k}<span class="spinner" style="--spinner-size: 12px" aria-hidden="true"></span>{:else}<Icon name="bug" size={14} />{/if}
                             </button>
                           {/if}
                           <button
                             type="button"
-                            class="btn small ghost run-fix-btn"
-                            aria-label="Fix with Agent"
+                            class="icon-btn run-fix-btn"
+                            aria-label="Fix {t.name} with Agent"
                             title="Fix with Agent"
                             onclick={() =>
                               ideAgent.attachTestFailure(
@@ -451,40 +454,34 @@
                               )}
                             data-testid="ide-test-fix-agent"
                           >
-                            <Icon name="assistant" size={12} />
-                            <span>Fix</span>
+                            <Icon name="assistant" size={14} />
                           </button>
                         {/if}
                       </div>
                       {#if showMsg && t.message}
                         <pre class="run-test-msg mono" dir="ltr">{stripAnsiCodes(t.message)}</pre>
                       {/if}
-                    </div>
-                  {/each}
-                {/if}
+                    {/each}
+                  {/if}
+                {/each}
               </div>
-            {/each}
-          {/if}
-        </section>
-
-        {#if !ideLayout.stack}
-          <PaneDivider bind:width={treeW} storageKey={LS_RUN_TREE_W} min={200} max={620} defaultWidth={320} label="Resize test results tree" />
-        {/if}
-      {/if}
-
-      <section class="run-log-pane" aria-label="Console output">
+            {/if}
+          </ListPane>
+        {/snippet}
+        <section class="run-log-pane" aria-label="Console output">
         <IdeConsoleView
           sessionKey={shownRun.id}
           lines={consoleLines}
           emptyText={isRunning ? 'Waiting for process output…' : 'Process finished with no console output.'}
         />
-      </section>
+        </section>
+      </ListDetail>
     </div>
   {/if}
 </div>
 
 <style>
-  .run-root { container-type: inline-size; display: flex; flex-direction: column; block-size: 100%; min-block-size: 0; min-inline-size: 0; background: var(--surface); }
+  .run-root { display: flex; flex-direction: column; block-size: 100%; min-block-size: 0; min-inline-size: 0; background: var(--surface); }
   .run-empty { flex: 1; min-block-size: 0; overflow-y: auto; display: flex; align-items: center; justify-content: center; }
   .run-bar {
     display: flex; align-items: center; gap: 6px;
@@ -505,9 +502,6 @@
   }
   .run-pane-toggle:hover { background: var(--hover); color: var(--text); }
   .run-pane-toggle.is-on { border-color: var(--accent-line); background: var(--accent-soft); color: var(--accent-text); }
-  .run-seg { block-size: 22px; flex-shrink: 0; }
-  .run-seg button { padding-block: 0; padding-inline: 8px; font-size: var(--fs-xs); }
-  .run-filter { block-size: 22px; inline-size: 148px; font-size: var(--fs-xs); flex-shrink: 0; }
   .run-compact-btn { block-size: 22px; padding-block: 0; flex-shrink: 0; }
   .run-devsrv-bar {
     display: flex; align-items: center; gap: 6px; padding-block: 4px; padding-inline: 8px;
@@ -516,30 +510,11 @@
   }
   .run-devsrv-url { color: var(--accent-text); font-weight: 500; flex-shrink: 1; min-inline-size: 0; max-inline-size: 240px; }
   .run-flex { flex: 1; min-block-size: 0; min-inline-size: 0; display: flex; overflow: hidden; }
-  .run-tree { flex-shrink: 0; min-block-size: 0; min-inline-size: 200px; overflow-y: auto; border-inline-end: 1px solid var(--border); }
-  .run-filter-empty { display: flex; flex-direction: column; align-items: center; gap: 6px; padding: 20px 12px; font-size: var(--fs-xs); }
-  .run-suite { border-block-end: 1px solid var(--separator); }
-  .run-suite-head { display: flex; align-items: center; gap: 6px; inline-size: 100%; padding-block: 6px; padding-inline: 10px; border: 0; background: var(--surface-2); color: var(--text); font-size: var(--fs-xs); font-weight: 600; text-align: start; cursor: pointer; }
-  .run-suite-head:hover { background: var(--hover); }
-  .run-suite-name { flex: 1; }
-  .run-test-wrap { border-block-start: 1px solid var(--separator); }
-  .run-test-head { display: flex; align-items: center; gap: 4px; padding-inline-end: 8px; }
-  .run-test-head:hover { background: var(--hover); }
-  .run-test-head.is-selected { background: var(--accent-soft); }
-  .run-test-row { display: flex; align-items: center; gap: 6px; flex: 1; min-inline-size: 0; padding-block: 4px; padding-inline: 12px 6px; border: 0; background: transparent; color: var(--text); font-size: var(--fs-xs); text-align: start; cursor: pointer; }
-  .run-fix-btn { flex-shrink: 0; color: var(--accent-text); }
-  .run-debug-btn { flex-shrink: 0; }
+  .run-filter-empty { display: flex; flex-direction: column; align-items: center; gap: 6px; padding: 20px 12px; font-size: var(--fs-s); }
+  .run-fix-btn { color: var(--accent-text); }
   .run-icon { display: inline-flex; align-items: center; flex-shrink: 0; }
   .run-icon.is-ok, .run-test-status.is-ok { color: var(--success); }
   .run-icon.is-bad, .run-test-status.is-bad { color: var(--danger); }
-  .run-test-name { flex: 1; font-size: var(--fs-xs); }
-  .run-test-status { font-size: var(--fs-xs); color: var(--text-dim); flex-shrink: 0; }
-  .run-test-loc, .run-test-dur { font-size: var(--fs-xs); flex-shrink: 0; font-variant-numeric: tabular-nums; }
-  .run-test-msg { margin: 0; padding-block: 6px; padding-inline: 28px 12px; background: var(--danger-soft); color: var(--danger); font-size: var(--fs-xs); white-space: pre-wrap; overflow-wrap: anywhere; }
+  .run-test-msg { margin: 0 0 2px; padding-block: 6px; padding-inline: 40px 12px; border-radius: var(--radius-s); background: var(--danger-soft); color: var(--danger); font-size: var(--fs-xs); white-space: pre-wrap; overflow-wrap: anywhere; }
   .run-log-pane { flex: 1; min-block-size: 0; min-inline-size: 0; display: flex; flex-direction: column; }
-  @container (max-width: 720px) {
-    .run-flex { flex-direction: column; overflow-y: auto; }
-    .run-tree { inline-size: 100%; border-inline-end: 0; border-block-end: 1px solid var(--border); max-block-size: 200px; }
-    .run-flex :global(.pane-divider) { display: none; }
-  }
 </style>

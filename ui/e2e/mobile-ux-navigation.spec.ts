@@ -85,11 +85,9 @@ async function toggleLightModeViaUi(page: Page): Promise<void> {
   const isPhoneLandscape = vw > 640 && vw <= 1024 && vh <= 500;
 
   if (isPhonePortrait) {
-    const moreBtn = page.locator('nav.bottomnav').getByRole('button', { name: /^More/ });
-    await expect(moreBtn).toBeVisible();
-    await moreBtn.click();
-    const sheet = page.getByRole('dialog', { name: 'More' });
-    await expectFullyInViewport(page, sheet, 'More drawer');
+    await page.locator('nav.bottomnav').getByTestId('bottomnav-menu').click();
+    const sheet = page.locator('.drawer[aria-label="Navigator"]');
+    await expectFullyInViewport(page, sheet, 'Menu drawer');
     await sheet.getByTestId('light-toggle').click();
     await expect(sheet).toBeHidden();
     return;
@@ -141,7 +139,7 @@ test('multi-hop navigation + drawers + input focus never cuts off the screen', a
   await assertViewportHealthy(page, 'after settings input focus');
 
   // Open and dismiss Right Panel drawer on mobile/tablet, then hop back to Git + Threads.
-  const sidePanelBtn = page.locator('.mtopbar').getByRole('button', { name: 'Side panel' });
+  const sidePanelBtn = page.getByRole('button', { name: 'Side panel', exact: true }).first();
   if (await sidePanelBtn.isVisible()) {
     await sidePanelBtn.click();
     const rightDrawer = page.locator('.drawer.right:not(.inline)');
@@ -195,9 +193,9 @@ test('tablet collapses/expands Navigator to Rail; phone portrait Full mode keeps
   const vh = page.viewportSize()!.height;
 
   if (vw <= 640) {
-    // Phone portrait Full mode: Threads hides shell topbar, so Threads header must expose Navigator.
+    // Phone portrait: Threads' one header row (its PageHeader) carries the shared ☰.
     await openPage(page, 'threads');
-    const navTrigger = page.getByTestId('threads-open-navigator');
+    const navTrigger = page.getByTestId('page-header').first().getByRole('button', { name: 'Open navigator' });
     await expect(navTrigger).toBeVisible();
     await navTrigger.click();
     const drawer = page.locator('.drawer[aria-label="Navigator"]');
@@ -210,20 +208,18 @@ test('tablet collapses/expands Navigator to Rail; phone portrait Full mode keeps
   }
 
   if (vw > 640 && vw <= 1024 && vh > 500) {
-    // Tablet portrait: Navigator starts expanded (220px), can fold to 44px Rail and expand back.
+    // Tablet portrait: the Rail by default (44 px); it expands to the 220 px Navigator and folds back.
     await openPage(page, 'git');
-    const before = (await page.locator('.center').first().boundingBox())!;
-    const collapseBtn = page.locator('.navigator').getByRole('button', { name: 'Collapse sidebar' });
-    await expect(collapseBtn).toBeVisible();
-    await collapseBtn.click();
     await expect(page.locator('.rail')).toBeVisible();
-    await expect.poll(async () => (await page.locator('.center').first().boundingBox())!.width).toBeGreaterThan(before.width + 140);
-    await assertViewportHealthy(page, 'tablet folded to rail');
-
-    const expandBtn = page.locator('.rail').getByRole('button', { name: 'Expand sidebar' });
-    await expandBtn.click();
+    const before = (await page.locator('.center').first().boundingBox())!;
+    await page.locator('.rail').getByRole('button', { name: 'Expand sidebar' }).click();
     await expect(page.locator('.navigator')).toBeVisible();
-    await assertViewportHealthy(page, 'tablet expanded back to navigator');
+    await expect.poll(async () => (await page.locator('.center').first().boundingBox())!.width).toBeLessThan(before.width - 140);
+    await assertViewportHealthy(page, 'tablet expanded to navigator');
+
+    await page.locator('.navigator').getByRole('button', { name: 'Collapse sidebar' }).click();
+    await expect(page.locator('.rail')).toBeVisible();
+    await assertViewportHealthy(page, 'tablet folded back to rail');
     return;
   }
 

@@ -10,8 +10,8 @@
   // over the whole page. Layout: account/service rail + content; on mobile the
   // rail collapses and the overview / service view take the full width.
   import { untrack } from 'svelte';
-  import PaneDivider from '../../lib/components/PaneDivider.svelte';
-  import { LIST_PANE, loadPaneWidth } from '../../lib/paneResizer';
+  import ListDetail from '../../lib/components/side/ListDetail.svelte';
+  import ListPane from '../../lib/components/side/ListPane.svelte';
   import { aws } from '../../lib/stores/aws.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { viewport } from '../../lib/stores/viewport.svelte';
@@ -26,6 +26,7 @@
   import Skeleton from '../../lib/components/Skeleton.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
   import Icon from '../../lib/components/Icon.svelte';
+  import type { MenuItem } from '../../lib/contextmenu.svelte';
   import InstallPanel from './InstallPanel.svelte';
   import AccountsOverview from './AccountsOverview.svelte';
   import AccountRail from './AccountRail.svelte';
@@ -167,27 +168,32 @@
   );
   // No accounts at all → the list pane is hidden and one page-level EmptyState
   // (with the single "Add account" CTA) owns the page.
-  // The accounts rail's width — drag / ←→ on the divider, remembered across visits.
-  let listW = $state(loadPaneWidth('aws.listW', LIST_PANE.default, LIST_PANE.min, LIST_PANE.max));
   const noAccounts = $derived(aws.accountsLoaded && aws.accounts.length === 0 && !routeAccountId);
-  const showRail = $derived(!noAccounts && (!viewport.isMobile || !routeAccountId));
-  const showContent = $derived(noAccounts || !viewport.isMobile || !!routeAccountId);
+  // Phone: the accounts list is the page until a service (or the overview) is
+  // opened — then the content is, with "‹ Accounts". Back keeps the route, so
+  // the service stays marked in the list. Any route change opens its content.
+  let phoneOpen = $state(untrack(() => !!routeAccountId));
+  let lastRoute = untrack(() => router.parts.join('/'));
+  $effect(() => {
+    const r = router.parts.join('/');
+    if (r === lastRoute) return;
+    lastRoute = r;
+    untrack(() => (phoneOpen = !!routeAccountId));
+  });
+  function openOverview(): void {
+    router.go('aws');
+    phoneOpen = true;
+  }
+  const paneMenu = (): MenuItem[] => [{ label: 'Overview', icon: 'grid', action: openOverview }];
   const SERVICE_LABEL: Record<AwsService, string> = { s3: 'S3', sqs: 'SQS', ec2: 'EC2', athena: 'Athena', eks: 'EKS', rds: 'RDS' };
 </script>
 
 <div class="aws-page">
 <PageHeader
   title={routeAccountId && account ? account.name : 'AWS'}
-  crumbs={routeAccountId && account && !viewport.isMobile ? [{ label: 'AWS', onclick: () => router.go('aws') }] : []}
+  crumbs={routeAccountId && account && !viewport.navDrawer ? [{ label: 'AWS', onclick: openOverview }] : []}
   subtitle={!routeAccountId && aws.installed ? `S3, SQS, EC2, Athena, EKS and RDS through the aws CLI${aws.status?.version ? ` ${aws.status.version}` : ''}` : undefined}
 >
-  {#snippet leading()}
-    {#if viewport.isMobile && routeAccountId}
-      <button class="icon-btn" onclick={() => router.go('aws')} aria-label="Back to accounts" title="Back to accounts">
-        <Icon name="chevronLeft" size={14} />
-      </button>
-    {/if}
-  {/snippet}
   {#snippet badge()}
     {#if routeAccountId && account}
       <EnvBadge env={account.environment} />
@@ -198,11 +204,6 @@
     {#if aws.installed && routeAccountId && account && !routeLogs && logsAllowed}
       <button class="btn small" onclick={() => router.go(logsRoute(account.id))} data-testid="aws-open-logs" aria-label="CloudWatch Logs" title="CloudWatch Logs">
         <Icon name="text" size={12} />{#if !viewport.isPhone} Logs{/if}
-      </button>
-    {/if}
-    {#if aws.installed && canAdmin && aws.accounts.length > 0}
-      <button class="btn small primary" onclick={openCreate} data-testid="aws-add-account" aria-label="Add account" title="Add account">
-        <Icon name="plus" size={12} />{#if !viewport.isPhone} Add account{/if}
       </button>
     {/if}
   {/snippet}
@@ -225,32 +226,32 @@
   <PageBody><InstallPanel /></PageBody>
 {:else}
   <PageBody fill padded={false}>
-  <div class="aws" class:mobile={viewport.isMobile} class:solo={!showRail}>
-    {#if showRail}
-      <aside class="rail-col" style="--list-pane-w:{listW}px">
-        {#if viewport.isMobile}
-          <AccountsOverview onadd={openCreate} onedit={openEdit} ondelete={(a) => void deleteAccount(a)} onsignin={(a) => void signIn(a)} />
-        {:else}
-          <AccountRail
-            activeId={routeAccountId}
-            activeService={routeService}
-            onedit={openEdit}
-            ondelete={(a) => void deleteAccount(a)}
-            onsignin={(a) => void signIn(a)}
-            logsActive={routeLogs}
-          />
-        {/if}
-      </aside>
-      {#if !viewport.isMobile && showContent}
-        <PaneDivider bind:width={listW} storageKey="aws.listW" label="Resize the accounts list" />
-      {/if}
-    {/if}
-    {#if showContent}
+  <ListDetail module="aws" name="Accounts" open={phoneOpen} onback={() => (phoneOpen = false)} empty={noAccounts} legacy={{ w: 'aws.listW' }}>
+    {#snippet list()}
+      <ListPane
+        count={aws.accounts.length || null}
+        primary={canAdmin ? { icon: 'plus', label: 'Add account', onclick: openCreate, testid: 'aws-add-account' } : undefined}
+        menu={paneMenu}
+        loading={!aws.accountsLoaded}
+        error={aws.accounts.length ? null : aws.accountsError ? awsErrorText(aws.accountsError) : null}
+        onretry={() => void aws.loadAccounts()}
+        testid="aws-accounts"
+      >
+        <AccountRail
+          activeId={routeAccountId}
+          activeService={routeService}
+          onedit={openEdit}
+          ondelete={(a) => void deleteAccount(a)}
+          onsignin={(a) => void signIn(a)}
+          onoverview={openOverview}
+          onopen={() => (phoneOpen = true)}
+          logsActive={routeLogs}
+        />
+      </ListPane>
+    {/snippet}
       <section class="content">
         {#if !routeAccountId}
-          {#if !viewport.isMobile || noAccounts}
-            <AccountsOverview onadd={openCreate} onedit={openEdit} ondelete={(a) => void deleteAccount(a)} onsignin={(a) => void signIn(a)} />
-          {/if}
+          <AccountsOverview onadd={openCreate} onedit={openEdit} ondelete={(a) => void deleteAccount(a)} onsignin={(a) => void signIn(a)} />
         {:else if aws.accountsError && !aws.accounts.length}
           <!-- A failed account list is not a stale link: say so, with Retry. -->
           <LoadState
@@ -295,8 +296,7 @@
           {/key}
         {/if}
       </section>
-    {/if}
-  </div>
+  </ListDetail>
   </PageBody>
 {/if}
 </div>
@@ -342,29 +342,6 @@
     margin: 0 0 12px;
     font-size: var(--fs-s);
     color: var(--text-dim);
-  }
-  .aws {
-    display: flex;
-    flex: 1;
-    min-height: 0;
-    overflow: hidden;
-  }
-  /* Box + focus ring come from the global .input-group (app.css). */
-  .rail-col {
-    flex: none;
-    width: var(--list-pane-w, 280px);
-    background: var(--bg-sidebar);
-    min-height: 0;
-    overflow: hidden;
-    display: flex;
-    flex-direction: column;
-  }
-  .aws.mobile .rail-col {
-    flex: 1;
-    width: auto;
-    min-width: 0;
-    background: transparent;
-    overflow: auto;
   }
   .content {
     flex: 1;

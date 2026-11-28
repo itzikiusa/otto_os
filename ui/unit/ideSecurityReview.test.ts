@@ -9,6 +9,7 @@ const security = new URL('../src/modules/ide/security/IdeSecurityPage.svelte', i
 const running: SecurityScanSummary = {
   id: 'test', status: 'running', created_at: '2026-11-27T12:00:00Z', started_at: null,
   finished_at: null, engine: null, metrics: null, error: null, count: 0, engines: [],
+  trigger: 'manual', skipped: [],
 };
 const completed: SecurityScanSummary = { ...running, status: 'completed', finished_at: '2026-11-27T12:00:02Z' };
 
@@ -250,4 +251,55 @@ test('RunDastRequest requires full confirmation identity when active is true', (
   assert.equal(validPassiveFalse.active, false);
   assert.equal(invalidBareActive.active, true);
   assert.equal(invalidPartialActive.active, true);
+});
+
+test('scheduled active checks are allowed only with the exact offer the confirm showed', async () => {
+  const offer = {
+    run_config_id: 'cfg-1', url: 'http://localhost:3000/', confirmed_at: '2026-11-27T12:00:00.000Z',
+    addresses: ['127.0.0.1:3000', '[::1]:3000'], cron: '0 9 * * *', timezone: 'UTC',
+    armed_at: '2026-11-27T11:00:00.000Z', template_policy: 'exposures-test',
+  };
+  const calls: unknown[][] = [];
+  const prompts: Array<{ message: string; title?: string }> = [];
+  let accept = false;
+  const state = componentFunctions(security, ['toggleScheduledActive', 'action'], {
+    base: '/security', acting: false, error: '', loadErrorText: String,
+    overview: project(), when: (date: string) => date, day: (date: string) => date.slice(0, 10),
+    passive: {
+      confirmed: { run_config_id: 'cfg-1', url: offer.url, allow_public: false, scheduled: true, confirmed_at: offer.confirmed_at },
+      candidates: [{ run_config_id: 'cfg-1', run_config_name: 'Dev', url: offer.url, public: false }],
+      active_schedule: { grant: null, offer, blocked: null },
+    },
+    refreshPassive: async () => {},
+    confirmer: {
+      async ask(message: string, opts?: { title?: string }) {
+        prompts.push({ message, title: opts?.title });
+        return accept;
+      },
+    },
+    api: {
+      async put(path: string, body?: unknown) { calls.push(['put', path, body]); },
+      async del(path: string) { calls.push(['del', path]); },
+    },
+  });
+
+  // Declining sends nothing and leaves the switch off.
+  const input = { checked: true };
+  await state.toggleScheduledActive(input);
+  assert.equal(input.checked, false);
+  assert.equal(calls.length, 0);
+  assert.equal(prompts[0].title, 'Allow scheduled active checks?');
+  for (const shown of [/Target: http:\/\/localhost:3000\/ · run configuration “Dev”/, /127\.0\.0\.1:3000, \[::1\]:3000/,
+    /0 9 \* \* \* \(UTC\), next 2026-11-28T09:00:00Z/, /Runs as you until \d{4}-\d\d-\d\d/, /test HTTP requests/]) {
+    assert.match(prompts[0].message, shown);
+  }
+
+  // Accepting sends exactly the identity the confirm showed; turning off revokes.
+  accept = true;
+  input.checked = true;
+  await state.toggleScheduledActive(input);
+  assert.deepEqual(JSON.parse(JSON.stringify(calls)), [['put', '/security/dast/schedule', offer]]);
+  input.checked = false;
+  await state.toggleScheduledActive(input);
+  assert.deepEqual(calls[1], ['del', '/security/dast/schedule']);
 });

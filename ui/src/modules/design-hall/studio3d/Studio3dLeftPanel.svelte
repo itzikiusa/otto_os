@@ -64,7 +64,7 @@
   const env = $derived(doc.environment);
 </script>
 
-<aside class="left" id="s3d-scene-tools" aria-label="Scene" data-testid="s3d-left">
+<div class="left" id="s3d-scene-tools" data-testid="s3d-left">
   {#if !isModelArtifact}
     <div class="hier">
       <Hierarchy
@@ -164,16 +164,15 @@
       </p>
     </section>
   {/if}
-</aside>
+</div>
 
 <style>
+  /* The body of the Studio's list pane (ListPane owns the frame and scroll). */
   .left {
-    min-block-size: 0;
-    background: var(--surface);
+    min-block-size: 100%;
     display: flex;
     flex-direction: column;
-    border-inline-end: 1px solid var(--border);
-    overflow-y: auto;
+    margin-inline: -8px;
   }
   .hier {
     min-block-size: 200px;

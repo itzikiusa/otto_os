@@ -20,7 +20,8 @@ test.beforeEach(async ({ page }) => {
 });
 async function openHelp(page: Page, id = '') {
   await page.goto(`/#/walkthroughs${id ? `/${id}` : ''}`, { waitUntil: 'domcontentloaded' });
-  await expect(page.getByTestId('page-header').locator('h1')).toHaveText('Help');
+  // A phone opens on the guides list: its header row is the list's ("Guides").
+  await expect(page.getByTestId('page-header').locator('h1')).toHaveText(/^\s*(Help|Guides)\s*$/);
 }
 
 test('Getting started opens from the list and the first chapter', async ({ page }) => {
@@ -28,7 +29,7 @@ test('Getting started opens from the list and the first chapter', async ({ page 
   await openHelp(page);
   await page.locator('[data-guide="getting-started"]').click();
   await expect(page.getByTestId('guide-article')).toHaveAttribute('data-guide-id', 'getting-started');
-  await page.getByRole('button', { name: 'Back to all guides' }).click();
+  await page.getByRole('button', { name: 'Back to Guides' }).click();
   await page.locator('.chapter').first().getByRole('button', { name: 'Read the guide' }).click();
   await expect(page.getByTestId('guide-article')).toHaveAttribute('data-guide-id', 'getting-started');
   await expectNoHorizontalOverflow(page);

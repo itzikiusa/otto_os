@@ -16,20 +16,13 @@
   import { runStatus, sentenceCase } from '../../lib/status';
   import { rel } from '../../lib/stores/now.svelte';
   import { pollWhileVisible } from '../../lib/poll';
-  import { viewport } from '../../lib/stores/viewport.svelte';
+  import ListDetail from '../../lib/components/side/ListDetail.svelte';
+  import ListPane from '../../lib/components/side/ListPane.svelte';
   import type { EvalMatrix, MatrixCell, MatrixPrompt, SkillSourceReq, StartMatrixReq } from '../../lib/api/types';
   import { agentProviders, defaultAgentProvider } from '../../lib/providers';
   import MatrixSkillPicker from './MatrixSkillPicker.svelte';
 
-  let {
-    listCollapsed = false,
-    onopenrun,
-    onphonedetail,
-  }: {
-    listCollapsed?: boolean;
-    onopenrun?: (evalId: string) => void;
-    onphonedetail?: (open: boolean) => void;
-  } = $props();
+  let { onopenrun }: { onopenrun?: (evalId: string) => void } = $props();
 
   let matrices: EvalMatrix[] = $state([]);
   let loading = $state(true);
@@ -39,21 +32,13 @@
   let selectedId: string | null = $state(null);
   let showForm = $state(false);
   let creating = $state(false);
-  let phoneListOpen = $state(false);
+  /** Phone: the open matrix / New form is pushed over the list. */
+  let phoneOpen = $state(false);
   // The selected matrix's own load: shown inline in the detail pane (a toast
   // left the pane on the generic "Eval matrix" intro, as if nothing existed).
   let detailError: string | null = $state(null);
   let detailLoading = $state(false);
 
-  const showPhoneList = $derived(
-    viewport.isPhone && (phoneListOpen || ((loading || !!loadError) && matrices.length === 0)),
-  );
-  $effect(() => {
-    onphonedetail?.(viewport.isPhone && !showPhoneList && matrices.length > 0);
-  });
-  export function back(): void {
-    phoneListOpen = true;
-  }
 
   // --- New-matrix form fields --------------------------------------------
   let fName = $state('');
@@ -75,7 +60,7 @@
     selected = null;
     selectedId = null;
     fSkills = [];
-    phoneListOpen = false;
+    phoneOpen = true;
     if (wsId) {
       void loadList(wsId);
     } else {
@@ -105,7 +90,7 @@
   async function selectMatrix(id: string): Promise<void> {
     selectedId = id;
     showForm = false;
-    phoneListOpen = false;
+    phoneOpen = true;
     detailError = null;
     if (selected?.id !== id) selected = null;
     detailLoading = true;
@@ -189,7 +174,7 @@
     showForm = true;
     selectedId = null;
     selected = null;
-    phoneListOpen = false;
+    phoneOpen = true;
   }
 
   const canCreate = $derived(
@@ -306,46 +291,50 @@
 
 </script>
 
-<div class="mx" class:list-hidden={listCollapsed && !viewport.isPhone} data-testid="matrix-view">
-  <aside class="mx-side" class:hide-phone={viewport.isPhone && !showPhoneList} id="matrices-list">
-    <div class="mx-side-head">
-      <span class="mx-side-title">Matrices</span>
-      <!-- Not .primary: the form’s "Create matrix" / the empty state’s CTA is the view’s primary. -->
-      <button class="btn small" data-testid="matrix-new-btn" onclick={openForm} aria-pressed={showForm}>
-        <Icon name="plus" size={12} /> New matrix
-      </button>
-    </div>
-    <div class="mx-list">
+<div class="mx" data-testid="matrix-view">
+<ListDetail module="skills-eval" pane="matrices" name="Matrices" open={phoneOpen} onback={() => (phoneOpen = false)} empty={!!ws.currentId && !loading && !loadError && matrices.length === 0}>
+  {#snippet list()}
+    <!-- The pane's + opens the New matrix form (the form's "Create matrix" is the view's primary). -->
+    <ListPane
+      count={matrices.length}
+      primary={{ icon: 'plus', label: 'New matrix', onclick: openForm, testid: 'matrix-new-btn' }}
+      loading={!!ws.currentId && loading && matrices.length === 0}
+      error={matrices.length === 0 ? loadError : null}
+      onretry={() => ws.currentId && loadList(ws.currentId)}
+      testid="matrices-list"
+    >
       {#if !ws.currentId}
         <div class="mx-muted">No workspace selected.</div>
-      {:else if (loading || loadError) && matrices.length === 0}
-        <LoadState what="matrices" {loading} error={loadError} empty={true} variant="compact" onretry={() => ws.currentId && loadList(ws.currentId)} />
-      {:else if matrices.length === 0}
-        <div class="mx-muted">No matrices yet.</div>
       {:else}
         {#each matrices as m (m.id)}
-          <button
-            class="mx-item"
-            aria-current={!showForm && selectedId === m.id ? 'true' : undefined}
-            class:active={!showForm && selectedId === m.id}
-            onclick={() => selectMatrix(m.id)}
-          >
-            <div class="mx-item-top">
-              <span class="mx-item-name" title={m.name}>{m.name}</span>
-              <span class="mx-dot st-{m.status}" role="img" aria-label={runStatus(m.status).label} title={runStatus(m.status).label}></span>
-            </div>
-            <div class="mx-item-meta">
-              <span title="{m.providers.length} providers × {m.skills.length} skills × {m.prompts.length} prompts">{m.providers.length} × {m.skills.length} × {m.prompts.length}</span>
-              <span class="grow"></span>
-              <span title={new Date(m.created_at).toLocaleString()}>{rel(m.created_at)}</span>
-            </div>
-          </button>
+          <div class="side-row two-line" class:selected={!showForm && selectedId === m.id}>
+            <button
+              type="button"
+              class="side-row-main mx-item"
+              class:active={!showForm && selectedId === m.id}
+              data-side-row
+              aria-current={!showForm && selectedId === m.id ? 'true' : undefined}
+              onclick={() => selectMatrix(m.id)}
+            >
+              <span class="side-row-text">
+                <span class="mx-item-top">
+                  <span class="side-row-title mx-item-name" title={m.name}>{m.name}</span>
+                  <span class="mx-dot st-{m.status}" role="img" aria-label={runStatus(m.status).label} title={runStatus(m.status).label}></span>
+                </span>
+                <span class="side-row-meta mx-item-meta">
+                  <span title="{m.providers.length} providers × {m.skills.length} skills × {m.prompts.length} prompts">{m.providers.length} × {m.skills.length} × {m.prompts.length}</span>
+                  <span class="grow"></span>
+                  <span title={new Date(m.created_at).toLocaleString()}>{rel(m.created_at)}</span>
+                </span>
+              </span>
+            </button>
+          </div>
         {/each}
       {/if}
-    </div>
-  </aside>
+    </ListPane>
+  {/snippet}
 
-  <main class="mx-main" class:hide-phone={viewport.isPhone && showPhoneList}>
+  <main class="mx-main">
     {#if !ws.currentId}
       <EmptyState icon="grid" title="No workspace selected" body="Pick a workspace to build a matrix." />
     {:else if showForm}
@@ -515,6 +504,7 @@
       />
     {/if}
   </main>
+</ListDetail>
 </div>
 
 <style>
@@ -522,40 +512,6 @@
     display: flex;
     height: 100%;
     min-height: 0;
-  }
-  .mx.list-hidden .mx-side {
-    display: none;
-  }
-  .mx-side {
-    width: 280px;
-    flex-shrink: 0;
-    background: var(--surface);
-    border-inline-end: 1px solid var(--border);
-    display: flex;
-    flex-direction: column;
-    min-height: 0;
-  }
-  .mx-side-head {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    padding: 12px 12px 8px;
-  }
-  .mx-side-title {
-    font-size: var(--fs-s);
-    font-weight: 600;
-    letter-spacing: .06em;
-    text-transform: uppercase;
-    color: var(--text-dim);
-    flex: 1;
-  }
-  .mx-list {
-    flex: 1;
-    overflow-y: auto;
-    padding: 4px 8px 12px;
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
   }
   .mx-muted {
     padding: 16px 8px;
@@ -569,45 +525,18 @@
     overflow: hidden;
     clip-path: inset(50%);
   }
-  .mx-item {
-    text-align: start;
-    border: 1px solid transparent;
-    background: transparent;
-    border-radius: var(--radius-m);
-    padding: 8px 10px;
-    cursor: pointer;
-    display: flex;
-    flex-direction: column;
-    gap: 2px;
-  }
-  .mx-item:hover {
-    background: var(--hover);
-  }
-  /* Selection is accent (same as the Runs list), not the success green. */
-  .mx-item.active {
-    background: var(--accent-soft);
-    border-color: var(--accent-line);
-  }
   .mx-item-top {
     display: flex;
     align-items: center;
     gap: 6px;
   }
   .mx-item-name {
-    font-size: var(--fs-s);
-    font-weight: 600;
     flex: 1;
-    min-width: 0;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
   }
   .mx-item-meta {
     display: flex;
     align-items: center;
     gap: 4px;
-    font-size: var(--fs-xs);
-    color: var(--text-dim);
   }
   /* Same tones as runStatus / the Runs list: running = info (pulsing), done =
      success, error = danger, cancelled/queued = neutral. */
@@ -628,26 +557,6 @@
   .mx-dot.st-error {
     background: var(--status-exited);
   }
-  @media (max-width: 640px) {
-    .mx {
-      flex-direction: column;
-    }
-    .hide-phone {
-      display: none;
-    }
-    .mx-side {
-      width: 100%;
-      flex: 1;
-      border-inline-end: none;
-    }
-    .mx-main {
-      flex: 1;
-      min-height: 0;
-    }
-    .mx-item {
-      min-height: var(--hit-min);
-    }
-  }
   @media (prefers-reduced-motion: reduce) {
     .mx-dot.st-running {
       animation: none;
@@ -657,6 +566,7 @@
   .mx-main {
     flex: 1;
     min-width: 0;
+    min-height: 0;
     overflow: hidden;
   }
 

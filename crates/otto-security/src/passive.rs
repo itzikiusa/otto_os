@@ -35,6 +35,7 @@ pub struct Candidate {
 pub struct ProjectPassive {
     pub confirmed: Option<Target>,
     pub candidates: Vec<Candidate>,
+    pub active_schedule: crate::active_grant::ActiveSchedule,
 }
 
 #[derive(Deserialize)]

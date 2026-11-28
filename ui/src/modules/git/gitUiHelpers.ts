@@ -132,20 +132,6 @@ export function prCommentPostHint(
   return `Posts to ${dest} · visible to the author and reviewers`;
 }
 
-/** Compute clamped sidebar width during a horizontal drag, flipping the delta
- *  when the layout direction is RTL (inline-start sits on the right). */
-export function computeSidebarResizeWidth(
-  startW: number,
-  startX: number,
-  clientX: number,
-  rtl: boolean,
-  min = 180,
-  max = 520,
-): number {
-  const delta = rtl ? startX - clientX : clientX - startX;
-  return Math.max(min, Math.min(max, Math.round(startW + delta)));
-}
-
 /** Pick the adjacent PR tab to receive focus after `closed` is removed, or
  *  `null` when no tabs remain. */
 export function nextTabAfterClose(open: readonly number[], closed: number): number | null {

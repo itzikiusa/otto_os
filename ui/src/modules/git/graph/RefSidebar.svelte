@@ -1,27 +1,25 @@
 <script lang="ts">
-  // The git graph's refs sidebar (arch-1-09: split out of GraphView.svelte):
+  // History's list pane, "Branches" (arch-1-09: split out of GraphView.svelte):
   // LOCAL / REMOTE branches grouped into collapsible prefix folders under a
   // per-section row budget, TAGS, then the stash / worktree / submodule lists
-  // (RefSideLists), plus its drag-to-resize edge. A branch or tag click jumps
-  // the graph to it (graphSelection), a double-click checks it out (or opens
-  // the worktree holding it), right-click and ⋯ open its menu, and dragging a
-  // branch onto a local branch asks the parent to merge (refDrag). It renders
-  // no graph state of its own.
+  // (RefSideLists) — a ListPane of SideSections whose rows draw their own rich
+  // content on the shared .side-row classes. A branch or tag click jumps the
+  // graph to it (graphSelection; on a phone it pushes the graph), a
+  // double-click checks it out (or opens the worktree holding it), right-click
+  // and ⋯ open its menu, and dragging a branch onto a local branch asks the
+  // parent to merge (refDrag). It renders no graph state of its own.
   import type { RefBranch, RefsResp, RepoStatusResp, StashInfo, SubmoduleInfo, WorktreeInfo } from '../../../lib/api/types';
   import { rowMenu } from '../../../lib/rowMenu';
-  import { splitter } from '../../../lib/paneResizer';
-  import { startMouseDrag } from '../../../lib/dragCursor';
-  import { ui } from '../../../lib/stores/ui.svelte';
-  import Skeleton from '../../../lib/components/Skeleton.svelte';
-  import LoadState from '../../../lib/components/LoadState.svelte';
   import Icon from '../../../lib/components/Icon.svelte';
+  import ListPane from '../../../lib/components/side/ListPane.svelte';
+  import SideSection from '../../../lib/components/side/SideSection.svelte';
+  import { gitPhoneMenu } from '../gitPhoneMenu.svelte';
   import { branchTracking } from '../refTracking';
   import { planSection, type SectionPlan as Plan } from '../ref-budget';
   import { groupBranches, midParts, type BranchFolder, type BranchLeaf } from '../ref-menus';
   import RefSideLists from './RefSideLists.svelte';
   import RefDialogs from './RefDialogs.svelte';
   import { createRefDrag } from './refDrag.svelte';
-  import { resizerKey } from './resizerKey';
   import type { GraphActions } from './graphActions.svelte';
   import type { GraphMenus } from './graphMenus';
   import type { GraphRefIndex } from './graphRefIndex.svelte';
@@ -38,9 +36,6 @@
     worktrees: WorktreeInfo[];
     submodules: SubmoduleInfo[];
     currentRepoPath: string;
-    isMobile: boolean;
-    /** The phone accordion's Branches section is folded. */
-    collapsed: boolean;
     checkoutBusy: string;
     openWtBusy: string;
     index: GraphRefIndex;
@@ -60,8 +55,6 @@
     worktrees,
     submodules,
     currentRepoPath,
-    isMobile,
-    collapsed,
     checkoutBusy,
     openWtBusy,
     index,
@@ -72,6 +65,10 @@
   }: Props = $props();
 
   const drag = createRefDrag({ get onmergerequest() { return onmergerequest; } });
+
+  /** The row last picked ("local:main", "tag:v1", "stash:<ref>"): the list's
+   *  selection, still marked after the phone's Back. */
+  let picked = $state('');
 
   // Section collapse state
   let localOpen = $state(true);
@@ -134,28 +131,6 @@
     }
     void actions.checkout(b.name, false);
   }
-
-  // ── Drag-resize (desktop; persisted via gitGraphSideWidth) ─────────────────
-  // The sidebar holds long branch names; a drag handle on its inline-end edge
-  // lets the user widen it to read them.
-  let resizing = $state(false);
-  function startResize(e: MouseEvent): void {
-    resizing = true;
-    const startX = e.clientX;
-    const startW = ui.gitGraphSideWidth;
-    // Under RTL the sidebar sits on the right, so dragging left widens it.
-    const dir = document.dir === 'rtl' ? -1 : 1;
-    // lib/dragCursor (r3-03-08): overlay cursor instead of an inherited
-    // body.style write, one width write per frame, one persist on release.
-    startMouseDrag(e, {
-      cursor: 'col-resize',
-      onMove: (ev) => ui.setGitGraphSideWidth(startW + dir * (ev.clientX - startX), false),
-      onEnd: () => {
-        resizing = false;
-        ui.setGitGraphSideWidth(ui.gitGraphSideWidth);
-      },
-    });
-  }
 </script>
 
 <!-- Branch leaf name with MIDDLE ellipsis so the distinguishing suffix
@@ -163,9 +138,9 @@
 {#snippet refName(label: string)}
   {@const mp = midParts(label)}
   {#if mp}
-    <span class="mono ref-name mid"><span class="mid-head">{mp.head}</span><span class="mid-tail">{mp.tail}</span></span>
+    <span class="mono ref-name side-row-title mid"><span class="mid-head">{mp.head}</span><span class="mid-tail">{mp.tail}</span></span>
   {:else}
-    <span class="mono ref-name">{label}</span>
+    <span class="mono ref-name side-row-title">{label}</span>
   {/if}
 {/snippet}
 
@@ -178,6 +153,12 @@
   </span>
 {/snippet}
 
+<!-- A row's ⋯ (on hover / focus; right-click, long-press and the
+     ContextMenu key open the same menu through use:rowMenu). -->
+{#snippet more(label: string, open: (e: MouseEvent) => void, disabled = false)}
+  <button class="icon-btn side-row-more ref-action" tabindex="-1" aria-label={label} title={label} aria-haspopup="menu" {disabled} onclick={open}><Icon name="more" size={14} /></button>
+{/snippet}
+
 <!-- One branch row, reused for loose branches and folder children. `label`
      is the short leaf name; `b.name` stays the full ref for every action. -->
 {#snippet localRow(leaf: BranchLeaf, nested: boolean)}
@@ -185,10 +166,14 @@
   {@const into = index.landedIn(b)}
   {@const tracking = branchTracking(b, status)}
   {@const wtElsewhere = index.worktreeByBranch.get(b.name)}
-  <div class="ref-action-row">
+  {@const key = `local:${b.name}`}
+  <div class="side-row ref-action-row" class:selected={picked === key} style:--side-depth={nested ? 1 : 0}>
   <button use:rowMenu
-    class="ref-row"
-    class:nested
+    class="side-row-main ref-row"
+    data-side-row
+    role="treeitem"
+    aria-selected={picked === key}
+    aria-level={nested ? 2 : 1}
     class:current={b.is_current}
     class:is-worktree={!!wtElsewhere}
     class:drag-target={drag.overTarget === b.name}
@@ -200,7 +185,7 @@
     ondragleave={() => drag.leave(b.name)}
     ondrop={(e) => drag.drop(e, b.name)}
     disabled={checkoutBusy !== '' || openWtBusy !== ''}
-    onclick={() => selection.selectBranchRow(b)}
+    onclick={() => { picked = key; void selection.selectBranchRow(b); }}
     ondblclick={() => activateLocalBranch(b)}
     oncontextmenu={(e) => menus.branchMenu(e, b)}
     title={drag.source && drag.isValidTarget(b.name)
@@ -240,30 +225,27 @@
     {/if}
     {#if checkoutBusy === b.name || (wtElsewhere && openWtBusy === wtElsewhere.path)}<span class="dim" title="Working…">…</span>{/if}
   </button>
-  <button
-    class="icon-btn ref-action"
-    aria-label="Actions for branch {b.name}"
-    title="Actions for branch {b.name}"
-    aria-haspopup="menu"
-    disabled={checkoutBusy !== '' || openWtBusy !== ''}
-    onclick={(e) => menus.branchMenu(e, b)}
-  ><Icon name="more" size={13} /></button>
+  {@render more(`Actions for branch ${b.name}`, (e) => menus.branchMenu(e, b), checkoutBusy !== '' || openWtBusy !== '')}
   </div>
 {/snippet}
 
 {#snippet remoteRow(leaf: BranchLeaf, nested: boolean)}
   {@const b = leaf.b}
   {@const into = index.landedIn(b)}
-  <div class="ref-action-row">
+  {@const key = `remote:${b.name}`}
+  <div class="side-row ref-action-row" class:selected={picked === key} style:--side-depth={nested ? 1 : 0}>
   <button use:rowMenu
-    class="ref-row remote"
-    class:nested
+    class="side-row-main ref-row remote"
+    data-side-row
+    role="treeitem"
+    aria-selected={picked === key}
+    aria-level={nested ? 2 : 1}
     class:dragging={drag.source?.name === b.name && drag.source.remote}
     draggable={checkoutBusy === ''}
     ondragstart={(e) => drag.start(e, b.name, true)}
     ondragend={drag.end}
     disabled={checkoutBusy !== ''}
-    onclick={() => selection.selectBranchRow(b)}
+    onclick={() => { picked = key; void selection.selectBranchRow(b); }}
     ondblclick={() => actions.checkoutRemote(b)}
     oncontextmenu={(e) => menus.branchMenu(e, b)}
     title="{b.name} — click to highlight · double-click to checkout as a local tracking branch · drag onto a local branch to merge"
@@ -273,193 +255,128 @@
     {#if into.length > 0}{@render mergedMark(b, into)}{/if}
     {#if checkoutBusy === b.name.replace(/^[^/]+\//, '')}<span class="dim">…</span>{/if}
   </button>
-  <button
-    class="icon-btn ref-action"
-    aria-label="Actions for branch {b.name}"
-    title="Actions for branch {b.name}"
-    aria-haspopup="menu"
-    disabled={checkoutBusy !== '' || openWtBusy !== ''}
-    onclick={(e) => menus.branchMenu(e, b)}
-  ><Icon name="more" size={13} /></button>
+  {@render more(`Actions for branch ${b.name}`, (e) => menus.branchMenu(e, b), checkoutBusy !== '' || openWtBusy !== '')}
   </div>
 {/snippet}
 
-<!-- A collapsible branch FOLDER header (feature/, release/, …). -->
+<!-- A collapsible branch FOLDER (feature/, release/, …): a tree node. -->
 {#snippet folderHeader(section: 'local' | 'remote', folder: BranchFolder)}
   {@const key = folderKey(section, folder.name)}
   {@const folded = collapsedFolders.has(key)}
-  <button class="ref-folder" class:collapsed={folded} onclick={() => toggleFolder(key)} title={folder.name} aria-expanded={!folded}>
-    <Icon name={folded ? 'chevronRight' : 'chevronDown'} size={12} />
-    <Icon name="folder" size={12} />
-    <span class="folder-name">{folder.name}</span>
-    <span class="ref-count">{folder.leaves.length}</span>
-  </button>
+  <div class="side-row">
+    <button class="side-row-main ref-folder" data-side-row role="treeitem" aria-selected={false} aria-level={1} aria-expanded={!folded} onclick={() => toggleFolder(key)} title={folder.name}>
+      <Icon name={folded ? 'chevronRight' : 'chevronDown'} size={12} />
+      <Icon name="folder" size={12} />
+      <span class="side-row-title folder-name">{folder.name}</span>
+      <span class="side-row-trailing">{folder.leaves.length}</span>
+    </button>
+  </div>
 {/snippet}
 
 <!-- "Show more" for a section past its row budget. -->
 {#snippet moreLeaves(key: string, hidden: number)}
   {#if hidden > 0}
-    <button class="ref-more-leaves" onclick={() => showMoreLeaves(key)}>
-      <span class="dim">Show {Math.min(hidden, LEAF_PAGE * 4)} more ({hidden} hidden)</span>
-    </button>
+    <div class="side-row">
+      <button class="side-row-main ref-more-leaves" data-side-row role="treeitem" aria-selected={false} aria-level={1} onclick={() => showMoreLeaves(key)}>
+        <span class="dim">Show {Math.min(hidden, LEAF_PAGE * 4)} more ({hidden} hidden)</span>
+      </button>
+    </div>
   {/if}
 {/snippet}
 
-{#snippet branchSection(section: 'local' | 'remote', list: RefBranch[], grouped: Grouped, plan: SectionPlan)}
-  {@const open = section === 'local' ? localOpen : remoteOpen}
-  <div class="ref-section">
-    <div class="ref-action-row">
-    <button
-      class="ref-header"
-      onclick={() => (section === 'local' ? (localOpen = !localOpen) : (remoteOpen = !remoteOpen))}
-      aria-expanded={open}
-    >
-      <Icon name={open ? 'chevronDown' : 'chevronRight'} size={12} />
-      <Icon name={section === 'local' ? 'branch' : 'globe'} size={12} />
-      <span>{section === 'local' ? 'LOCAL' : 'REMOTE'}</span>
-      <span class="ref-count">{list.length}</span>
-    </button>
-    <button class="icon-btn ref-action" title="Delete several {section} branches…" aria-label="Delete several {section} branches"
-      disabled={list.length === 0 || checkoutBusy !== ''} onclick={() => actions.openBranchCleanup([], section)}><Icon name="trash" size={13} /></button>
-    </div>
-    {#if open}
-      {#if list.length === 0}
-        <div class="dim ref-empty">{section === 'local' ? 'No local branches' : 'No remote branches'}</div>
-      {/if}
+<!-- Bulk cleanup: the section's own action. -->
+{#snippet cleanup(section: 'local' | 'remote', list: RefBranch[])}
+  <button class="icon-btn" title="Delete several {section} branches…" aria-label="Delete several {section} branches"
+    disabled={list.length === 0 || checkoutBusy !== ''} onclick={() => actions.openBranchCleanup([], section)}><Icon name="trash" size={12} /></button>
+{/snippet}
+
+{#snippet branchRows(section: 'local' | 'remote', list: RefBranch[], grouped: Grouped, plan: SectionPlan)}
+  {#if list.length === 0}
+    <div class="dim ref-empty">{section === 'local' ? 'No local branches' : 'No remote branches'}</div>
+  {:else}
+    <div role="tree" aria-label={section === 'local' ? 'Local branches' : 'Remote branches'}>
       {#each grouped.loose.slice(0, plan.loose) as leaf (leaf.b.name)}
         {@render (section === 'local' ? localRow : remoteRow)(leaf, false)}
       {/each}
       {#each plan.folders as { folder, shown } (folder.name)}
         {@render folderHeader(section, folder)}
         {#if !collapsedFolders.has(folderKey(section, folder.name)) && shown > 0}
-          <div class="folder-children">
-            {#each folder.leaves.slice(0, shown) as leaf (leaf.b.name)}
-              {@render (section === 'local' ? localRow : remoteRow)(leaf, true)}
-            {/each}
-          </div>
+          {#each folder.leaves.slice(0, shown) as leaf (leaf.b.name)}
+            {@render (section === 'local' ? localRow : remoteRow)(leaf, true)}
+          {/each}
         {/if}
       {/each}
       {@render moreLeaves(`${section}:`, plan.hidden)}
-    {/if}
-  </div>
+    </div>
+  {/if}
 {/snippet}
 
-<aside
-  class="refs-panel"
-  class:mob={isMobile}
-  class:mob-collapsed={isMobile && collapsed}
-  class:resizing
-  style:width={!isMobile ? `${ui.gitGraphSideWidth}px` : null}
+<ListPane
+  count={refs ? refs.local.length + refs.remote.length + refs.tags.length : null}
+  menu={() => gitPhoneMenu.items()}
+  loading={refsLoading}
+  error={refsError}
+  {onretry}
+  testid="git-refs"
 >
-  {#if refsLoading}
-    <div style="padding: 10px"><Skeleton rows={6} height={22} /></div>
-  {:else if refsError}
-    <div class="refs-error">
-      <LoadState what="branches" error={refsError} empty variant="compact" {onretry} />
-    </div>
-  {:else if refs}
-    {@render branchSection('local', refs.local, groupedLocal, localPlan)}
-    {@render branchSection('remote', refs.remote, groupedRemote, remotePlan)}
-
-    <!-- TAGS -->
-    <div class="ref-section">
-      <button class="ref-header" onclick={() => (tagsOpen = !tagsOpen)} aria-expanded={tagsOpen}>
-        <Icon name={tagsOpen ? 'chevronDown' : 'chevronRight'} size={12} />
-        <Icon name="tag" size={12} />
-        <span>TAGS</span>
-        <span class="ref-count">{refs.tags.length}</span>
-      </button>
-      {#if tagsOpen}
-        {#each refs.tags.slice(0, leafLimit('tags:')) as t (t.name)}
-          <div class="ref-action-row">
-          <button use:rowMenu
-            class="ref-row tag"
-            class:ref-row-busy={selection.revealBusy === t.name}
-            title="{t.name} — click to show it on the graph, right-click for actions"
-            onclick={() => selection.selectTagRow(t)}
-            oncontextmenu={(e) => menus.tagMenu(e, t)}
-          >
-            <Icon name="tag" size={12} />
-            <span class="mono ref-name">{t.name}</span>
-          </button>
-          <!-- Actions stay reachable without a right-click (trackpad/touch),
-               since left-click jumps to the tag instead of opening them: a
-               real sibling button (never a control nested in the row). -->
-          <button
-            class="icon-btn ref-action ref-more"
-            title="Actions for tag {t.name}"
-            aria-label="Actions for tag {t.name}"
-            aria-haspopup="menu"
-            onclick={(e) => menus.tagMenu(e, t)}
-          ><Icon name="more" size={13} /></button>
-          </div>
-        {:else}
+  {#if refs}
+    <div class="refs-panel">
+      <SideSection title="Local" count={refs.local.length} bind:open={localOpen}>
+        {#snippet actions()}{@render cleanup('local', refs.local)}{/snippet}
+        {@render branchRows('local', refs.local, groupedLocal, localPlan)}
+      </SideSection>
+      <SideSection title="Remote" count={refs.remote.length} bind:open={remoteOpen}>
+        {#snippet actions()}{@render cleanup('remote', refs.remote)}{/snippet}
+        {@render branchRows('remote', refs.remote, groupedRemote, remotePlan)}
+      </SideSection>
+      <SideSection title="Tags" count={refs.tags.length} bind:open={tagsOpen}>
+        {#if refs.tags.length === 0}
           <div class="dim ref-empty">No tags</div>
-        {/each}
-        {@render moreLeaves('tags:', refs.tags.length - Math.min(refs.tags.length, leafLimit('tags:')))}
-      {/if}
-    </div>
+        {:else}
+          <div role="tree" aria-label="Tags">
+            {#each refs.tags.slice(0, leafLimit('tags:')) as t (t.name)}
+              {@const key = `tag:${t.name}`}
+              <div class="side-row ref-action-row" class:selected={picked === key}>
+                <button use:rowMenu
+                  class="side-row-main ref-row tag"
+                  data-side-row
+                  role="treeitem"
+                  aria-selected={picked === key}
+                  aria-level={1}
+                  class:ref-row-busy={selection.revealBusy === t.name}
+                  title="{t.name} — click to show it on the graph, right-click for actions"
+                  onclick={() => { picked = key; void selection.selectTagRow(t); }}
+                  oncontextmenu={(e) => menus.tagMenu(e, t)}
+                >
+                  <Icon name="tag" size={12} />
+                  <span class="mono ref-name side-row-title">{t.name}</span>
+                </button>
+                {@render more(`Actions for tag ${t.name}`, (e) => menus.tagMenu(e, t))}
+              </div>
+            {/each}
+            {@render moreLeaves('tags:', refs.tags.length - Math.min(refs.tags.length, leafLimit('tags:')))}
+          </div>
+        {/if}
+      </SideSection>
 
-    <RefSideLists {stashes} {worktrees} {submodules} {currentRepoPath} {openWtBusy} {actions} {menus} {selection} />
+      <RefSideLists {stashes} {worktrees} {submodules} {currentRepoPath} {openWtBusy} {actions} {menus} {selection} bind:picked />
+    </div>
   {/if}
-</aside>
+</ListPane>
 
 <RefDialogs {repoId} {refs} {status} {index} {actions} />
 
-<!-- Drag handle on the sidebar's inline-end edge (desktop): widen it to read
-     long branch names. Double-click resets to the default width. A focusable
-     separator is the ARIA window-splitter widget; `splitter` makes it
-     focusable and wires its keys and drag (lib/paneResizer). -->
-{#if !isMobile}
-  <div
-    class="refs-resizer"
-    role="separator"
-    aria-orientation="vertical"
-    aria-label="Resize the branch list"
-    aria-valuenow={ui.gitGraphSideWidth}
-    use:splitter={{
-      onkeydown: (e) => resizerKey(e, () => ui.gitGraphSideWidth, (w) => ui.setGitGraphSideWidth(w), 220, true),
-      onmousedown: startResize,
-      ondblclick: () => ui.setGitGraphSideWidth(220),
-    }}
-    title="Drag or use ←/→ to resize · double-click to reset"
-  ></div>
-{/if}
-
 <style>
-  /* Row rules are written under `.refs-panel :global(…)` because RefSideLists
-     (stashes / worktrees / submodules) renders the same rows inside this
-     panel. Each keeps its original order, so the cascade is unchanged. */
-  .refs-panel {
-    width: 220px;
-    flex-shrink: 0;
-    overflow-y: auto;
-    border-inline-end: 1px solid var(--border);
-    padding: 6px 0;
-  }
-  /* Drag handle on the sidebar's edge (desktop). Mirrors .graph-resizer:
-     a thin hit-area straddling the border that lights up on hover. */
-  .refs-resizer {
-    flex: 0 0 6px;
-    margin-inline-start: -2px;
-    cursor: col-resize;
-    z-index: 1;
-  }
-  .refs-resizer:hover {
-    background: var(--accent-soft-strong);
-  }
-  .refs-error {
-    padding: 8px;
-  }
+  /* The rows are the shared .side-row ones (app.css "Side surfaces"); these
+     rules only draw what a ref row adds. Written under `.refs-panel :global(…)`
+     because RefSideLists (stashes / worktrees / submodules) renders the same
+     rows inside this panel. */
   /* Middle-ellipsized branch name: the head span shrinks + ellipsizes while the
      tail (distinguishing suffix) stays pinned and fully visible. */
   .refs-panel :global(.ref-name.mid) {
     display: inline-flex;
     align-items: baseline;
-    flex: 1;
-    min-width: 0;
-    overflow: hidden;
-    white-space: nowrap;
+    text-overflow: clip;
   }
   .mid-head {
     overflow: hidden;
@@ -471,6 +388,10 @@
   .mid-tail {
     flex: 0 0 auto;
     white-space: nowrap;
+  }
+  .refs-panel :global(.ref-name) {
+    flex: 1;
+    font-size: var(--fs-s);
   }
   /* "Already in develop / main" mark: a small, muted success check + names. */
   .merged-mark {
@@ -485,139 +406,16 @@
     font-size: var(--fs-xs);
     white-space: nowrap;
   }
-  .refs-panel :global(.ref-row:hover .merged-mark) {
+  .refs-panel :global(.side-row:hover .merged-mark) {
     opacity: 1;
   }
-  .refs-panel :global(.ref-section) {
-    margin-bottom: 2px;
-  }
-  .refs-panel :global(.ref-header) {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    width: 100%;
-    padding: 6px 10px;
-    border: none;
-    background: transparent;
-    color: var(--text-dim);
-    font-size: var(--fs-xs);
-    font-weight: 600;
-    letter-spacing: 0.06em;
-    cursor: pointer;
-    text-transform: uppercase;
-    text-align: start;
-    transition: color var(--dur-fast) ease-out;
-  }
-  .refs-panel :global(.ref-header:hover) {
-    color: var(--text);
-  }
-  .refs-panel :global(.ref-count) {
-    margin-inline-start: auto;
-    background: var(--surface-2);
-    border-radius: 999px;
-    font-size: var(--fs-xs);
-    padding: 1px 6px;
-    font-weight: 600;
-    letter-spacing: 0;
-  }
-  /* Collapsible branch-folder header (feature/, release/, …). The folder icon +
-     twisty + medium-weight name set it apart from the leaf branch rows so the
-     nesting reads as a hierarchy, not a flat sibling list. */
-  .ref-folder {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    width: 100%;
-    /* Starts on the SAME indent as a loose branch row (22px): a folder is a
-       sibling of the loose branches, not of the LOCAL/REMOTE section header. */
-    padding-block: 4px;
-    padding-inline: 22px 10px;
-    border: none;
-    background: transparent;
-    color: var(--text);
-    font-size: var(--fs-xs);
-    cursor: pointer;
-    text-align: start;
-    transition: background var(--dur-fast) ease-out, color var(--dur-fast) ease-out;
-  }
-  .ref-folder:hover {
-    background: var(--hover);
-  }
-  /* The count pill is surface-2 too — lift it so it doesn't vanish on hover. */
-  .refs-panel .ref-folder:hover :global(.ref-count) {
-    background: var(--surface-3);
-  }
-  /* The folder glyph picks up the accent so the grouping is obvious at a glance. */
+  /* The folder glyph picks up the accent so the grouping reads at a glance. */
   .ref-folder :global(svg:nth-of-type(2)) {
     color: var(--accent-text);
     opacity: 0.8;
   }
   .folder-name {
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
     font-weight: 600;
-  }
-  /* Children of a folder: indented under a vertical tree guide so the nesting is
-     visually unmistakable. The guide drops from the centre of the folder's
-     11px chevron (22 + 5.5), and nested rows' dots line up under its icon. */
-  .folder-children {
-    margin-inline-start: 28px;
-    border-inline-start: 1.5px solid var(--border);
-  }
-  .refs-panel :global(.ref-action-row) {
-    display: flex;
-    align-items: stretch;
-    min-width: 0;
-  }
-  .refs-panel :global(.ref-action-row .ref-row) {
-    flex: 1;
-    min-width: 0;
-    width: 0;
-  }
-  .refs-panel :global(.ref-action) {
-    flex-shrink: 0;
-    align-self: center;
-  }
-  @media (max-width: 1024px) {
-    .refs-panel :global(.ref-action) { min-width: 36px; min-height: 36px; }
-  }
-  .refs-panel :global(.ref-row) {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    width: 100%;
-    height: 24px;
-    padding-block: 0;
-    padding-inline: 22px 10px;
-    border: none;
-    background: transparent;
-    color: var(--text-dim);
-    font-size: var(--fs-s);
-    cursor: pointer;
-    text-align: start;
-    overflow: hidden;
-    transition: background var(--dur-fast) ease-out, color var(--dur-fast) ease-out;
-  }
-  .ref-more-leaves {
-    display: flex;
-    align-items: center;
-    width: 100%;
-    height: 24px;
-    padding-block: 0;
-    padding-inline: 22px 10px;
-    border: none;
-    background: transparent;
-    font-size: var(--fs-xs);
-    cursor: pointer;
-    text-align: start;
-  }
-  .ref-more-leaves:hover {
-    background: var(--hover);
-  }
-  .refs-panel :global(.ref-row:hover:not(:disabled)) {
-    background: var(--hover);
-    color: var(--text);
   }
   .refs-panel :global(.ref-row:disabled) {
     cursor: default;
@@ -627,41 +425,10 @@
     opacity: 0.6;
     cursor: progress;
   }
-  /* Tag actions: revealed on hover/focus so the row stays clean, but always
-     present for pointers that have no right-click. */
-  .refs-panel :global(.ref-more) {
-    opacity: 0;
-    transition: opacity var(--dur-fast) ease-out;
-  }
-  .refs-panel :global(.ref-action-row:hover .ref-more),
-  .refs-panel :global(.ref-action-row:focus-within .ref-more),
-  .refs-panel :global(.ref-more:focus-visible) {
-    opacity: 1;
-  }
-  /* A pointer that cannot hover keeps the tag actions visible. */
-  @media (hover: none) {
-    .refs-panel :global(.ref-more) {
-      opacity: 1;
-    }
-  }
-  /* Folder children sit just inside the tree guide of `.folder-children`. */
-  .refs-panel :global(.ref-row.nested) {
-    padding-inline-start: 10px;
-  }
-  /* The checked-out branch: accent text + a leading accent rail and faint wash so
-     the row itself is unmistakable, not just the check pip. */
+  /* The checked-out branch: accent text and the check pip (the tint is the
+     list's selection). */
   .refs-panel :global(.ref-row.current) {
     color: var(--accent-text);
-    font-weight: 600;
-    background: var(--accent-soft);
-    box-shadow: inset 2px 0 0 0 var(--accent);
-  }
-  .refs-panel :global(.ref-row.current:hover:not(:disabled)) {
-    background: var(--accent-soft);
-    color: var(--accent-text);
-  }
-  :global([dir='rtl']) .refs-panel :global(.ref-row.current) {
-    box-shadow: inset -2px 0 0 0 var(--accent);
   }
   .refs-panel :global(.ref-row[draggable='true']) {
     cursor: grab;
@@ -672,25 +439,12 @@
   /* Accent outline while a valid merge source hovers this local branch. */
   .refs-panel :global(.ref-row.drag-target) {
     background: var(--accent-soft);
-    color: var(--text);
     outline: 1.5px solid var(--accent-text);
     outline-offset: -1.5px;
-    border-radius: var(--radius-s);
   }
+  .refs-panel :global(.ref-row.remote),
   .refs-panel :global(.ref-row.tag) {
-    cursor: default;
     color: var(--text-dim);
-  }
-  .refs-panel :global(.ref-row.remote) {
-    color: var(--text-dim);
-  }
-  .refs-panel :global(.ref-name) {
-    flex: 1;
-    min-width: 0;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    font-size: var(--fs-xs);
   }
   /* Compact "also tracked on remote" glyph that replaces a redundant
      origin/<same-name> upstream string, so the branch NAME keeps the row width. */
@@ -722,11 +476,8 @@
   .refs-panel :global(.ref-row.is-worktree) {
     color: var(--worktree-text);
   }
-  .refs-panel :global(.ref-row.is-worktree:hover:not(:disabled)) {
-    background: color-mix(in srgb, var(--worktree) 12%, transparent);
-  }
   /* Inline "open worktree" affordance next to the branch / worktree name. */
-  /* Yields first (ellipsized) so a narrow sidebar keeps the BRANCH name, not 0 px of it. */
+  /* Yields first (ellipsized) so a narrow pane keeps the BRANCH name, not 0 px of it. */
   .refs-panel :global(.wt-open-hint) {
     flex: 0 100 auto;
     min-width: 0;
@@ -738,7 +489,7 @@
     opacity: 0.85;
     white-space: nowrap;
   }
-  .refs-panel :global(.ref-row:hover .wt-open-hint) {
+  .refs-panel :global(.side-row:hover .wt-open-hint) {
     opacity: 1;
   }
   .ref-ab {
@@ -764,7 +515,8 @@
     white-space: nowrap;
   }
   .refs-panel :global(.ref-empty) {
-    padding: 4px 22px 6px;
+    padding-block: 4px 6px;
+    padding-inline: 8px;
     font-size: var(--fs-xs);
   }
   .dim {
@@ -772,27 +524,5 @@
   }
   .mono {
     font-family: var(--font-mono);
-  }
-
-  /* ── Mobile + tablet (≤1024px): the accordion's Branches section ── */
-  @media (max-width: 1024px) {
-    /* Capped height, scrolls on its own when expanded. */
-    .refs-panel.mob {
-      width: 100%;
-      flex: 0 0 auto;
-      max-height: 38vh;
-      overflow-y: auto;
-      overscroll-behavior: contain;
-      border-inline-end: none;
-      border-bottom: 1px solid var(--border);
-    }
-    /* A collapsed section hides its body entirely (header stays tappable). */
-    .refs-panel.mob.mob-collapsed {
-      display: none !important;
-    }
-    /* Bigger tap targets + legible text. */
-    .refs-panel.mob :global(.ref-row) { height: 36px; font-size: var(--fs-l); }
-    .refs-panel.mob :global(.ref-name) { font-size: var(--fs-m); }
-    .refs-panel.mob :global(.ref-header) { font-size: var(--fs-s); padding: 8px 12px; }
   }
 </style>

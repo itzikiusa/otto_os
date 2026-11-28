@@ -316,11 +316,10 @@
       {/snippet}
       <ul class="alist" role="listbox" aria-label="Artifacts" bind:this={listEl}>
         {#each list as a, index (a.id)}
-          <li role="none">
+          <li class="side-row" class:selected={selectedId === a.id} role="none">
             <button
-              class="arow"
+              class="arow side-row-main"
               data-artifact-id={a.id}
-              class:on={selectedId === a.id}
               role="option"
               aria-selected={selectedId === a.id}
               tabindex={selectedId === a.id || (!selected && index === 0) ? 0 : -1}
@@ -328,10 +327,12 @@
               onclick={() => selectedId !== a.id && void select(a)}
               title={a.path ?? a.url ?? a.label}
             >
-              <span class="aicon"><Icon name={KIND_ICON[a.kind] ?? 'file'} size={12} /></span>
-              <span class="alabel">{a.label}</span>
-              <span class="ameta mono">{ext(a) || a.kind}</span>
-              <span class="ameta mono" title={absTime(a.produced_at)}>{a.produced_at ? rel(a.produced_at) : ''}</span>
+              <Icon name={KIND_ICON[a.kind] ?? 'file'} size={14} />
+              <span class="side-row-title">{a.label}</span>
+              <span class="side-row-trailing mono">
+                <span>{ext(a) || a.kind}</span>
+                <span title={absTime(a.produced_at)}>{a.produced_at ? rel(a.produced_at) : ''}</span>
+              </span>
             </button>
           </li>
         {/each}
@@ -443,13 +444,13 @@
   .mono {
     font-family: var(--font-mono);
   }
+  /* Rows: the shared side-row look (app.css); ↑ ↓ Home End select (listbox). */
   .alist {
     list-style: none;
     margin: 0;
-    padding: 0 6px 6px;
+    padding: 0 8px 6px;
     display: flex;
     flex-direction: column;
-    gap: 1px;
     max-height: 40%;
     overflow-y: auto;
     flex-shrink: 0;
@@ -457,43 +458,8 @@
   .outputs.embedded .alist {
     max-height: 220px;
   }
-  .arow {
-    width: 100%;
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    padding: 4px 6px;
-    border: none;
-    border-radius: var(--radius-s);
-    background: transparent;
-    color: var(--text);
-    font: inherit;
-    font-size: var(--fs-s);
-    text-align: start;
-    cursor: pointer;
-  }
-  .arow:hover {
-    background: var(--hover);
-  }
-  .arow.on {
-    background: var(--accent-soft);
-  }
-  .aicon {
-    flex-shrink: 0;
-    display: inline-flex;
-    color: var(--text-dim);
-  }
-  .alabel {
+  .side-row-title {
     flex: 1;
-    min-width: 0;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-  .ameta {
-    flex-shrink: 0;
-    font-size: var(--fs-xs);
-    color: var(--text-dim);
   }
   .preview {
     flex: 1;

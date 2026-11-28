@@ -50,7 +50,7 @@ for (const [theme, scheme, width, rtl] of [
     } });
     expect(r.ok()).toBeTruthy(); const id = (await r.json()).id;
     await openPage(page, 'canvas');
-    await page.locator('.scene-list .row', { hasText: title }).getByRole('button').first().click();
+    await page.locator('.scene-list .side-row', { hasText: title }).getByRole('button').first().click();
     await expect(page.locator('.board .content > svg')).toBeVisible({ timeout: 60_000 });
     if (width >= 640) {
     await page.getByTitle('Edit the D2 source', { exact: true }).click();
@@ -87,7 +87,7 @@ for (const [theme, scheme, width, rtl] of [
       await page.getByRole('button', { name: 'Show design details', exact: true }).click();
       await expect(page.getByRole('tablist', { name: 'Details panel' })).toBeVisible();
       await page.getByTestId('design-tab-links').click();
-      await page.getByRole('button', { name: 'Back to design', exact: true }).click();
+      await page.getByRole('button', { name: 'Close Design details', exact: true }).click();
     }
     if (width < 640) {
       const notch = (await page.locator('.device.iphone .notch').boundingBox())!;
@@ -221,8 +221,8 @@ test('Vault long phone tree leaves useful space for reading and editing', async 
   await page.screenshot({ path: '/tmp/otto-ux-r4-content-vault-long.png' });
   // On a phone an open note takes the whole page (list → detail): the tree
   // steps aside behind a Back button instead of eating the reading space.
-  await expect(page.locator('.vault-page .left')).toHaveCount(0);
-  await expect(page.getByRole('button', { name: 'Back to vault sidebar' })).toBeVisible();
+  await expect(page.getByTestId('vault-files')).toBeHidden();
+  await expect(page.getByRole('button', { name: 'Back to Files' })).toBeVisible();
   expect((await page.locator('.note-view').boundingBox())!.height).toBeGreaterThan(600);
   await page.getByRole('button', { name: 'Edit', exact: true }).click();
   await page.locator('.cm-content').fill('# Long tree edited note\n\nThis draft has room to breathe.');
@@ -251,7 +251,7 @@ test('Canvas same-scene reopen keeps the newer draft when an older save resolves
     return route.continue();
   });
   await openPage(page, 'canvas');
-  const select = async (i: number) => page.locator('.scene-list .row', { hasText: scenes[i].title }).getByRole('button').first().click();
+  const select = async (i: number) => page.locator('.scene-list .side-row', { hasText: scenes[i].title }).getByRole('button').first().click();
   await select(0); await page.getByTitle('Edit the Mermaid source', { exact: true }).click();
   await page.locator('.cm-content').fill('flowchart LR\n A[Old in-flight] --> B[Save]');
   await expect.poll(() => puts).toBe(1);
@@ -342,19 +342,19 @@ test('tablet Canvas gives the editor full width and toggles scenes without losin
   } });
   expect(created.ok()).toBeTruthy(); const scene = await created.json(); await ctx.dispose();
   await openPage(page, 'canvas');
-  await page.locator('.scene-list .row', { hasText: scene.title }).getByRole('button').first().click();
-  expect((await page.locator('.canvas-page .main').boundingBox())!.width).toBeGreaterThan(580);
+  await page.locator('.scene-list .side-row', { hasText: scene.title }).getByRole('button').first().click();
+  expect((await page.locator('[data-testid="canvas-page"] .main').boundingBox())!.width).toBeGreaterThan(580);
   await page.getByTitle('Edit the Mermaid source', { exact: true }).click();
   expect((await page.locator('.board .code-pane').boundingBox())!.width).toBeGreaterThan(580);
   await page.locator('.cm-content').fill('flowchart LR\n A[Unsaved tablet draft] --> B[Review]');
-  await page.getByRole('button', { name: 'Hide scenes', exact: true }).click();
-  await expect(page.locator('.canvas-page .scenes')).toBeHidden();
+  await page.getByTestId('canvas-scenes-more').click();
+  await page.getByRole('menuitem', { name: 'Hide Scenes' }).click();
+  await expect(page.getByTestId('canvas-scenes')).toBeHidden();
   await expect(page.locator('.cm-content')).toContainText('Unsaved tablet draft');
-  const showScenes = page.getByRole('button', { name: 'Show scenes', exact: true });
+  const showScenes = page.getByRole('button', { name: 'Show Scenes', exact: true });
   await showScenes.focus(); await showScenes.press('Enter');
-  await expect(page.locator('.canvas-page .scenes')).toBeVisible();
+  await expect(page.getByTestId('canvas-scenes')).toBeVisible();
   await expect(page.locator('.cm-content')).toContainText('Unsaved tablet draft');
-  await expect(page.getByRole('button', { name: 'Hide scenes', exact: true })).toBeFocused();
   await expect(page.locator('.board .content')).toContainText('Unsaved tablet draft');
   await expect.poll(async () => {
     const diagram = (await page.locator('.board .content > svg').boundingBox())!;

@@ -27,11 +27,8 @@ import {
   type IdeDebugLaunchMemo, type IdeRunLaunchMemo, type IncomingIdeDiagnostic,
 } from './store/ideStateSlices.svelte';
 import { setParkedRunReopener } from './store/ideParkedRuns';
+import { debugEnvLoaded, lspRequested, loadCollabMod, loadDebugEnvMod, loadLspMod, loadProjMod, loadRepoActionsMod } from './store/ideLazyModules';
 import { resolveRepoGoBuildTags, resolveRepoRootForPath, type RepoTestExecutionMode } from './store/ideRepoTestAndBuildTags';
-import type * as RepoActionsMod from './store/ideRepoActions';
-import type * as ProjMod from './shell/ideProjectsManager';
-import type * as LspSearchMod from './shell/ideLspAndSearchHelpers';
-import type * as CollabMod from './store/ideCollabController';
 import type * as DebugEnvMod from './store/ideDebugAndEnvController';
 import type {
   IdeBottomTab, IdeBreakpoint, IdeCodeAction, IdeCollabRole, IdeCollabRoom, IdeDebugSessionSnapshot,
@@ -42,17 +39,6 @@ import type {
   IdeTextEdit, IdeVariable,
 } from './store/ideTypes';
 
-let projModP: Promise<typeof ProjMod> | null = null;
-let lspModP: Promise<typeof LspSearchMod> | null = null;
-let collabModP: Promise<typeof CollabMod> | null = null;
-let debugEnvModP: Promise<typeof DebugEnvMod> | null = null;
-let repoActionsModP: Promise<typeof RepoActionsMod> | null = null;
-let debugEnvSyncMod: typeof DebugEnvMod | null = null;
-const loadProjMod = () => (projModP ??= import('./shell/ideProjectsManager'));
-const loadLspMod = () => (lspModP ??= import('./shell/ideLspAndSearchHelpers'));
-const loadCollabMod = () => (collabModP ??= import('./store/ideCollabController'));
-const loadDebugEnvMod = () => (debugEnvModP ??= import('./store/ideDebugAndEnvController').then((m) => (debugEnvSyncMod = m)));
-const loadRepoActionsMod = () => (repoActionsModP ??= import('./store/ideRepoActions'));
 
 const DOCK_OPEN_KEY = 'otto.ide.dockOpen';
 const DOCK_TAB_KEY = 'otto.ide.dockTab';
@@ -220,7 +206,7 @@ class IdeStore {
   private cursorSendTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor() {
-    onIdeTargetReset(() => { if (lspModP) void lspModP.then((m) => m.cancelLspAndSearch()); });
+    onIdeTargetReset(() => { void lspRequested()?.then((m) => m.cancelLspAndSearch()); });
     setParkedRunReopener((t) => {
       void (t.project_id && this.namedProjects.some((p) => p.id === t.project_id) ? this.activateProject(t.project_id) : t.kind === 'ssh' && t.connection_id ? this.setSshTarget(t.connection_id, t.root, t.connection_name ?? null) : this.setLocalTarget(t.root, t.workspace_id ?? null));
     });
@@ -485,7 +471,12 @@ class IdeStore {
     this.closedTabPaths = this.closedTabPaths.slice(1);
     await this.openFile(next, { preview: false });
   }
-  private forgetClosedTabs(paths: string[]): void { this.closedTabPaths = [...paths, ...this.closedTabPaths.filter((p) => !paths.includes(p))].slice(0, 20); this.evictClosedMetadata(paths); } // ⌘⇧T reopens newest first
+  private forgetClosedTabs(paths: string[]): void {
+    this.closedTabPaths = [...paths, ...this.closedTabPaths.filter((p) => !paths.includes(p))].slice(0, 20); // ⌘⇧T reopens newest first
+    this.evictClosedMetadata(paths);
+    // A closed notebook stops its kernel (one kernel per open notebook).
+    for (const p of paths) if (p.endsWith('.ipynb')) void api.post('/ide/notebooks/shutdown', { target: this.target, notebook_path: p }).catch(() => {});
+  }
   closeOtherTabs(keepPath: string): void { performCloseTabBatch(this, this.bufPerf, (closing) => this.forgetClosedTabs(closing), keepPath); }
   closeUnmodifiedTabs(): void { performCloseTabBatch(this, this.bufPerf, (closing) => this.forgetClosedTabs(closing)); }
 
@@ -624,7 +615,7 @@ class IdeStore {
       m.launchGutterAction(this, item, mode, (adhoc, keepTc) => void this.startRun({ adhoc, keepTestcontainers: keepTc }), (opts) => void this.startDebug(opts)),
     );
   }
-  installToolchain(ecosystem: string, component: 'sdk' | 'lsp' | 'dap' | 'all', version?: string): Promise<IdeInstallJob | null> {
+  installToolchain(ecosystem: string, component: 'sdk' | 'lsp' | 'dap' | 'unity_dap' | 'all', version?: string): Promise<IdeInstallJob | null> {
     return loadDebugEnvMod().then((m) => m.installToolchainJob(this, ecosystem, component, version, () => this.ensureJobsPoller()));
   }
   createPythonVenv(venvDir = '.venv', pythonVersion?: string, moduleRoot?: string): Promise<{ path: string; interpreter_path: string; version: string } | null> {
@@ -715,11 +706,12 @@ class IdeStore {
         this.debugSseCtl = m.attachDebugSessionStream(this, snap.id, null, (s) => this.applyDebugSnapshot(s));
       }
     };
-    if (debugEnvSyncMod) apply(debugEnvSyncMod);
+    const loaded = debugEnvLoaded();
+    if (loaded) apply(loaded);
     else void loadDebugEnvMod().then(apply);
   }
 
-  async debugCommand(action: 'continue' | 'pause' | 'step_over' | 'step_into' | 'step_out' | 'run_to_cursor' | 'select_frame' | 'restart' | 'stop', extra: { thread_id?: number; frame_id?: number; path?: string; line?: number } = {}): Promise<void> {
+  async debugCommand(action: 'continue' | 'pause' | 'step_over' | 'step_into' | 'step_out' | 'run_to_cursor' | 'select_frame' | 'restart' | 'stop' | 'skip_step', extra: { thread_id?: number; frame_id?: number; path?: string; line?: number } = {}): Promise<void> {
     await (await loadDebugEnvMod()).sendDebugAction(this, action, extra, (s) => this.applyDebugSnapshot(s));
   }
   stepOver = () => this.debugCommand('step_over');

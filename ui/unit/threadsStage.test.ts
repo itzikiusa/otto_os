@@ -17,7 +17,8 @@ import {
 } from '../src/modules/threads/newThreadDefaults.ts';
 import { closeWithChildrenDialog, openDescendants } from '../src/modules/threads/threadClosePlan.ts';
 import { threadsPageMenu, RELATED_LABEL, TERMINAL_LABEL } from '../src/modules/threads/threadsPageMenu.ts';
-import { fitRightPanel } from '../src/modules/threads/threadsLayout.ts';
+import { MIN_CONVERSATION_W, SURFACE_W } from '../src/modules/threads/threadsLayout.ts';
+import { DETAIL_PANE, detailFit } from '../src/lib/components/side/paneKeys.ts';
 
 const HOME = '/Users/me';
 const billing = { name: 'billing-service', path: '/Users/me/code/billing' };
@@ -161,14 +162,15 @@ test('toolbar ⋯ on a phone: no Split / Grid, no hand-off to the phone, New thr
   assert.ok(!labels(ipad).includes('View'));
 });
 
-test('right panel at 1280 gives way to keep the conversation, and the saved width returns', () => {
-  // 1236 px stage (1280 minus the rail), 272 sidebar: 380 would leave 576.
-  assert.equal(fitRightPanel(380, 1236, 272), 316);
-  assert.equal(fitRightPanel(380, 1236, 0), 380);
-  assert.equal(fitRightPanel(380, 1000, 272), 300);
-  assert.equal(fitRightPanel(420, 1680, 272), 420);
-  // Beside an open surface at 1440 with the list open (stage 1396): ≥ 480 for Changes.
-  assert.ok(fitRightPanel(520, 1396, 272, 600) >= 480);
+test('the inspector (a DetailPane) keeps the conversation 600 px, else becomes a sheet — one floor, no flip-flop', () => {
+  // 1280: 44 rail + 280 list + 36 Side panel rail → a 920 px content row.
+  assert.deepEqual(detailFit(920, 380, DETAIL_PANE, MIN_CONVERSATION_W), { sheet: false, shown: 320 });
+  // Opening a surface there keeps it inline too (the same floor decides).
+  assert.equal(detailFit(920, SURFACE_W, { default: SURFACE_W, min: 300, max: 1200 }, MIN_CONVERSATION_W).sheet, false);
+  assert.deepEqual(detailFit(1200, 380, DETAIL_PANE, MIN_CONVERSATION_W), { sheet: false, shown: 380 }, 'list hidden');
+  assert.equal(detailFit(840, 380, DETAIL_PANE, MIN_CONVERSATION_W).sheet, true, 'no room for 600 + 300: a sheet, never an overlap');
+  // 1440 with the list open (row 1080): ≥ 480 for Changes.
+  assert.ok(detailFit(1080, SURFACE_W, { default: SURFACE_W, min: 300, max: 1200 }, MIN_CONVERSATION_W).shown >= 480);
   // "Wide": everything but the conversation's floor.
-  assert.equal(fitRightPanel(1396, 1396, 272), 1396 - 272 - 640 - 8);
+  assert.equal(detailFit(1080, 380, DETAIL_PANE, MIN_CONVERSATION_W, true).shown, 1080 - 600);
 });

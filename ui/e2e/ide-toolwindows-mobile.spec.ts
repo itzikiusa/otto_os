@@ -1,4 +1,5 @@
 import { test, expect, type Page } from '@playwright/test';
+import { idePane } from './ide-panes';
 import { appendFileSync, mkdirSync, mkdtempSync, realpathSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -55,18 +56,10 @@ async function shot(page: Page, name: string): Promise<void> {
   await page.screenshot({ path: join(dir, 'fix-IDE-TREE-DOCK', name) });
 }
 
-/** Stacked (phone): pick the pane; a tablet workbench shows tree and dock side by side. */
+/** A phone: the Files list page or the Tools (ide-panes.ts); a tablet workbench shows tree and dock side by side. */
 async function showPane(page: Page, pane: 'files' | 'tools'): Promise<void> {
-  const tab = page.getByTestId(`ide-stack-tab-${pane}`);
-  await expect(tab.or(page.getByTestId('ide-project-tree')).first()).toBeVisible({ timeout: 20_000 });
-  if (!(await tab.isVisible())) return;
-  // A tab restored at boot switches the phone to the editor once it loads: pick again until it sticks.
-  const shown = pane === 'files' ? page.getByTestId('ide-project-tree') : page.getByTestId('ide-bottom-dock');
-  await expect(async () => {
-    await tab.click();
-    await expect(tab).toHaveAttribute('aria-pressed', 'true');
-    await expect(shown).toBeVisible({ timeout: 2_000 });
-  }).toPass({ timeout: 20_000 });
+  await expect(page.getByTestId('ide-page')).toBeVisible({ timeout: 20_000 });
+  await idePane(page, pane);
 }
 
 test.describe('IDE tool windows on phones and tablets', () => {
@@ -88,7 +81,7 @@ test.describe('IDE tool windows on phones and tablets', () => {
       await expect(root).not.toContainText('/private');
       await expect(root).not.toContainText('/var/');
       expect((await page.getByTestId('ide-tree-filter').boundingBox())?.width ?? 0, `${p}: filter width`).toBeGreaterThanOrEqual(96);
-      await expectFullyInViewport(page, page.getByTestId('ide-tree-more-btn'), `${p}: explorer ⋯`);
+      await expectFullyInViewport(page, page.getByTestId('ide-project-tree-more').or(page.getByTestId('page-header').first().getByRole('button', { name: 'More actions' })).first(), `${p}: explorer ⋯`);
       await shot(page, `${p}-tree-${scheme}.png`);
 
       await showPane(page, 'tools');
@@ -114,14 +107,16 @@ test.describe('IDE tool windows on phones and tablets', () => {
       await page.getByTestId('ide-dock-tab-git').click();
       const gitView = page.getByTestId('ide-git-changes-view');
       await expect(gitView).toContainText('roadmap.md', { timeout: 15_000 });
-      await gitView.locator('.gc-file-btn', { hasText: 'roadmap.md' }).first().click();
-      await expect(gitView.locator('.gc-diff-scroll')).toContainText('Changed on a phone', { timeout: 15_000 });
       if (p === 'iphone-portrait') {
-        await expect(gitView.getByRole('button', { name: /Side.by.side/i })).toHaveCount(0);
-        // No sideways scrollbar under the rows; a long name ellipsises and its Stage button stays on screen.
-        expect(await gitView.locator('.gc-lists').evaluate((el) => getComputedStyle(el).overflowX), `${p}: change list`).toBe('hidden');
+        // The Changes list is the tool (a phone pushes): no sideways scroll under the rows; a
+        // long name ellipsises and its Stage button stays on screen.
+        const list = gitView.locator('aside[aria-label="Changes"] .side-pane-body');
+        expect(await list.evaluate((el) => el.scrollWidth <= el.clientWidth + 1), `${p}: change list`).toBe(true);
         await expectFullyInViewport(page, gitView.getByRole('button', { name: /^Stage .*a-very-long-untracked/ }), `${p}: Stage on a long row`);
       }
+      await gitView.locator('[data-side-row]', { hasText: 'roadmap.md' }).first().click();
+      await expect(gitView.locator('.gc-diff-scroll')).toContainText('Changed on a phone', { timeout: 15_000 });
+      if (p === 'iphone-portrait') await expect(gitView.getByRole('button', { name: /Side.by.side/i })).toHaveCount(0);
       await expectNoHorizontalOverflow(page);
       await shot(page, `${p}-tools-git-${scheme}.png`);
     }

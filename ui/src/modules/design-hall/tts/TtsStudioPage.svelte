@@ -5,6 +5,10 @@
   // synthesis, interactive waveform player, clip history, and 1-click export to workspace.
   import { onDestroy, untrack } from 'svelte';
   import Badge from '../../../lib/components/Badge.svelte';
+  import ListDetail from '../../../lib/components/side/ListDetail.svelte';
+  import ListPane from '../../../lib/components/side/ListPane.svelte';
+  import SideSection from '../../../lib/components/side/SideSection.svelte';
+  import SideRow from '../../../lib/components/side/SideRow.svelte';
   import EmptyState from '../../../lib/components/EmptyState.svelte';
   import Icon from '../../../lib/components/Icon.svelte';
   import LoadState from '../../../lib/components/LoadState.svelte';
@@ -67,6 +71,8 @@
 
   // Character voice presets
   let presets = $state<CharacterVoicePreset[]>([]);
+  // A phone shows the editor first; "‹ Voices" goes to the presets and clips.
+  let phoneOpen = $state(true);
   let activePresetId = $state<string | null>(null);
 
   // Active clip audio playback
@@ -333,69 +339,38 @@
 
   <PageBody fill padded={false}>
     <LoadState what="Voice Studio" loading={loadingInit} error={initError} empty={providers.length === 0} onretry={() => void loadAll()}>
-      <div class="tts-grid">
-        <aside class="tts-rail" aria-label="Character presets and clip history">
-          <section class="tts-sec">
-            <div class="tts-shead">
-              <span class="k">Character presets</span>
-              <button type="button" class="icon-btn" aria-label="Save current settings as preset" title="Save current voice as character preset" onclick={() => void saveCurrentAsPreset()}>
-                <Icon name="plus" size={16} />
-              </button>
-            </div>
-            <ul class="tts-presets">
+      <ListDetail module="design" pane="voice" name="Voices" open={phoneOpen} onback={() => (phoneOpen = false)} testid="tts-grid">
+        {#snippet list()}
+          <!-- Character presets and generated clips: the studio's list pane. -->
+          <ListPane primary={{ icon: 'plus', label: 'Save current voice as character preset', onclick: () => void saveCurrentAsPreset() }} testid="tts-rail">
+            <SideSection title="Character presets" count={presets.length || null}>
               {#each presets as p (p.id)}
-                <li>
-                  <button
-                    type="button"
-                    class="tts-preset"
-                    class:sel={activePresetId === p.id}
-                    aria-pressed={activePresetId === p.id}
-                    onclick={() => applyPreset(p)}
-                  >
-                    <span class="tts-pname">{p.name}</span>
-                    <span class="tts-pmeta">{p.voice_id} · {p.speed}×</span>
-                  </button>
-                </li>
+                <SideRow icon="user" title={p.name} meta="{p.voice_id} · {p.speed}×" selected={activePresetId === p.id} onclick={() => { applyPreset(p); phoneOpen = true; }} />
+              {:else}
+                <p class="tts-none">Save the current voice as a preset with ＋.</p>
               {/each}
-            </ul>
-          </section>
-
-          <section class="tts-sec tts-history">
-            <div class="tts-shead">
-              <span class="k">Generated clips ({clips.length})</span>
-            </div>
-            {#if clips.length === 0}
-              <EmptyState variant="panel" icon="volume" title="No voice clips yet" body="Enter dialogue on the right and click Generate Speech." />
-            {:else}
-              <ul class="tts-clips" data-testid="tts-clip-history">
-                {#each clips as clip (clip.id)}
-                  <li class="tts-clip" class:sel={selectedClipId === clip.id}>
-                    <button type="button" class="tts-cbtn" onclick={() => void selectClip(clip)}>
-                      <span class="tts-ctitle">{clip.title}</span>
-                      <span class="tts-cmeta">
-                        {#if clip.character_name}<strong>{clip.character_name}</strong> · {/if}
-                        {clip.voice_id} · {clip.format.toUpperCase()} · {formatDurationMs(clip.duration_ms)} · {formatAudioBytes(clip.size_bytes)}
-                        {#if clip.visemes?.cues?.length} · {plural(clip.visemes.cues.length, 'viseme')}{/if}
-                      </span>
-                      {#if clip.exported_path}
-                        <span class="tts-cexp"><Icon name="folder" size={12} /> {clip.exported_path}</span>
-                      {/if}
-                    </button>
-                    {#if canEdit}
-                      <button
-                        type="button"
-                        class="icon-btn"
-                        aria-label={`Delete clip ${clip.title}`}
-                        title="Delete clip"
-                        onclick={() => void deleteClip(clip)}
-                      ><Icon name="trash" size={14} /></button>
-                    {/if}
-                  </li>
-                {/each}
-              </ul>
-            {/if}
-          </section>
-        </aside>
+            </SideSection>
+            <SideSection title="Generated clips" count={clips.length}>
+              {#if clips.length === 0}
+                <EmptyState variant="panel" icon="volume" title="No voice clips yet" body="Enter dialogue in the editor and click Generate Speech." />
+              {:else}
+                <div class="tts-clips" data-testid="tts-clip-history">
+                  {#each clips as clip (clip.id)}
+                    <SideRow
+                      icon="volume"
+                      title={clip.title}
+                      meta="{clip.character_name ? `${clip.character_name} · ` : ''}{clip.voice_id} · {clip.format.toUpperCase()} · {formatDurationMs(clip.duration_ms)} · {formatAudioBytes(clip.size_bytes)}{clip.visemes?.cues?.length ? ` · ${plural(clip.visemes.cues.length, 'viseme')}` : ''}"
+                      tip={clip.exported_path ? `Exported to ${clip.exported_path}` : undefined}
+                      selected={selectedClipId === clip.id}
+                      menu={canEdit ? () => [{ label: 'Delete clip…', icon: 'trash', danger: true, action: () => void deleteClip(clip) }] : undefined}
+                      onclick={() => { void selectClip(clip); phoneOpen = true; }}
+                    />
+                  {/each}
+                </div>
+              {/if}
+            </SideSection>
+          </ListPane>
+        {/snippet}
 
         <section class="tts-main" aria-label="Voice synthesis editor">
           <TtsFields
@@ -467,7 +442,7 @@
             />
           {/if}
         </section>
-      </div>
+      </ListDetail>
     </LoadState>
   </PageBody>
 </div>
@@ -498,133 +473,23 @@
     min-block-size: 0;
     container-type: inline-size;
   }
-  .tts-grid {
-    flex: 1;
-    min-block-size: 0;
-    display: grid;
-    grid-template-columns: 300px minmax(0, 1fr);
-  }
-  .tts-rail {
-    border-inline-end: 1px solid var(--border);
-    background: var(--surface);
-    display: flex;
-    flex-direction: column;
-    min-block-size: 0;
-    overflow-y: auto;
-  }
-  .tts-sec {
-    padding: 12px;
-    border-block-end: 1px solid var(--border);
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
-  }
-  .tts-history {
-    flex: 1;
-    border-block-end: 0;
-  }
-  .tts-shead {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 8px;
-    flex-wrap: wrap;
-  }
-  .k {
-    font-size: var(--fs-xs);
-    font-weight: 600;
-    letter-spacing: 0.06em;
-    text-transform: uppercase;
-    color: var(--text-dim);
-  }
-  .tts-presets,
+  /* Presets and clips are the list pane (ListDetail); the editor is the content. */
   .tts-clips {
-    list-style: none;
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+  }
+  .tts-none {
     margin: 0;
-    padding: 0;
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
-  }
-  .tts-preset {
-    inline-size: 100%;
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 8px;
-    padding: 6px 8px;
-    border: 1px solid var(--border);
-    border-radius: var(--radius-s);
-    background: var(--bg);
-    color: var(--text);
-    font: inherit;
+    padding-block: 4px;
+    padding-inline: 8px;
     font-size: var(--fs-s);
-    cursor: pointer;
-    text-align: start;
-  }
-  .tts-preset:hover {
-    background: var(--hover);
-  }
-  .tts-preset.sel {
-    border-color: var(--accent-line-strong);
-    background: var(--accent-soft);
-    color: var(--accent-text);
-  }
-  .tts-pname {
-    font-weight: 500;
-  }
-  .tts-pmeta {
-    font-size: var(--fs-xs);
     color: var(--text-dim);
-  }
-  .tts-clip {
-    display: flex;
-    align-items: flex-start;
-    gap: 4px;
-    padding: 6px 8px;
-    border: 1px solid var(--border);
-    border-radius: var(--radius-s);
-    background: var(--bg);
-  }
-  .tts-clip.sel {
-    border-color: var(--accent-line-strong);
-    background: var(--accent-soft);
-  }
-  .tts-cbtn {
-    flex: 1;
-    min-inline-size: 0;
-    border: 0;
-    background: transparent;
-    padding: 0;
-    color: var(--text);
-    font: inherit;
-    text-align: start;
-    display: flex;
-    flex-direction: column;
-    gap: 2px;
-    cursor: pointer;
-  }
-  .tts-ctitle {
-    font-size: var(--fs-s);
-    font-weight: 500;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-  .tts-cmeta {
-    font-size: var(--fs-xs);
-    color: var(--text-dim);
-  }
-  .tts-cexp {
-    display: inline-flex;
-    align-items: center;
-    gap: 4px;
-    font-size: var(--fs-xs);
-    font-family: var(--font-mono);
-    color: var(--success);
   }
   .tts-main {
     container: tts-main / inline-size;
+    flex: 1;
+    min-block-size: 0;
     min-inline-size: 0;
     padding: 16px 20px;
     display: flex;
@@ -694,44 +559,10 @@
     color: var(--text-dim);
     cursor: pointer;
   }
-  @container (max-width: 780px) {
-    .tts-grid {
-      grid-template-columns: minmax(0, 1fr);
-      align-content: start;
-      overflow-y: auto;
-    }
-    .tts-rail,
+  @container tts-main (max-width: 560px) {
     .tts-main {
-      overflow-y: visible;
-    }
-    .tts-rail {
-      border-inline-end: 0;
-      border-block-end: 1px solid var(--border);
-      order: 2;
-    }
-    .tts-main {
-      order: 1;
-      padding: 12px 14px;
-    }
-  }
-  @media (max-height: 500px) {
-    .tts-grid {
-      grid-template-columns: minmax(0, 1fr);
-      align-content: start;
-      overflow-y: auto;
-    }
-    .tts-rail,
-    .tts-main {
-      overflow-y: visible;
-    }
-    .tts-rail {
-      border-inline-end: 0;
-      border-block-end: 1px solid var(--border);
-      order: 2;
-    }
-    .tts-main {
-      order: 1;
-      padding: 10px 12px;
+      padding-block: 12px;
+      padding-inline: 14px;
     }
   }
   @media (pointer: coarse) {
@@ -748,9 +579,7 @@
       inline-size: 20px;
       block-size: 20px;
     }
-    .tts-page :global(.btn),
-    .tts-preset,
-    .tts-cbtn {
+    .tts-page :global(.btn) {
       min-block-size: 40px;
     }
     .tts-page :global(.icon-btn) {

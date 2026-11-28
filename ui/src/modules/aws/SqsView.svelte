@@ -12,11 +12,12 @@
   import { untrack } from 'svelte';
   import { aws } from '../../lib/stores/aws.svelte';
   import { awsApi, isLoginRequired } from '../../lib/api/aws';
-  import { viewport } from '../../lib/stores/viewport.svelte';
+  import ListDetail from '../../lib/components/side/ListDetail.svelte';
+  import ListPane from '../../lib/components/side/ListPane.svelte';
+  import VirtualList from '../../lib/components/VirtualList.svelte';
   import { initialSelection, rememberSelection } from '../../lib/lastSelection';
   import { ctxMenu } from '../../lib/contextmenu.svelte';
   import { confirmProd } from '../../lib/confirmProd';
-  import { TableWindow } from '../../lib/tableWindow.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import { copyTextOrThrow } from '../../lib/clipboard';
   import EmptyState from '../../lib/components/EmptyState.svelte';
@@ -76,9 +77,10 @@
   });
 
   // A list/detail page opens on an item, never on an empty "pick one" pane:
-  // the remembered queue, else the first. (On a phone the list IS the first screen.)
+  // the remembered queue, else the first. (On a phone the list is the first
+  // screen, with that queue marked.)
   function autoSelect(list: readonly SqsQueue[]): void {
-    if (viewport.isMobile || selectedUrl) return;
+    if (selectedUrl) return;
     const url = initialSelection('aws.sqs', list, (q) => q.url);
     const q = list.find((x) => x.url === url);
     if (q) select(q);
@@ -121,7 +123,7 @@
 
   // The open queue vanished (deleted / a reload without it): open the next one.
   $effect(() => {
-    if (selected || !queues?.length || viewport.isMobile) return;
+    if (selected || !queues?.length) return;
     untrack(() => {
       selectedUrl = null;
       autoSelect(queues!);
@@ -346,13 +348,17 @@
       .map(([url]) => queues?.find((q) => q.url === url)?.name ?? url);
   });
 
-  const tw = new TableWindow();
-  let listEl = $state<HTMLDivElement | null>(null);
-  const win = $derived(tw.range(shown.length)), rowsWindow = $derived(shown.slice(win.start, win.end));
-  $effect(() => { void rowsWindow; tw.measure(listEl); });
-  $effect(() => { void region; void filter; tw.reset(listEl); });
-  const showList = $derived(!viewport.isMobile || !selected);
-  const showDetail = $derived(!viewport.isMobile || !!selected);
+  // Phone: the queues are the page until one is opened ("‹ Queues").
+  let phoneOpen = $state(false);
+  function openQueue(q: SqsQueue): void {
+    select(q);
+    phoneOpen = true;
+  }
+  /** ⌘F text of a queue row (the list is windowed). */
+  function queueFindText(q: SqsQueue): string {
+    const a = aws.sqsAttrs[q.url];
+    return [q.name, a ? `${a.approx_messages} avail · ${a.approx_not_visible} in-flight · ${a.approx_delayed} delayed` : ''].join('\n');
+  }
   const loginNeeded = $derived(isLoginRequired(new Error(error)));
 </script>
 
@@ -369,61 +375,57 @@
   <RegionPicker {account} service="sqs" bind:region />
 </ViewToolbar>
 
-<div class="split" class:mobile={viewport.isMobile}>
-  {#if showList}
-    <div class="list" class:windowed={tw.active(shown.length)} bind:this={listEl} bind:clientHeight={tw.viewH} onscroll={tw.onscroll}>
-      {#if loading && !queues}
-        <div class="pad"><Skeleton rows={8} label="queues" /></div>
-      {:else if error}
-        <LoadState what="queues" error={awsErrorText(error)} empty onretry={() => void load()}>{#snippet errorActions()}{#if loginNeeded}<button class="btn primary" onclick={onsignin}><Icon name="key" size={12} /> Sign in</button>{/if}{/snippet}</LoadState>
+<ListDetail
+  module="aws"
+  pane="sqs"
+  name="Queues"
+  open={phoneOpen}
+  onback={() => { keepDraft(); phoneOpen = false; }}
+  empty={!!queues && queues.length === 0}
+>
+  {#snippet list()}
+    <ListPane count={queues ? queues.length : null} loading={loading && !queues} testid="aws-sqs-queues">
+      {#if error}
+        <LoadState what="queues" error={awsErrorText(error)} empty variant="compact" onretry={() => void load()}>{#snippet errorActions()}{#if loginNeeded}<button class="btn primary small" onclick={onsignin}><Icon name="key" size={12} /> Sign in</button>{/if}{/snippet}</LoadState>
       {:else if shown.length === 0}
-        <EmptyState icon="send" title={filter ? 'No matching queues' : 'No queues'} />
+        <div class="no-match">
+          No queues match “{filter.trim()}”.
+          <button class="btn ghost small" onclick={() => (filter = '')}>Clear filter</button>
+        </div>
       {:else}
-        <table class="tbl">
-          <thead><tr><th>Queue</th><th class="num" title="ApproximateNumberOfMessages">Avail</th><th class="num hide-sm" title="NotVisible">In-flight</th><th class="num hide-sm" title="Delayed">Delayed</th></tr></thead>
-          <tbody>
-            {#if win.top}<tr class="tw-spacer" aria-hidden="true"><td colspan="4" style="height:{win.top}px"></td></tr>{/if}
-            {#each rowsWindow as q (q.url)}
-              {@const a = aws.sqsAttrs[q.url]}
-              <tr use:rowMenu
-                class="trow"
-                class:sel={q.url === selectedUrl}
-                tabindex="0"
-                onclick={() => select(q)}
-                onkeydown={(e) => { if (e.target === e.currentTarget && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); select(q); } }}
-                oncontextmenu={(e) => queueMenu(e, q)}
-              >
-                <td class="name" title={q.url}>
-                  <Icon name="send" size={12} />
-                  <span class="qn">{q.name}</span>
-                  {#if q.fifo}<Badge tone="accent" label="FIFO" />{/if}
-                  {#if a?.dlq_target_arn}<Badge label="Has DLQ" title={`Dead-letter queue: ${a.dlq_target_arn}`} />{/if}
-                </td>
-                <td class="num mono">{a ? a.approx_messages : '…'}</td>
-                <td class="num mono hide-sm">{a ? a.approx_not_visible : '…'}</td>
-                <td class="num mono hide-sm">{a ? a.approx_delayed : '…'}</td>
-              </tr>
-            {/each}
-            {#if win.bottom}<tr class="tw-spacer" aria-hidden="true"><td colspan="4" style="height:{win.bottom}px"></td></tr>{/if}
-          </tbody>
-        </table>
+        <VirtualList items={shown} estimateHeight={45} class="sqs-list" key={(q) => q.url} findText={queueFindText}>
+          {#snippet row(q: SqsQueue)}
+            {@const a = aws.sqsAttrs[q.url]}
+            <div class="vrow">
+              <div class="side-row two-line" class:selected={q.url === selectedUrl}>
+                <button use:rowMenu class="side-row-main sqs-row" data-side-row aria-current={q.url === selectedUrl ? 'true' : undefined} title={q.url} onclick={() => openQueue(q)} oncontextmenu={(e) => queueMenu(e, q)}>
+                  <Icon name="send" size={14} />
+                  <span class="side-row-text">
+                    <span class="side-row-title">{q.name}</span>
+                    <span class="side-row-meta">{a ? `${a.approx_messages} avail · ${a.approx_not_visible} in-flight · ${a.approx_delayed} delayed` : '…'}</span>
+                  </span>
+                  <span class="side-row-trailing">
+                    {#if q.fifo}<Badge tone="accent" label="FIFO" />{/if}
+                    {#if a?.dlq_target_arn}<Badge label="Has DLQ" title={`Dead-letter queue: ${a.dlq_target_arn}`} />{/if}
+                  </span>
+                </button>
+              </div>
+            </div>
+          {/snippet}
+        </VirtualList>
       {/if}
-    </div>
-  {/if}
+    </ListPane>
+  {/snippet}
 
-  {#if showDetail}
     <div class="detail">
       {#if !selected}
         <!-- Never a "pick a queue" pane: a queue is auto-opened whenever the
              list has one (see autoSelect + the effect below). -->
         {#if queues && queues.length === 0}
-          <EmptyState icon="send" title="No queues here" body="Queues in this region show here — peek messages, send, inspect attributes or redrive." />
+          <EmptyState variant="page" icon="send" title="No queues here" body="Queues in this region show here — peek messages, send, inspect attributes or redrive." />
         {/if}
       {:else}
         <div class="dhead">
-          {#if viewport.isMobile}
-            <button class="back" onclick={() => { keepDraft(); selectedUrl = null; }} aria-label="Back to queues" title="Back to queues"><Icon name="chevronLeft" size={14} /></button>
-          {/if}
           <strong class="qname" title={selected.url}>{selected.name}</strong>
           {#if selected.fifo}<Badge tone="accent" label="FIFO" />{/if}
           {#if attrs}<span class="dim counts mono">{attrs.approx_messages} avail · {attrs.approx_not_visible} in-flight · {attrs.approx_delayed} delayed</span>{/if}
@@ -542,31 +544,36 @@
         </div>
       {/if}
     </div>
-  {/if}
-</div>
+</ListDetail>
 {#if agentPacket !== null && ws.current}
   <ContextPacketDialog workspaceId={ws.current.id} sessionId={ws.targetAgentId} kind="broker" payload={agentPacket} onclose={() => (agentPacket = null)} />
 {/if}
 
 <style>
-  .split {
-    flex: 1;
-    min-height: 0;
-    display: grid;
-    grid-template-columns: minmax(260px, 36%) minmax(0, 1fr);
+  /* The windowed queue list: fixed 44 px two-line rows (+1 px gap). */
+  :global(.sqs-list) {
+    block-size: 100%;
   }
-  .split.mobile {
-    grid-template-columns: minmax(0, 1fr);
+  .vrow {
+    block-size: 45px;
+    padding-block-end: 1px;
+    box-sizing: border-box;
   }
-  .list {
-    border-inline-end: 1px solid var(--border);
-    overflow: auto;
-    min-height: 0;
+  .sqs-row {
+    block-size: 44px;
+    min-block-size: 0;
   }
-  .split.mobile .list {
-    border-inline-end: 0;
+  .no-match {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 6px;
+    padding: 8px;
+    font-size: var(--fs-s);
+    color: var(--text-dim);
   }
   .detail {
+    flex: 1;
     min-width: 0;
     min-height: 0;
     display: flex;
@@ -603,10 +610,6 @@
     text-overflow: ellipsis;
     max-width: 320px;
   }
-  .tbl .num {
-    text-align: end;
-    width: 64px;
-  }
   .kvt th {
     position: static;
     text-transform: none;
@@ -619,28 +622,6 @@
     white-space: pre-wrap;
     word-break: break-all;
     max-width: none;
-  }
-  .trow {
-    cursor: pointer;
-  }
-  .trow:hover {
-    background: var(--hover);
-  }
-  .trow:focus-visible {
-    background: var(--surface-2);
-    outline: none;
-    box-shadow: inset 0 0 0 2px var(--accent-text);
-  }
-  .trow.sel {
-    background: var(--accent-soft);
-  }
-  .name :global(svg) {
-    vertical-align: -2px;
-    margin-inline-end: 6px;
-  }
-  .qn {
-    overflow: hidden;
-    text-overflow: ellipsis;
   }
   .dim {
     color: var(--text-dim);
@@ -662,13 +643,6 @@
   }
   .counts {
     font-size: var(--fs-s);
-  }
-  .back {
-    border: 0;
-    background: transparent;
-    color: var(--accent-text);
-    cursor: pointer;
-    padding: 2px;
   }
   .more {
     margin-inline-start: auto;
@@ -776,5 +750,4 @@
   .self { align-self: flex-start; }
   code { font-family: var(--font-mono); }
   .msg-delete { color: var(--danger); }
-  @media (max-width: 640px) { .hide-sm { display: none; } }
 </style>

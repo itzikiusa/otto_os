@@ -290,27 +290,27 @@
             body="Attach one below, or ask the agent to draw a diagram."
           />
         {/snippet}
-        <ul class="refs">
+        <ul class="scenes">
           {#each refs as ref (ref.id)}
-            <li class="ref-row">
+            <li class="scene-row">
               <!-- One real toggle button (chevron + title + meta); the row's own
                    actions are its siblings, never nested inside it. -->
-              <div class="ref-main">
-                <button class="ref-body" aria-expanded={!!expanded[ref.id]} onclick={() => void togglePreview(ref)}>
-                  <span class="ref-chevron">
+              <div class="scene-main">
+                <button class="scene-body" aria-expanded={!!expanded[ref.id]} onclick={() => void togglePreview(ref)}>
+                  <span class="scene-chevron">
                     {#if formatOf(ref) !== 'excalidraw'}
                       <Icon name={expanded[ref.id] ? 'chevronDown' : 'chevronRight'} size={12} />
                     {/if}
                   </span>
-                  <span class="ref-text">
-                    <span class="ref-title">{label(ref)}</span>
-                    <span class="ref-meta">
+                  <span class="scene-text">
+                    <span class="scene-title">{label(ref)}</span>
+                    <span class="scene-meta">
                       <Badge tone={formatOf(ref) === 'd2' ? 'accent' : 'neutral'} label={FORMAT_LABEL[formatOf(ref)]} />
-                      <span class="ref-time mono" title={new Date(ref.updated_at).toLocaleString()}>{rel(ref.updated_at)}</span>
+                      <span class="scene-time mono" title={new Date(ref.updated_at).toLocaleString()}>{rel(ref.updated_at)}</span>
                     </span>
                   </span>
                 </button>
-                <div class="ref-actions">
+                <div class="scene-actions">
                   <button class="icon-btn" title="Open in Design Hall" aria-label="Open in Design Hall" onclick={() => openInCanvas(ref.id)}>
                     <Icon name="shapes" size={13} />
                   </button>
@@ -325,7 +325,7 @@
                 </div>
               </div>
               {#if expanded[ref.id]}
-                <div class="ref-preview">
+                <div class="scene-preview">
                   {#if formatOf(ref) === 'excalidraw'}
                     <div class="board-card">
                       <Icon name="shapes" size={16} />
@@ -409,7 +409,7 @@
     margin: 2px 0;
   }
 
-  .refs {
+  .scenes {
     list-style: none;
     margin: 0;
     padding: 0;
@@ -417,10 +417,10 @@
     flex-direction: column;
     gap: 2px;
   }
-  .ref-row {
+  .scene-row {
     border-radius: var(--radius-s);
   }
-  .ref-main {
+  .scene-main {
     display: flex;
     align-items: center;
     gap: 6px;
@@ -428,16 +428,16 @@
     border-radius: var(--radius-s);
     cursor: pointer;
   }
-  .ref-main:hover {
+  .scene-main:hover {
     background: var(--hover);
   }
-  .ref-chevron {
+  .scene-chevron {
     flex-shrink: 0;
     width: 12px;
     display: inline-flex;
     color: var(--text-dim);
   }
-  .ref-body {
+  .scene-body {
     display: flex;
     align-items: center;
     gap: 6px;
@@ -452,34 +452,34 @@
     text-align: start;
     cursor: pointer;
   }
-  .ref-text {
+  .scene-text {
     display: flex;
     flex-direction: column;
     min-width: 0;
   }
-  .ref-title {
+  .scene-title {
     font-size: var(--fs-s);
     color: var(--text);
     word-break: break-word;
   }
-  .ref-meta {
+  .scene-meta {
     display: flex;
     align-items: center;
     gap: 6px;
     margin-top: 2px;
   }
-  .ref-time {
+  .scene-time {
     font-size: var(--fs-xs);
     color: var(--text-dim);
   }
-  .ref-actions {
+  .scene-actions {
     flex-shrink: 0;
     display: flex;
     align-items: center;
     gap: 2px;
   }
 
-  .ref-preview {
+  .scene-preview {
     margin-block: 2px 6px; margin-inline: 18px 0;
     padding: 8px;
     background: var(--surface-2);

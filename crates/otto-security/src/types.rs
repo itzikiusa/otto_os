@@ -103,6 +103,24 @@ pub enum ScanStatus {
     Cancelled,
 }
 
+/// What started a scan: a person (`manual`) or the project schedule.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ScanTrigger {
+    #[default]
+    Manual,
+    Scheduled,
+}
+
+/// An engine that did not contribute to an otherwise completed scan:
+/// refused before it started (`failed: false`) or failed while running.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EngineNote {
+    pub engine: String,
+    pub reason: String,
+    pub failed: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScanSummary {
     pub id: String,
@@ -115,6 +133,10 @@ pub struct ScanSummary {
     pub error: Option<String>,
     pub count: u32,
     pub engines: Vec<EngineRun>,
+    #[serde(default)]
+    pub trigger: ScanTrigger,
+    #[serde(default)]
+    pub skipped: Vec<EngineNote>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -1,19 +1,26 @@
 <script lang="ts">
-  // Three panes: LEFT = refs tree (graph/RefSidebar), MIDDLE = the commit graph
-  // (this file), RIGHT = commit detail / diff or the WIP panel
-  // (graph/CommitDetailPane). On a phone they stack as accordion sections.
+  // History: the list pane "Branches" (graph/RefSidebar), the commit graph as
+  // the content (this file) and the Detail pane at the end of the row — the
+  // commit's detail / diff or the WIP panel (graph/CommitDetailPane), or a
+  // file's history / blame while one is open (they share the one slot). On a
+  // phone the Branches list is the page and a picked ref pushes the graph;
+  // the Detail pane is a sheet wherever the graph would keep too little room.
   // The state lives in graph/*.svelte.ts behind narrow hosts: the data and
   // its (re)loading (graphData), what the refs mean (graphRefIndex), the
   // row window and lane layout (graphViewport), the selection and reveal
   // (graphSelection), the actions (graphActions), the menus (graphMenus) and
   // the ref popover (refPopoverState). This file wires them and renders rows.
+  import { tick } from 'svelte';
   import { rowMenu } from '../../lib/rowMenu';
   import { plural } from '../../lib/plural';
-  import { splitter } from '../../lib/paneResizer';
   import type { RepoStatusResp } from '../../lib/api/types';
-  import { ui } from '../../lib/stores/ui.svelte';
-  import { startMouseDrag } from '../../lib/dragCursor';
   import { git } from '../../lib/stores/git.svelte';
+  import { viewport } from '../../lib/stores/viewport.svelte';
+  import { gitBridge } from '../../lib/diff/gitBridge.svelte';
+  import { focusAppContent } from '../../lib/announce.svelte';
+  import ListDetail from '../../lib/components/side/ListDetail.svelte';
+  import DetailPane from '../../lib/components/side/DetailPane.svelte';
+  import type { PaneRange } from '../../lib/components/side/paneKeys';
   import { canOpenPrs } from '../../lib/api/git';
   import { rel } from '../../lib/stores/now.svelte';
   import Skeleton from '../../lib/components/Skeleton.svelte';
@@ -29,8 +36,8 @@
   import { createGraphViewport } from './graph/graphViewport.svelte';
   import { createGraphSelection } from './graph/graphSelection.svelte';
   import { createRefPopover } from './graph/refPopoverState.svelte';
-  import { resizerKey } from './graph/resizerKey';
   import RefSidebar from './graph/RefSidebar.svelte';
+  import GraphSearchBar from './GraphSearchBar.svelte';
   import RefChip from './graph/RefChip.svelte';
   import LazyMount from '../../lib/components/LazyMount.svelte';
   import { lazyComponent } from '../../lib/lazy-component.svelte';
@@ -62,10 +69,19 @@
     onresolveconflicts,
   }: Props = $props();
 
-  // Phone accordion sections (refs start collapsed, the diff opens on select);
-  // `secRefsOpen` also peeks the refs over a narrow desktop pane.
-  let secRefsOpen = $state(false);
-  let secCommitsOpen = $state(true);
+  /** Phone: the graph is pushed over the Branches list (a ref was picked). */
+  let phoneOpen = $state(false);
+  /** The Detail pane is a sheet over the graph right now (DetailPane decides). */
+  let detailSheet = $state(false);
+  // The sheet belongs to the graph: on a phone, whatever opens it (the
+  // landing on a dirty tree, an agent's WIP request) pushes the graph first.
+  $effect(() => {
+    if (sel.detailOpen && viewport.navDrawer) phoneOpen = true;
+  });
+  /** The Detail pane holds diffs, so it may grow past the shared range; the
+   *  graph keeps 320 px beside it (its old commit-list floor) or the pane
+   *  becomes a sheet. */
+  const DETAIL: PaneRange = { default: 560, min: 340, max: 1200 };
 
   let checkoutBusy = $state('');
   /** Path of the worktree currently being opened as a git tab (busy guard). */
@@ -100,9 +116,13 @@
   const sel = createGraphSelection({
     get repoId() { return repoId; },
     get status() { return status; },
-    get isMobile() { return vp.isMobile; },
-    get commitsOpen() { return secCommitsOpen; },
-    set commitsOpen(v) { secCommitsOpen = v; },
+    get compact() { return detailSheet; },
+    get phone() { return viewport.navDrawer; },
+    showGraph: () => {
+      if (!viewport.navDrawer) return Promise.resolve();
+      phoneOpen = true;
+      return tick();
+    },
     get refs() { return data.refs; },
     get commits() { return data.commits; },
     get commitsLoading() { return data.commitsLoading; },
@@ -199,21 +219,32 @@
     return Number.isNaN(d.getTime()) ? '' : d.toLocaleString();
   }
 
-  // Drag-to-resize the commit-list column while the detail panel is open
-  // (desktop only; persisted via ui.gitGraphListWidth).
-  let listResizing = $state(false); // suspends the panel's flex transition
-  function startListResize(e: MouseEvent): void {
-    listResizing = true;
-    const startX = e.clientX;
-    const startW = ui.gitGraphListWidth;
-    startMouseDrag(e, {
-      cursor: 'col-resize',
-      onMove: (ev) => ui.setGitGraphListWidth(startW + (ev.clientX - startX), false),
-      onEnd: () => {
-        listResizing = false;
-        ui.setGitGraphListWidth(ui.gitGraphListWidth);
-      },
-    });
+  // A file's history / blame (a diff header's ⋯ › History / Blame, through
+  // `gitBridge`) takes the Detail pane's slot while it is open; a request
+  // for another repo never renders here.
+  const FileHistoryLazy = lazyComponent(() => import('./FileHistoryPanel.svelte'));
+  const BlameLazy = lazyComponent(() => import('./BlamePanel.svelte'));
+  const fileTool = $derived(gitBridge.fileTool?.repoId === repoId ? gitBridge.fileTool : null);
+  const detailTitle = $derived(
+    fileTool ? (fileTool.kind === 'history' ? 'File history' : 'Blame') : sel.wipSelected ? 'Changes' : 'Commit detail',
+  );
+  function closeDetail(): void {
+    if (fileTool) gitBridge.closeFileTool();
+    else sel.closeDetail();
+  }
+  /** Move focus into the file tool on open and back to its opener (the diff
+   *  header's ⋯, still mounted under it) on close, never down to <body>. */
+  function toolFocus(el: HTMLElement): () => void {
+    const prev = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    el.focus({ preventScroll: true });
+    return () => {
+      const hadFocus = el.contains(document.activeElement);
+      requestAnimationFrame(() => {
+        if (!hadFocus && document.activeElement && document.activeElement !== document.body) return;
+        if (prev?.isConnected) prev.focus({ preventScroll: true });
+        else void focusAppContent();
+      });
+    };
   }
 </script>
 
@@ -235,66 +266,41 @@
   />
 {/snippet}
 
-<div class="graphview" class:mobile={vp.isMobile} class:peek={secRefsOpen && !vp.isMobile}>
-  <!-- ── LEFT: refs tree ───────────────────────────────────────────────────── -->
-  {#if vp.isMobile}
-    <!-- Mobile accordion header for the branches/refs tree. -->
-    <button
-      class="mob-sec-head"
-      class:open={secRefsOpen}
-      onclick={() => (secRefsOpen = !secRefsOpen)}
-      aria-expanded={secRefsOpen}
-    >
-      <Icon name={secRefsOpen ? 'chevronDown' : 'chevronRight'} size={13} />
-      <Icon name="branch" size={13} />
-      <span>Branches &amp; Tags</span>
-      <span class="grow"></span>
-      {#if data.refs}<span class="mob-sec-count">{data.refs.local.length + data.refs.remote.length + data.refs.tags.length}</span>{/if}
-    </button>
-  {:else if sel.detailOpen}<button class="icon-btn refs-peek" aria-pressed={secRefsOpen} title="Branches & tags" aria-label="Branches & tags" onclick={() => (secRefsOpen = !secRefsOpen)}><Icon name="branch" size={13} /></button>
-  {/if}
-  <RefSidebar {repoId}
-    refs={data.refs}
-    refsLoading={data.refsLoading}
-    refsError={data.refsError}
-    onretry={() => data.loadRefs(repoId)}
-    {status}
-    stashes={data.stashes}
-    worktrees={data.worktrees}
-    submodules={data.submodules}
-    {currentRepoPath}
-    isMobile={vp.isMobile}
-    collapsed={!secRefsOpen}
-    {checkoutBusy}
-    {openWtBusy}
-    {index}
-    {actions}
-    {menus}
-    selection={sel}
-    {onmergerequest}
-  />
+<ListDetail
+  module="git"
+  pane="refs"
+  name="Branches"
+  open={phoneOpen}
+  onback={() => (phoneOpen = false)}
+  defaultWidth={240}
+  legacy={{ w: 'otto_git_graph_side_width' }}
+  testid="git-history"
+>
+  {#snippet list()}
+    <RefSidebar {repoId}
+      refs={data.refs}
+      refsLoading={data.refsLoading}
+      refsError={data.refsError}
+      onretry={() => data.loadRefs(repoId)}
+      {status}
+      stashes={data.stashes}
+      worktrees={data.worktrees}
+      submodules={data.submodules}
+      {currentRepoPath}
+      {checkoutBusy}
+      {openWtBusy}
+      {index}
+      {actions}
+      {menus}
+      selection={sel}
+      {onmergerequest}
+    />
+  {/snippet}
 
-  <!-- ── MIDDLE: commit graph ─────────────────────────────────────────────── -->
-  {#if vp.isMobile}
-    <button
-      class="mob-sec-head"
-      class:open={secCommitsOpen}
-      onclick={() => (secCommitsOpen = !secCommitsOpen)}
-      aria-expanded={secCommitsOpen}
-    >
-      <Icon name={secCommitsOpen ? 'chevronDown' : 'chevronRight'} size={13} />
-      <Icon name="commit" size={13} />
-      <span>Commits</span>
-      <span class="grow"></span>
-      {#if !data.commitsLoading}<span class="mob-sec-count">{data.commits.length}</span>{/if}
-    </button>
-  {/if}
+  <div class="graphview" class:touch={!viewport.isDesktop}>
+  <GraphSearchBar {repoId} />
   <div
     class="graph-panel"
-    class:panel-shrunk={sel.detailOpen && !vp.isMobile}
-    class:mob-collapsed={vp.isMobile && !secCommitsOpen}
-    class:resizing={listResizing}
-    style:flex-basis={sel.detailOpen && !vp.isMobile ? `${ui.gitGraphListWidth}px` : null}
     bind:this={vp.panelEl}
     onscroll={vp.onScroll}
   >
@@ -392,6 +398,7 @@
       </div>
     {/if}
   </div>
+  </div>
 
   <!-- Create-PR sheet, opened from a branch/commit context menu. -->
   {#if createPrOpen}
@@ -401,61 +408,51 @@
     }} />
   {/if}
 
-  <!-- ── RIGHT: commit detail + diff / WIP staging panel ─────────────────── -->
-  {#if sel.detailOpen && !vp.isMobile}
-    <div
-      class="graph-resizer"
-      role="separator"
-      aria-orientation="vertical"
-      aria-label="Resize the commit list"
-      aria-valuenow={ui.gitGraphListWidth}
-      use:splitter={{
-        onkeydown: (e) => resizerKey(e, () => ui.gitGraphListWidth, (w) => ui.setGitGraphListWidth(w), 420),
-        onmousedown: startListResize,
-        ondblclick: () => ui.setGitGraphListWidth(420),
-      }}
-      title="Drag or use ←/→ to resize · double-click to reset"
-    ></div>
-  {/if}
-
-  {#if vp.isMobile && sel.detailOpen}
-    <!-- Mobile: a sticky section header for the open commit's diff (or the WIP
-         panel), with a tap target to close it (re-opening the commit list). -->
-    <button class="mob-sec-head mob-diff-head" onclick={sel.closeDetail} aria-expanded="true">
-      <Icon name="chevronDown" size={13} />
-      <Icon name="file" size={13} />
-      <span class="mob-diff-title mono">{sel.wipSelected ? '// WIP' : (sel.selectedCommit?.short_sha ?? 'Diff')}</span>
-      <span class="grow"></span>
-      {#if sel.wipSelected}
-        <span class="mob-sec-count">{plural(status.changes.length, 'file')}</span>
-      {:else if sel.diffFileCount !== null}
-        <span class="mob-sec-count">{plural(sel.diffFileCount, 'file')}</span>
+  {#snippet detail()}
+    <DetailPane
+      module="git"
+      title={detailTitle}
+      open={!!fileTool || sel.detailOpen}
+      onclose={closeDetail}
+      ontoggle={() => (fileTool || sel.detailOpen ? closeDetail() : sel.reopen())}
+      range={DETAIL}
+      minContent={320}
+      bind:sheet={detailSheet}
+      testid="git-detail"
+    >
+      {#if fileTool}
+        <div class="file-tool" tabindex="-1" {@attach toolFocus}>
+          {#if fileTool.kind === 'history'}
+            <LazyMount lazy={FileHistoryLazy} what="the file history" variant="panel" props={{ repoId, path: fileTool.path }} />
+          {:else}
+            <LazyMount lazy={BlameLazy} what="the blame view" variant="panel" props={{ repoId, path: fileTool.path, rev: fileTool.rev }} />
+          {/if}
+        </div>
       {/if}
-      <span class="mob-close" aria-hidden="true"><Icon name="x" size={14} /></span>
-    </button>
-  {/if}
-  <CommitDetailPane
-    {repoId}
-    {status}
-    {onstatus}
-    onresolve={onresolveconflicts}
-    open={sel.detailOpen}
-    isMobile={vp.isMobile}
-    wipSelected={sel.wipSelected}
-    selectedSha={sel.selectedSha}
-    selectedCommit={sel.selectedCommit}
-    chips={sel.selectedCommit ? index.chipsFor(sel.selectedCommit) : []}
-    stashLabel={index.stashLabel}
-    selectedBranch={sel.selectedBranch}
-    diffSha={sel.diffSha}
-    diffHeld={sel.diffHeld}
-    onresume={() => sel.selectedSha && sel.scheduleDiff(sel.selectedSha, 0)}
-    onfiletools={fileToolsMenu}
-    bind:fileCount={sel.diffFileCount}
-    onclose={sel.closeDetail}
-    oncommitted={(sha) => { sel.selectWhenLoaded(sha); void data.refreshAfter(); }}
-  />
-</div>
+      <!-- Stays mounted under the file tool: closing it returns to the same diff. -->
+      <div class="detail-host" hidden={!!fileTool}>
+        <CommitDetailPane
+          {repoId}
+          {status}
+          {onstatus}
+          onresolve={onresolveconflicts}
+          compact={detailSheet}
+          wipSelected={sel.wipSelected}
+          selectedSha={sel.selectedSha}
+          selectedCommit={sel.selectedCommit}
+          chips={sel.selectedCommit ? index.chipsFor(sel.selectedCommit) : []}
+          stashLabel={index.stashLabel}
+          selectedBranch={sel.selectedBranch}
+          diffSha={sel.diffSha}
+          diffHeld={sel.diffHeld}
+          onresume={() => sel.selectedSha && sel.scheduleDiff(sel.selectedSha, 0)}
+          onfiletools={fileToolsMenu}
+          oncommitted={(sha) => { sel.selectWhenLoaded(sha); void data.refreshAfter(); }}
+        />
+      </div>
+    </DetailPane>
+  {/snippet}
+</ListDetail>
 
 <!-- Collapsed-row ref popover: rendered at the component root (position:fixed)
      so it clears the scroll container. -->
@@ -589,41 +586,43 @@
 
 <style>
   .graphview {
+    container: graph / inline-size;
+    flex: 1;
     display: flex;
-    height: 100%;
+    flex-direction: column;
+    min-width: 0;
     min-height: 0;
   }
 
   /* ── graph panel ── */
   .graph-panel {
     /* Width of the BRANCH / TAG column on every row (kept equal so labels align
-       vertically). Narrows when the detail panel takes the page width. */
+       vertically). Narrows with the graph (the Detail pane beside it, a phone). */
     --branch-col-w: 168px;
     flex: 1;
     min-width: 0;
-    overflow-y: auto;
-    overflow-x: auto;
-    transition: flex var(--dur-fast) ease-out; /* user-driven: the detail pane opening */
+    min-height: 0;
+    overflow: auto;
+    overscroll-behavior: contain;
   }
-  /* When detail is open, the commit list becomes a fixed-width column and the
-     detail panel flexes to fill the rest of the page (see .detail-visible). */
-  .graph-panel.panel-shrunk {
-    --branch-col-w: 112px; /* fits ▾+N and HEAD side by side (History opens on HEAD) */
-    flex: 0 0 420px; /* basis overridden by the inline ui.gitGraphListWidth */
-    width: auto;
-    min-width: 300px;
-    border-inline-end: 1px solid var(--border);
+  @container graph (max-width: 640px) {
+    .graph-panel {
+      --branch-col-w: 112px; /* fits ▾+N and HEAD side by side (History opens on HEAD) */
+    }
   }
-  .graph-panel.resizing {
-    transition: none;
+  /* The Detail pane's body: the file tool, or the commit / WIP under it. */
+  .file-tool,
+  .detail-host {
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
   }
-  .graph-resizer {
-    flex: 0 0 6px;
-    margin-inline-start: -2px;
-    cursor: col-resize;
+  .file-tool:focus {
+    outline: none;
   }
-  .graph-resizer:hover {
-    background: var(--accent-soft-strong);
+  .detail-host[hidden] {
+    display: none;
   }
   /* Repeated refresh failures: the stale bar rides above the sticky column
      header and stays put while the history scrolls. */
@@ -936,9 +935,7 @@
     color: var(--accent-text);
     border-color: var(--accent-line);
   }
-  @media (max-width: 1024px) {
-    .ref-expander { min-width: 36px; min-height: 36px; }
-  }
+  .touch .ref-expander { min-width: 36px; min-height: 36px; }
 
   /* ── Branch-line highlight (press a commit → see its branch) ───────────────
      Off-spine rows fade; spine rows get a faint wash. The selected row keeps its
@@ -970,93 +967,12 @@
     font-family: var(--font-mono);
   }
 
-  /* ── Mobile accordion section headers (phones) ─────────────────────────────
-     Each pane (Branches / Commits / Diff) gets a tappable header; the body
-     below collapses or expands and scrolls independently. */
-  .mob-sec-head {
-    display: none;
-    align-items: center;
-    gap: 8px;
-    width: 100%;
-    padding: 12px 14px;
-    border: none;
-    border-bottom: 1px solid var(--border);
-    background: var(--surface-2);
-    color: var(--text);
-    font-size: var(--fs-l);
-    font-weight: 600;
-    cursor: pointer;
-    text-align: start;
-    flex-shrink: 0;
-    -webkit-tap-highlight-color: transparent;
-  }
-  .mob-sec-head:active {
-    background: linear-gradient(var(--accent-soft), var(--accent-soft)) var(--surface-2);
-  }
-  .mob-sec-count {
-    font-size: var(--fs-xs);
-    font-weight: 600;
-    padding: 1px 8px;
-    border-radius: 999px;
-    background: var(--surface);
-    color: var(--text-dim);
-  }
-  .mob-diff-head {
-    background: linear-gradient(var(--accent-soft), var(--accent-soft)) var(--surface-2);
-    position: sticky;
-    top: 0;
-    z-index: 3;
-  }
-  .mob-diff-title {
-    font-size: var(--fs-m);
-    color: var(--accent-text);
-    font-weight: 600;
-  }
-  .mob-close {
-    display: inline-flex;
-    color: var(--text-dim);
-    padding-inline-start: 6px;
-  }
-
-  /* ── Mobile + tablet (≤1024px) layout: vertical accordion ── */
-  @media (max-width: 1024px) {
-    .graphview.mobile {
-      flex-direction: column;
-      overflow-y: auto;
-      -webkit-overflow-scrolling: touch;
-    }
-    .mobile .mob-sec-head { display: flex; }
-
-    /* Commit list: takes the remaining room, scrolls on its own. */
-    .mobile .graph-panel,
-    .mobile .graph-panel.panel-shrunk {
-      flex: 1 1 auto;
-      min-width: 0;
-      width: auto;
-      min-height: 180px;
-      overflow-y: auto;
-      overflow-x: auto;
-      overscroll-behavior: contain;
-      border-inline-end: none;
-    }
-
-    /* A collapsed section hides its body entirely (header stays tappable). */
-    .mobile .mob-collapsed {
-      display: none !important;
-    }
-
-    /* Bigger touch targets + legible text on the commit rows. */
-    /* Row height (46px here) is ROW_H, applied inline — see "Row windowing". */
-    .mobile .ci-subject { font-size: var(--fs-l); }
-    .mobile .ci-meta { font-size: var(--fs-s); }
-    .mobile .ci-sha { font-size: var(--fs-s); }
-    .mobile .ci-author { font-size: var(--fs-s); max-width: 110px; }
-    .mobile .ci-date { font-size: var(--fs-s); }
-    .mobile :global(.ref-chip) { font-size: var(--fs-xs); max-width: 120px; }
-    /* Branch/tag column stays a compact, aligned column on phones; chips clip on
-       the left and the full refs are available in the detail header on tap. */
-    .mobile .graph-panel { --branch-col-w: 108px; }
-    .mobile .branch-cell { gap: 2px; padding-inline: 4px; }
-    .mobile .branch-cell :global(.ref-chip) { max-width: 96px; }
-  }
+  /* ── Touch (phone / tablet): legible text on the 46 px rows (ROW_H) ── */
+  .touch .ci-subject { font-size: var(--fs-l); }
+  .touch .ci-meta,
+  .touch .ci-sha,
+  .touch .ci-date { font-size: var(--fs-s); }
+  .touch .ci-author { font-size: var(--fs-s); max-width: 110px; }
+  .touch .branch-cell { gap: 2px; padding-inline: 4px; }
+  .touch .branch-cell :global(.ref-chip) { max-width: 96px; }
 </style>

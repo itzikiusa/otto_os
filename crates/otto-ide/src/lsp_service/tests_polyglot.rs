@@ -328,13 +328,21 @@ fn kotlin_lsp_gutter_kotest_deps_symbols_and_mixed_jvm_workspace_work() {
             .any(|t| t.kind == IdeGutterKind::Suite && t.label.contains("CalcSpec")),
         "expected Kotest suite gutter target, got: {kotest_targets:?}"
     );
-    // BUG-16: Kotest specs execute at spec-class granularity (no broken JUnit leaf selectors).
-    assert!(
-        kotest_targets
-            .iter()
-            .all(|t| t.kind != IdeGutterKind::Test),
-        "Kotest leaf DSL strings must not emit broken JUnit method gutter items: {kotest_targets:?}"
+    // BUG-16: a Kotest test is addressed by its Kotest path, never as a JUnit method.
+    let leaf = kotest_targets
+        .iter()
+        .find(|t| t.kind == IdeGutterKind::Test)
+        .expect("Kotest test item");
+    assert_eq!(leaf.run_spec.runner, crate::types::IdeRunnerKind::Kotest);
+    assert_eq!(
+        leaf.run_spec.test_filter.as_deref(),
+        Some("com.acme.CalcSpec")
     );
+    assert_eq!(
+        leaf.run_spec.test_path.as_deref(),
+        Some(&["multiplies two ints".to_string()][..])
+    );
+    assert_eq!(leaf.run_spec.debug_test_name, None);
 
     // 4. Gradle Kotlin DSL + Version Catalog (`gradle/libs.versions.toml`) parsing + in-place bump
     let gradle_kts = r#"dependencies {
@@ -2504,8 +2512,8 @@ async fn cpp_review_fixes_clangd_llvm_codelldb_core_unreal_cc_override_cmake_and
     use crate::toolchains::installer_remote::build_remote_install_script;
     use crate::toolchains::installer_tools::codelldb_stage_dir;
     use crate::toolchains_catalog::{
-        clangd_download_url, curated_catalog, resolve_sdk_download, EcosystemKind, TargetArch,
-        TargetOs, TargetPlatform, CLANGD_RELEASE_VERSION,
+        clangd_download_url, resolve_sdk_download, EcosystemKind, TargetArch, TargetOs,
+        TargetPlatform, CLANGD_RELEASE_VERSION,
     };
     use crate::types::{
         IdeDepsActionReq, IdeInstallComponent, IdeRunConfig, IdeRunnerKind, IdeTargetKind,
@@ -2513,8 +2521,8 @@ async fn cpp_review_fixes_clangd_llvm_codelldb_core_unreal_cc_override_cmake_and
     use std::collections::BTreeMap;
     use std::os::unix::fs::PermissionsExt;
 
-    // BUG-8 & BUG-9: pinned clangd 19.1.2 (rejects Linux arm64); managed LLVM tarball download
-    // is cleanly removed from catalog, local installer, and remote installer.
+    // BUG-8 & BUG-9: clangd and LLVM come from a pinned manifest of real upstream
+    // files (exact name, size, SHA-256) — never a URL guessed per version.
     let mac_arm = TargetPlatform {
         os: TargetOs::Macos,
         arch: TargetArch::Aarch64,
@@ -2529,12 +2537,13 @@ async fn cpp_review_fixes_clangd_llvm_codelldb_core_unreal_cc_override_cmake_and
     };
     assert!(clangd_download_url(mac_arm)
         .unwrap()
+        .0
         .contains(&format!("clangd-mac-{CLANGD_RELEASE_VERSION}.zip")));
     assert!(clangd_download_url(lin_x64)
         .unwrap()
+        .0
         .contains(&format!("clangd-linux-{CLANGD_RELEASE_VERSION}.zip")));
     assert!(clangd_download_url(lin_arm).is_err());
-    assert!(curated_catalog(EcosystemKind::Cpp, mac_arm).is_empty());
     assert!(resolve_sdk_download(EcosystemKind::Cpp, Some("19.1.7"), mac_arm, &[]).is_err());
     let crafted_llvm = crate::toolchains_catalog::CatalogSdkEntry {
         version: "19.1.7".into(),
@@ -2554,7 +2563,7 @@ async fn cpp_review_fixes_clangd_llvm_codelldb_core_unreal_cc_override_cmake_and
             Some(&crafted_llvm),
         )
         .is_err(),
-        "BUG-9: remote C++ SDK tarball script must be cleanly disabled"
+        "managed LLVM installs locally only: the remote SDK script stays refused"
     );
 
     // CONC-2: job-scoped staging + mutex-serialized promotion for BOTH local and remote CodeLLDB.

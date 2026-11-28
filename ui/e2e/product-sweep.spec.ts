@@ -88,7 +88,7 @@ async function pageHasClass(page: Page, cls: string): Promise<boolean> {
 async function ensureListOpen(page: Page, info: TestInfo): Promise<void> {
   if (!isPhone(info)) return;
   if (!(await pageHasClass(page, 'm-list-open'))) {
-    await page.getByRole('button', { name: 'Back to stories', exact: true }).click();
+    await page.getByRole('button', { name: 'Back to Stories', exact: true }).click();
   }
 }
 

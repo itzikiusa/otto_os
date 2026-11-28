@@ -19,6 +19,13 @@ test('the tree carries tree / treeitem roles with level, size and position', () 
   assert.match(src, /class="icon-btn enter-btn" tabindex="-1"/);
 });
 
+test('the open file\'s row is visibly selected: the shared side-row look, not aria-selected alone', () => {
+  assert.match(src, /class="tree-item side-row" class:selected style:--side-depth=\{node\.depth\}/);
+  assert.match(src, /class="tree-row side-row-main"/);
+  assert.match(src, /aria-selected=\{selected\}/);
+  assert.match(src, /class="row-name side-row-title"/);
+});
+
 test('treePositions numbers siblings per parent in a depth-first list', () => {
   const { treePositions } = componentFunctions(url, ['treePositions'], { Map });
   const n = (path: string, depth: number) => ({ depth, entry: { path } });

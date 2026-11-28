@@ -718,7 +718,7 @@ test.describe('Desktop IDE — Auto-Save, Modal Lifecycle, Live DB Watch & 7-Pro
     await expect(dialog).toBeHidden({ timeout: 10_000 });
 
     // Modal 4: FolderPicker (explorer ⋯ › `Add folder to project…`)
-    await page.getByTestId('ide-tree-more-btn').click();
+    await page.getByTestId('ide-project-tree-more').click();
     await page.locator('.ctx-menu').getByRole('menuitem', { name: 'Add folder to project…' }).click();
     await expect(dialog).toBeVisible({ timeout: 10_000 });
     await page.keyboard.press('Escape');
@@ -732,7 +732,7 @@ test.describe('Desktop IDE — Auto-Save, Modal Lifecycle, Live DB Watch & 7-Pro
     await expect(dialog).toBeHidden({ timeout: 10_000 });
 
     // Modal 6: IdeComparisonModal (explorer ⋯ › `Local history and deleted files…`)
-    await page.getByTestId('ide-tree-more-btn').click();
+    await page.getByTestId('ide-project-tree-more').click();
     await page.locator('.ctx-menu').getByRole('menuitem', { name: 'Local history and deleted files…' }).click();
     await expect(dialog).toBeVisible({ timeout: 10_000 });
     await page.keyboard.press('Escape');

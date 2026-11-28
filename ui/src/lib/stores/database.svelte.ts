@@ -225,8 +225,6 @@ export class DatabaseStore {
    * on a big server, so this stays the user's explicit choice.
    */
   showCounts = $state(loadFlag('db.showCounts', false));
-  /** Collapse the schema sidebar to its rail (⌘B). Persisted. */
-  sidebarCollapsed = $state(loadFlag('db.sidebarCollapsed', false));
 
   // ── Object search (server-side; the tree's own filter is client-side and
   // can only ever match nodes that are already loaded) ─────────────────────
@@ -820,7 +818,6 @@ export class DatabaseStore {
   nodeFilter(nodeId: string): string { return this.tree.nodeFilter(nodeId); }
   applyNodeFilter(node: SchemaNode, value: string): Promise<void> { return this.tree.applyNodeFilter(node, value); }
   setShowCounts(on: boolean): void { this.tree.setShowCounts(on); }
-  toggleSidebar(): void { this.tree.toggleSidebar(); }
   searchObjects(q: string, schema?: string): Promise<void> { return this.tree.searchObjects(q, schema); }
   clearObjectSearch(): void { this.tree.clearObjectSearch(); }
   fetchSchemaGraph(schema: string, maxTables = 60): Promise<DbSchemaGraph | null> { return this.tree.fetchSchemaGraph(schema, maxTables); }

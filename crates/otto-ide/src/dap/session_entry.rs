@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use dashmap::DashMap;
 use otto_core::{Error, Result};
-use serde_json::{json, Value};
+use serde_json::Value;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::{broadcast, mpsc, oneshot, watch, Notify};
 
@@ -17,7 +17,10 @@ use super::session_transport::evict_terminated_sessions;
 use super::start_error::classify_start_error;
 use super::wire::{DapEvent, DapMessage, DapReadItem, DapReader, DapResponse, DapWriter};
 use super::BridgeGuard;
-use crate::types::{IdeDebugOutputEntry, IdeDebugSessionSnapshot, IdeDebugState, IdeStartDebugReq};
+use crate::types::{
+    IdeDebugOutputEntry, IdeDebugSessionSnapshot, IdeDebugState, IdeDebugStepState,
+    IdeStartDebugReq,
+};
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
 /// How long debuggee output gathers before watchers get one snapshot of it: a
@@ -33,6 +36,14 @@ pub(super) struct DapWireClient {
     writer: tokio::sync::Mutex<DapWriter<BoxWrite>>,
     pending: Mutex<HashMap<i64, oneshot::Sender<DapResponse>>>,
     retired: AtomicBool,
+    /// This connection's adapter `breakpoint.id` -> `(display_path, current_1based_line)`,
+    /// so asynchronous `breakpoint` changed events that relocate an initially unbound
+    /// breakpoint update the matching entry in `snapshot.breakpoints` (BUG3-10). Ids
+    /// are per connection: each js-debug child numbers its own.
+    pub(super) bp_ids: Mutex<HashMap<i64, (String, u32)>>,
+    /// The files this connection last sent breakpoints for, so a file that lost
+    /// its last one gets an empty `setBreakpoints` on every connection.
+    pub(super) bp_files: Mutex<BTreeSet<String>>,
 }
 
 impl DapWireClient {
@@ -45,6 +56,8 @@ impl DapWireClient {
             writer: tokio::sync::Mutex::new(DapWriter::new(writer_io)),
             pending: Mutex::new(HashMap::new()),
             retired: AtomicBool::new(false),
+            bp_ids: Mutex::new(HashMap::new()),
+            bp_files: Mutex::new(BTreeSet::new()),
         });
         let client_ref = client.clone();
         tokio::spawn(async move {
@@ -100,10 +113,21 @@ impl DapWireClient {
                             let _ = event_tx.send(ev);
                         }
                     }
+                    // js-debug announces each process it debugs with `startDebugging`;
+                    // the event driver attaches it and answers. Nothing else is supported
+                    // (`runInTerminal` never comes: Otto uses the internal console).
+                    DapMessage::Request(rev_req) if rev_req.command == "startDebugging" => {
+                        if !client_ref.retired.load(Ordering::SeqCst) {
+                            let _ = event_tx.send(DapEvent::new(
+                                rev_req.seq,
+                                "__startDebugging__",
+                                rev_req.arguments,
+                            ));
+                        }
+                    }
                     DapMessage::Request(rev_req) => {
-                        let mut w = client_ref.writer.lock().await;
-                        let _ = w
-                            .send_response(rev_req.seq, &rev_req.command, Ok(Some(json!({}))))
+                        let _ = client_ref
+                            .respond(rev_req.seq, &rev_req.command, Err("not supported".into()))
                             .await;
                     }
                 }
@@ -120,6 +144,20 @@ impl DapWireClient {
 
     pub(super) fn retire(&self) {
         self.retired.store(true, Ordering::SeqCst);
+    }
+
+    /// Answer a reverse (adapter-to-client) request.
+    pub(super) async fn respond(
+        &self,
+        request_seq: i64,
+        command: &str,
+        result: std::result::Result<Option<Value>, String>,
+    ) -> Result<()> {
+        let mut w = self.writer.lock().await;
+        w.send_response(request_seq, command, result)
+            .await
+            .map(drop)
+            .map_err(|e| Error::Upstream(format!("DAP write '{command}' response failed: {e}")))
     }
 
     pub(super) fn is_retired(&self) -> bool {
@@ -181,6 +219,9 @@ pub(super) struct ActiveConnection {
     pub(super) supports_terminate: bool,
     pub(super) supports_set_variable: bool,
     pub(super) exception_filters: Vec<String>,
+    /// Booted with DAP `attach`: Stop detaches and never ends a debuggee Otto
+    /// did not start (the guard still kills Otto's own adapter and companions).
+    pub(super) attached: bool,
 }
 
 impl ActiveConnection {
@@ -191,6 +232,20 @@ impl ActiveConnection {
     }
 }
 
+/// A session that ends (Stop, an error) ends its Debug All run: the live and
+/// the pending steps are `skipped`.
+fn skip_unfinished_steps(snap: &mut IdeDebugSessionSnapshot) {
+    for s in &mut snap.steps {
+        if matches!(
+            s.state,
+            IdeDebugStepState::Pending | IdeDebugStepState::Running
+        ) {
+            s.state = IdeDebugStepState::Skipped;
+        }
+    }
+    snap.current_step = None;
+}
+
 pub(super) struct SessionEntry {
     pub(super) created_seq: u64,
     pub(super) owner_user_id: String,
@@ -198,11 +253,6 @@ pub(super) struct SessionEntry {
     pub(super) orig_ctx: RwLock<DapStartContext>,
     pub(super) snapshot: RwLock<IdeDebugSessionSnapshot>,
     pub(super) output_buf: Mutex<VecDeque<IdeDebugOutputEntry>>,
-    pub(super) configured_bp_files: Mutex<BTreeSet<String>>,
-    /// Maps DAP adapter `breakpoint.id` -> `(display_path, current_1based_line)` so
-    /// asynchronous `breakpoint` changed events that relocate an initially unbound
-    /// breakpoint update the matching entry in `snapshot.breakpoints` (BUG3-10).
-    pub(super) bp_locs_by_adapter_id: Mutex<HashMap<i64, (String, u32)>>,
     pub(super) temp_run_to_cursor: Mutex<Option<(String, u32)>>,
     /// The last breakpoint stop: where it was and its instruction pointer
     /// (see `is_same_line_relocation`).
@@ -226,6 +276,10 @@ pub(super) struct SessionEntry {
     output_flush_pending: AtomicBool,
     /// Last `seq` handed to an output entry (monotonic for the session's life).
     output_seq: AtomicU64,
+    /// A Debug All run's remaining plan and live step (`None` for one process).
+    pub(super) steps: Mutex<Option<super::session_steps::StepRun>>,
+    /// js-debug's child targets (one per debugged process) and which is in focus.
+    pub(super) targets: super::session_children::ChildTargets,
 }
 
 impl SessionEntry {
@@ -276,6 +330,9 @@ impl SessionEntry {
             error_ecosystem: None,
             target_root: Some(req.target.root.clone()).filter(|r| !r.is_empty()),
             supports_set_variable: false,
+            steps: Vec::new(),
+            current_step: None,
+            targets: Vec::new(),
         };
         let initial_break_exc = req.break_on_exceptions;
         Arc::new(Self {
@@ -285,8 +342,6 @@ impl SessionEntry {
             orig_ctx: RwLock::new(ctx),
             snapshot: RwLock::new(initial_snap),
             output_buf: Mutex::new(output_buf),
-            configured_bp_files: Mutex::new(BTreeSet::new()),
-            bp_locs_by_adapter_id: Mutex::new(HashMap::new()),
             temp_run_to_cursor: Mutex::new(None),
             last_bp_stop: Mutex::new(None),
             break_on_exceptions: Mutex::new(initial_break_exc),
@@ -302,6 +357,8 @@ impl SessionEntry {
             lifecycle_lock: tokio::sync::Mutex::new(()),
             output_flush_pending: AtomicBool::new(false),
             output_seq: AtomicU64::new(last_seq),
+            steps: Mutex::new(None),
+            targets: Default::default(),
         })
     }
 
@@ -369,6 +426,7 @@ impl SessionEntry {
             return;
         }
         self.release_active_netbridge();
+        self.targets.clear();
         if let Some(conn) = self.conn.write().unwrap_or_else(|e| e.into_inner()).take() {
             conn.shutdown_immediately();
         }
@@ -383,6 +441,7 @@ impl SessionEntry {
             if snap.state != IdeDebugState::Error {
                 snap.state = IdeDebugState::Terminated;
             }
+            skip_unfinished_steps(snap);
             snap.stopped_reason = None;
             snap.paused_line = None;
             snap.selected_frame_file = None;
@@ -442,6 +501,7 @@ impl SessionEntry {
         self.disconnect_and_kill();
         self.mutate_and_broadcast(|snap| {
             snap.state = IdeDebugState::Error;
+            skip_unfinished_steps(snap);
             snap.threads.clear();
             snap.stack_frames.clear();
             snap.scopes.clear();
@@ -500,6 +560,14 @@ impl SessionEntry {
         } else {
             text
         };
+        if let Some(run) = self
+            .steps
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_mut()
+        {
+            super::session_steps::capture_step_output(run, &clipped);
+        }
         {
             let mut buf = self.output_buf.lock().unwrap_or_else(|e| e.into_inner());
             if buf.len() >= MAX_DEBUG_OUTPUT {
@@ -548,7 +616,17 @@ impl SessionEntry {
         });
     }
 
+    /// The connection commands and inspection use: the js-debug child target in
+    /// focus, else the session's own connection.
     pub(super) fn active_conn(&self) -> Result<Arc<ActiveConnection>> {
+        match self.targets.focused() {
+            Some(conn) => Ok(conn),
+            None => self.active_root(),
+        }
+    }
+
+    /// The session's own connection (for js-debug, the parent of every child target).
+    pub(super) fn active_root(&self) -> Result<Arc<ActiveConnection>> {
         self.conn
             .read()
             .unwrap_or_else(|e| e.into_inner())

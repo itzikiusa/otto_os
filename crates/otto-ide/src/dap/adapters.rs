@@ -64,6 +64,16 @@ pub enum DapAdapterTransport {
         cwd: String,
         env: BTreeMap<String, String>,
     },
+    /// Microsoft js-debug's DAP server (`dapDebugServer.js 0 127.0.0.1`, a
+    /// [`Self::TcpListen`]) that debugs each process as a child target, after an
+    /// optional companion started first (`ng test` serving Karma).
+    JsDebug {
+        command: String,
+        args: Vec<String>,
+        cwd: String,
+        env: BTreeMap<String, String>,
+        companion: Option<std::sync::Arc<super::BridgeGuard>>,
+    },
     /// Connect directly to an already-listening DAP TCP server (`host:port`).
     DirectTcpAttach { host: String, port: u16 },
     /// Built-in Node.js / V8 Inspector-to-DAP bridge (`node --inspect-brk=127.0.0.1:0`).
@@ -158,6 +168,21 @@ impl std::fmt::Debug for DapAdapterTransport {
             } => {
                 let env_keys: Vec<&str> = env.keys().map(String::as_str).collect();
                 f.debug_struct("TcpListen")
+                    .field("command", command)
+                    .field("args", args)
+                    .field("cwd", cwd)
+                    .field("env_keys", &env_keys)
+                    .finish()
+            }
+            Self::JsDebug {
+                command,
+                args,
+                cwd,
+                env,
+                ..
+            } => {
+                let env_keys: Vec<&str> = env.keys().map(String::as_str).collect();
+                f.debug_struct("JsDebug")
                     .field("command", command)
                     .field("args", args)
                     .field("cwd", cwd)
@@ -420,6 +445,33 @@ pub(crate) async fn resolve_dap_adapter_with_manager(
         other => Err(Error::Invalid(format!(
             "unsupported debug language '{other}'; install a DAP plugin or choose go, python, rust, zig, c, cpp, javascript, typescript, java, kotlin, or shell"
         ))),
+    }
+}
+
+/// The steps of a Debug All run (several .NET test projects or frameworks,
+/// several Zig test suites), or `None` for an ordinary one-process session.
+pub(crate) async fn plan_debug_steps(
+    data_dir: &Path,
+    req: &IdeStartDebugReq,
+    ctx: &DapStartContext,
+    env_mgr: Option<&EnvironmentManager>,
+) -> Result<Option<super::session::DebugPlan>> {
+    if req.launch.debug_step || req.launch.attach_port.is_some() {
+        return Ok(None);
+    }
+    let spec = resolve_debug_launch_spec(data_dir, req, ctx, env_mgr)?;
+    if spec.plugin_spec.is_some() {
+        return Ok(None);
+    }
+    match spec.canonical_lang.as_str() {
+        "csharp" | "fsharp" => {
+            super::adapters_dotnet::plan_dotnet_test_steps(data_dir, req, ctx, &spec.cwd, spec.env)
+                .await
+        }
+        "zig" => {
+            super::adapters_zig::plan_zig_test_steps(data_dir, req, ctx, &spec.cwd, spec.env).await
+        }
+        _ => Ok(None),
     }
 }
 

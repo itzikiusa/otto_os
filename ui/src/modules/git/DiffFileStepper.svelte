@@ -1,9 +1,9 @@
 <script lang="ts">
-  // The Code tab's file stepper on phones and tablets (≤1024 px), a row of
-  // its own inside the pinned diff toolbar: ‹ previous file, "12 / 54" (opens
-  // the file picker), › next file, Viewed for the file being read, and Next
-  // unviewed. There the desktop Files panel is hidden and the tree rail sits
-  // above the diff, so without this a 50-file PR could only be scrolled.
+  // The Code tab's file stepper on a phone, a row of its own inside the
+  // pinned diff toolbar: ‹ previous file, "12 / 54" (opens the file picker),
+  // › next file, Viewed for the file being read, and Next unviewed. A phone
+  // pushes the PR over its list, so the Files panel under the list is not on
+  // screen; without this a 50-file PR could only be scrolled.
   // Everything comes from the PR files feed the viewer publishes
   // (prFilesBridge): the same files, Viewed marks and jump as the Files panel.
   import Icon from '../../lib/components/Icon.svelte';

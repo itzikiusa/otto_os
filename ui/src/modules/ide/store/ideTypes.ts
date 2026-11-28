@@ -6,6 +6,7 @@ import { LANG_KEYS, langKeyFor, sniffLangKey } from '../../../lib/components/lan
 import type {
   IdeBridgedServiceSummary,
   IdeDebugLaunch,
+  IdeDebugStep,
   IdeEnvironmentResp,
   IdeHostMapping,
   IdeMlAcceleratorInfo,
@@ -211,11 +212,12 @@ export interface IdeQuickRunSpec {
   runner?: string; command?: string | null; args?: string[]; cwd?: string | null;
   target_path?: string | null; test_filter?: string | null; test_name?: string | null;
   program?: string | null; debug_program?: string | null; debug_test_name?: string | null; language?: string | null;
+  test_path?: string[] | null;
 }
 
 export interface IdeGutterItem {
   line: number; kind: 'test' | 'suite' | 'main' | 'bench';
-  label: string; language: string; run_spec: IdeQuickRunSpec;
+  label: string; language: string; run_spec: IdeQuickRunSpec; note?: string | null;
 }
 
 export interface IdeSymbolNode {
@@ -268,6 +270,8 @@ export interface IdeToolchainEcosystem {
   installed: IdeInstalledSdk[]; detected?: IdeDetectedSdk[];
   lsp_status: IdeToolStatus; dap_status: IdeToolStatus;
   lsp?: IdeToolStatus | null; dap?: IdeToolStatus | null;
+  /** .NET on this Mac: the Unity debugger (`component: 'unity_dap'`). */
+  unity_dap_status?: IdeToolStatus | null;
   downloadable: IdeDownloadableSdk[];
 }
 
@@ -333,7 +337,7 @@ export interface IdeRunConfig {
   build_flags?: string[]; cwd?: string | null; env_overrides: Record<string, string>;
   env_file?: string | null; inherit_shell_env?: boolean; sdk_path?: string | null;
   toolchain_id?: string | null; compound_configs?: string[]; auto_detected?: boolean;
-  before_launch?: string | null; target_path?: string | null; test_filter?: string | null;
+  before_launch?: string | null; target_path?: string | null; test_filter?: string | null; test_path?: string[];
   maven_profiles?: string[]; spring_profiles?: string[]; skip_tests?: boolean; offline?: boolean; coverage?: boolean;
 }
 
@@ -378,6 +382,10 @@ export interface IdeDebugSessionSnapshot {
   inline_values: IdeInlineValue[]; breakpoints: IdeBreakpoint[]; output: IdeDebugOutputEntry[]; error?: string | null;
   error_kind?: 'adapter_missing' | 'toolchain_missing' | 'build_failed' | null; error_ecosystem?: string | null;
   target_root?: string | null; supports_set_variable?: boolean;
+  /** Debug All runs: one step per test project / framework or test suite. */
+  steps?: IdeDebugStep[]; current_step?: number | null;
+  /** js-debug sessions: one entry per debugged process (`IdeDebugTarget`). */
+  targets?: { id: string; name: string; paused: boolean; error?: string | null }[];
 }
 
 export interface IdeWatch { id: string; expression: string; value: string; var_type?: string | null; error?: string | null }

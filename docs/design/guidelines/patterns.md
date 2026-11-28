@@ -335,7 +335,7 @@ $effect(() => {
   |---|---|
   | **Session** | new / close / reopen / cycle sessions, the focused session's verbs, workspaces, Ask Otto, broadcast |
   | **Pane** | splits, the side-by-side pane, layout presets, moving and detaching panes |
-  | **View** | sidebar, the Session panel and its tabs, scheme and theme, new window, Favorites |
+  | **View** | sidebar, the Side panel and its tabs, scheme and theme, new window, Favorites |
   | **Navigate** | Go to <module>, back / forward |
   | **Tools** | CLI updates, snip, sign out |
   | **Help** · **Settings** | guides and the shortcut sheet · settings sections |

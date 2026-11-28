@@ -24,7 +24,8 @@
   import type { BrokerCluster, ConsumeReq, ConsumeResp, KafkaMessage, MessageHeader,
     ProduceReq, StartPosition, TopicDetail, ValueFormat } from '../../lib/api/types';
   import { ws } from '../../lib/stores/workspace.svelte';
-  import { viewport } from '../../lib/stores/viewport.svelte';
+  import DetailPane from '../../lib/components/side/DetailPane.svelte';
+  import type { MenuItem } from '../../lib/contextmenu.svelte';
   import { brokersTopicPort } from '../../lib/uiCommands/brokers';
   import ContextPacketDialog from '../../lib/components/ContextPacketDialog.svelte';
   import ConsumeScanNote from './ConsumeScanNote.svelte';
@@ -74,6 +75,11 @@
   let result = $state.raw<ConsumeResp | null>(null);
   let selected = $state.raw<KafkaMessage | null>(null);
   let rawView = $state(false);
+  // The message Detail pane: inline beside the list while there is room, a
+  // sheet otherwise (always on a phone). ⌥⌘B reopens the last message.
+  let msgSheet = $state(false);
+  let lastMsg: KafkaMessage | null = null;
+  $effect(() => void (selected && (lastMsg = selected)));
   const selKey = $derived(selected ? `${selected.partition}-${selected.offset}` : '');
   // Window the message table (SC-08): a 5000-message peek mounts only the
   // visible slice between two spacer rows. The partition ranges are indexed
@@ -113,6 +119,30 @@
   const consumeUrl = () => `/brokers/clusters/${cluster.id}/topics/${encodeURIComponent(topic)}/consume`;
 
   /** Open a message; fetch its full value when the list only holds a preview. */
+  function messageMenu(m: KafkaMessage): MenuItem[] {
+    const items: MenuItem[] = [];
+    if (m.value?.raw_base64) items.push({ label: rawView ? 'Show decoded' : 'Show raw', icon: 'code', action: () => (rawView = !rawView) });
+    items.push({ label: 'Copy as kcat', icon: 'terminal', action: () => copyKcat(m) });
+    items.push({
+      label: 'Edit & Produce copy…',
+      icon: 'edit',
+      disabled: cluster.read_only || !!m.value?.truncated,
+      title: cluster.read_only ? 'Read-only cluster — producing messages is disabled' : m.value?.truncated ? 'Waiting for the full message value' : 'Copy into the Produce tab to edit before sending',
+      action: () => void editAndProduceCopy(m),
+    });
+    if (onreplayfrom) {
+      items.push({
+        label: 'Replay to topic…',
+        icon: 'send',
+        disabled: cluster.read_only,
+        title: cluster.read_only ? 'Read-only cluster — replaying messages is disabled' : 'Open the Replay tab for this partition and offset',
+        action: () => replayFromMessage(m),
+      });
+    }
+    if (ws.current) items.push({ label: 'Send to agent…', icon: 'send', disabled: !!m.value?.truncated, title: 'Send message to a running agent (redacted preview)', action: () => (sendToAgentOpen = true) });
+    return items;
+  }
+
   function selectMessage(m: KafkaMessage) {
     selected = m;
     rawView = false;
@@ -436,8 +466,9 @@
       tailOffsets = new Map();
       // Never land on an empty "Pick a message" pane when there are messages
       // (layout.md): keep the previous message if it is still in range, else
-      // open the first. Phones stack list over detail, so they stay on the list.
-      if (!viewport.isPhone && next.messages.length) {
+      // open the first — only while the Detail pane sits inline (a sheet would
+      // cover the list the person is about to read).
+      if (!msgSheet && next.messages.length) {
         const keep = prev && next.messages.find((m) => m.partition === prev.partition && m.offset === prev.offset);
         selectMessage(keep ?? next.messages[0]);
       }
@@ -860,102 +891,78 @@
         {/if}
       </div>
 
-      <div class="msg-detail">
+      <DetailPane
+        module="brokers"
+        pane="message"
+        title={selected ? `P${selected.partition} · offset ${selected.offset}` : 'Message'}
+        open={!!selected}
+        onclose={() => (selected = null)}
+        ontoggle={() => (selected = selected ? null : lastMsg)}
+        bind:sheet={msgSheet}
+        minContent={320}
+        menu={selected ? () => (selected ? messageMenu(selected) : []) : undefined}
+        testid="message-detail"
+      >
+        {#snippet action()}
+          <button type="button" class="icon-btn" onclick={copySelectedAsJson} disabled={!!selected?.value?.truncated} aria-label="Copy message as JSON" title="Copy message as JSON">
+            <Icon name="copy" size={14} />
+          </button>
+        {/snippet}
         {#if selected}
-          <div class="md-head">
-            <span class="mono">P{selected.partition} · offset {selected.offset}</span>
-            <span class="muted">{fmtTs(selected.timestamp_ms)}</span>
-            {#if selected.value?.format}
-              <Badge tone="accent" label={`${selected.value.format}${selected.value.schema_id != null ? ` #${selected.value.schema_id}` : ''}`} />
+          <div class="msg-detail">
+            <div class="md-head">
+              <span class="muted">{fmtTs(selected.timestamp_ms)}</span>
+              {#if selected.value?.format}
+                <Badge tone="accent" label={`${selected.value.format}${selected.value.schema_id != null ? ` #${selected.value.schema_id}` : ''}`} />
+              {/if}
+              {#if selected.headers.length > 0}
+                <Badge label={plural(selected.headers.length, 'header')} />
+              {/if}
+              {#if result}
+                {@const pct = offsetPct(selected, result.partitions)}
+                {#if pct !== null}
+                  <Badge label={`${pct.toFixed(1)}%`} title="Offset position within partition watermarks" />
+                {/if}
+              {/if}
+              {#if rawView}<Badge variant="outline" label="Raw" />{/if}
+            </div>
+            {#if selected.key}
+              <h5>Key <span class="muted">({selected.key.format})</span></h5>
+              <pre class="payload key">{selected.key.text || '∅'}</pre>
             {/if}
-            {#if selected.headers.length > 0}
-              <Badge label={plural(selected.headers.length, 'header')} />
-            {/if}
-            {#if result}
-              {@const pct = offsetPct(selected, result.partitions)}
-              {#if pct !== null}
-                <Badge label={`${pct.toFixed(1)}%`} title="Offset position within partition watermarks" />
+            <h5>Value</h5>{#if selected.value?.notice}<p class="muted small schema-notice">{selected.value.notice}</p>{/if}
+            {#if selected.value?.truncated}
+              {#if fullErr && !fullLoading}
+                <LoadState
+                  variant="compact"
+                  what="the full value"
+                  error={`${fullErr} Showing the first 2 KiB.`}
+                  loading={fullLoading}
+                  empty
+                  onretry={() => selected && selectMessage(selected)}
+                />
+              {:else}
+                <p class="muted small">
+                  {#if fullLoading}Loading the full value… (showing the first 2 KiB){:else}Showing the first 2 KiB.{/if}
+                </p>
               {/if}
             {/if}
-            {#if selected.value?.raw_base64}
-              <button class="btn small" onclick={() => (rawView = !rawView)}>
-                {rawView ? 'Decoded' : 'Raw'}
-              </button>
-            {/if}
-            <button class="btn small" onclick={copySelectedAsJson} disabled={!!selected.value?.truncated} title="Copy message as JSON">
-              <Icon name="copy" size={12} /> Copy
-            </button>
-            <button class="btn small" onclick={() => selected && copyKcat(selected)} title="Copy kcat command for this partition and offset">
-              <Icon name="terminal" size={12} /> Copy as kcat
-            </button>
-            <button
-              class="btn small"
-              onclick={() => selected && void editAndProduceCopy(selected)}
-              disabled={cluster.read_only || !!selected.value?.truncated}
-              title={cluster.read_only
-                ? 'Read-only cluster — producing messages is disabled'
-                : selected.value?.truncated
-                  ? 'Waiting for the full message value'
-                  : 'Copy into the Produce tab to edit before sending'}
-            >
-              <Icon name="edit" size={12} /> Edit & Produce copy…
-            </button>
-            {#if onreplayfrom}
-              <button
-                class="btn small"
-                onclick={() => selected && replayFromMessage(selected)}
-                disabled={cluster.read_only}
-                title={cluster.read_only
-                  ? 'Read-only cluster — replaying messages is disabled'
-                  : 'Open the Replay tab for this partition and offset'}
-              >
-                <Icon name="send" size={12} /> Replay to topic…
-              </button>
-            {/if}
-            {#if ws.current}
-              <button class="btn small" onclick={() => (sendToAgentOpen = true)} disabled={!!selected.value?.truncated} title="Send message to a running agent (redacted preview)">
-                <Icon name="send" size={12} /> To agent
-              </button>
+            <pre class="payload">{rawView
+                ? (selected.value?.raw_base64 ?? '')
+                : (selected.value?.text ?? '∅')}</pre>
+            {#if selected.headers.length > 0}
+              <h5>Headers</h5>
+              <table class="headers">
+                <tbody>
+                  {#each selected.headers as h, i (i)}
+                    <tr><td class="mono">{h.key}</td><td>{h.value}</td></tr>
+                  {/each}
+                </tbody>
+              </table>
             {/if}
           </div>
-          {#if selected.key}
-            <h5>Key <span class="muted">({selected.key.format})</span></h5>
-            <pre class="payload key">{selected.key.text || '∅'}</pre>
-          {/if}
-          <h5>Value</h5>{#if selected.value?.notice}<p class="muted small schema-notice">{selected.value.notice}</p>{/if}
-          {#if selected.value?.truncated}
-            {#if fullErr && !fullLoading}
-              <LoadState
-                variant="compact"
-                what="the full value"
-                error={`${fullErr} Showing the first 2 KiB.`}
-                loading={fullLoading}
-                empty
-                onretry={() => selected && selectMessage(selected)}
-              />
-            {:else}
-              <p class="muted small">
-                {#if fullLoading}Loading the full value… (showing the first 2 KiB){:else}Showing the first 2 KiB.{/if}
-              </p>
-            {/if}
-          {/if}
-          <pre class="payload">{rawView
-              ? (selected.value?.raw_base64 ?? '')
-              : (selected.value?.text ?? '∅')}</pre>
-          {#if selected.headers.length > 0}
-            <h5>Headers</h5>
-            <table class="headers">
-              <tbody>
-                {#each selected.headers as h, i (i)}
-                  <tr><td class="mono">{h.key}</td><td>{h.value}</td></tr>
-                {/each}
-              </tbody>
-            </table>
-          {/if}
-        {:else}
-          <EmptyState icon="note" title="Pick a message" body={`${messages.length} ${messages.length === 1 ? 'message' : 'messages'} loaded. Select one to inspect its key, value and headers.`} />
         {/if}
-      </div>
+      </DetailPane>
     </div>
   {:else if tab === 'partitions'}
     {#if !detail && !detailErr}
@@ -1158,8 +1165,8 @@
      viewport (a phone in landscape): the detail overflows into the brokers tab
      body, which scrolls, instead of compressing behind the header. */
   .msg-layout { display: flex; flex: 1; min-height: 180px; }
-  .msg-list { flex: 1; overflow: auto; border-inline-end: 1px solid var(--border); }
-  .msg-detail { width: 45%; min-width: 320px; overflow: auto; padding: 12px 14px; }
+  .msg-list { flex: 1; min-width: 0; overflow: auto; }
+  .msg-detail { padding: 12px 14px; }
   table { width: 100%; border-collapse: collapse; font-size: var(--fs-m); }
   th {
     text-align: start;
@@ -1268,19 +1275,12 @@
   .small { font-size: var(--fs-xs); }
   .pad { padding: 14px; }
 
-  /* Phone (≤640px): stack message list + detail vertically so neither collapses. */
+  /* Phone (≤640px): finger-sized offsets; the message detail is a sheet (DetailPane). */
   @media (max-width: 640px) {
     .message-open { min-width: 36px; min-height: 36px; }
     .td { height: auto; min-height: 100%; }
-    .msg-layout { flex-direction: column; flex: none; }
-    .msg-list {
-      border-inline-end: none;
-      border-bottom: 1px solid var(--border);
-      min-height: 200px;
-      flex: 1 1 auto;
-    }
+    .msg-list { min-height: 200px; }
     .msg-list.windowed { max-height: 60vh; }
-    .msg-detail { width: 100%; min-width: 0; max-height: 50vh; }
     .consume-bar select, .consume-bar .sm { flex: 1 1 auto; min-width: 0; }
     .key { max-width: 120px; }
     .cfg-set { flex-wrap: wrap; }

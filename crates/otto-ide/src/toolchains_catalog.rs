@@ -27,7 +27,10 @@ pub const JAVA_DEBUG_JAR_NAME: &str = "com.microsoft.java.debug.plugin-0.53.1.ja
 pub const GOPLS_PKG: &str = "golang.org/x/tools/gopls@latest";
 pub const DLV_PKG: &str = "github.com/go-delve/delve/cmd/dlv@latest";
 pub const JS_DEBUG_TARBALL_URL: &str =
-    "https://github.com/microsoft/vscode-js-debug/releases/download/v1.97.1/js-debug-dap-v1.97.1.tar.gz";
+    "https://github.com/microsoft/vscode-js-debug/releases/download/v1.140.1/js-debug-dap-v1.140.1.tar.gz";
+/// SHA-256 of [`JS_DEBUG_TARBALL_URL`] (the release asset's published digest).
+pub const JS_DEBUG_SHA256: &str =
+    "c72fab31bcbfdce6ad1f42adfd28eff8d4681dd3b03b5e2e6f9e72e6f9927faf";
 pub const TS_LSP_NPM_PACKAGES: &[&str] = &[
     "typescript",
     "typescript-language-server",
@@ -359,9 +362,9 @@ impl EcosystemKind {
             Self::Kotlin => "2.1.20",
             Self::Go => "1.24.2",
             Self::Rust => "stable",
-            Self::Zig => "0.14.0",
-            Self::Cpp => "19.1.7",
-            Self::Dotnet => "9.0.203",
+            Self::Zig => "0.16.0",
+            Self::Cpp => "23.1.5",
+            Self::Dotnet => "10.0.404",
             Self::Node => "22.14.0",
             Self::Python => "3.13",
             Self::Shell => "3.10.0",
@@ -513,28 +516,14 @@ pub fn zls_tarball_url(version: &str, platform: TargetPlatform) -> String {
     )
 }
 
-/// Pinned upstream `clangd/clangd` GitHub release tag (decoupled from LLVM SDK
-/// versions because `clangd/clangd` only publishes specific release tags).
-pub const CLANGD_RELEASE_VERSION: &str = "19.1.2";
+pub use crate::toolchains::llvm_manifest::CLANGD_VERSION as CLANGD_RELEASE_VERSION;
 
-pub fn clangd_zip_url(version: &str, platform: TargetPlatform) -> String {
-    let clean = version.trim().trim_start_matches('v');
-    let slug = match platform.os {
-        TargetOs::Macos => "mac",
-        TargetOs::Linux => "linux",
-    };
-    format!("https://github.com/clangd/clangd/releases/download/{clean}/clangd-{slug}-{clean}.zip")
-}
-
-/// Resolve the official `clangd/clangd` release zip URL for `platform`.
-/// Upstream `clangd/clangd` publishes macOS universal and Linux x86_64 zips (no Linux ARM64).
-pub fn clangd_download_url(platform: TargetPlatform) -> Result<String, String> {
-    if platform.os == TargetOs::Linux && platform.arch == TargetArch::Aarch64 {
-        return Err(
-            "Prebuilt clangd archives are not published for Linux arm64; install clangd via your system package manager (`apt install clangd` / `dnf install clang-tools-extra`).".into(),
-        );
-    }
-    Ok(clangd_zip_url(CLANGD_RELEASE_VERSION, platform))
+/// The pinned `clangd/clangd` release zip for `platform` as `(url, sha256)`.
+/// Upstream publishes macOS universal and Linux x86_64 zips (no Linux ARM64).
+pub fn clangd_download_url(platform: TargetPlatform) -> Result<(String, &'static str), String> {
+    crate::toolchains::llvm_manifest::clangd_zip(platform).ok_or_else(|| {
+        "Prebuilt clangd archives are not published for Linux arm64; install clangd via your system package manager (`apt install clangd` / `dnf install clang-tools-extra`).".into()
+    })
 }
 
 pub fn kotlin_compiler_zip_url(version: &str) -> String {
@@ -733,9 +722,9 @@ pub fn curated_catalog(ecosystem: EcosystemKind, platform: TargetPlatform) -> Ve
         })
         .collect(),
         EcosystemKind::Zig => [
-            ("0.14.0", true, "46 MB"),
+            ("0.16.0", true, "50 MB"),
+            ("0.14.0", false, "46 MB"),
             ("0.13.0", false, "44 MB"),
-            ("0.12.1", false, "43 MB"),
         ]
         .into_iter()
         .map(|(ver, lts, sz)| CatalogSdkEntry {
@@ -752,7 +741,31 @@ pub fn curated_catalog(ecosystem: EcosystemKind, platform: TargetPlatform) -> Ve
         // Upstream LLVM release archives exceed the 1 GiB download cap (1.1-1.6 GiB) and
         // vary per platform/version; install Clang/GCC via Xcode CLT, Homebrew, or apt/dnf
         // and use 1-click installs for `clangd` (LSP) and `CodeLLDB` (DAP).
-        EcosystemKind::Cpp => Vec::new(),
+        EcosystemKind::Cpp => crate::toolchains::llvm_manifest::llvm_for(platform)
+            .map(|a| CatalogSdkEntry {
+                version: a.version.to_string(),
+                label: format!(
+                    "LLVM {} — clang, clangd, clang-format, clang-tidy{}",
+                    a.version,
+                    if a.os == TargetOs::Linux {
+                        " (+ lldb-dap)"
+                    } else {
+                        ""
+                    }
+                ),
+                lts: true,
+                os: os.clone(),
+                arch: arch.clone(),
+                url: a.url(),
+                size_hint: Some(format!(
+                    "{} download · {} on disk",
+                    crate::toolchains::llvm_manifest::mb(a.bytes),
+                    crate::toolchains::llvm_manifest::mb(a.installed_bytes)
+                )),
+                sha256: Some(a.sha256.to_string()),
+            })
+            .into_iter()
+            .collect(),
         EcosystemKind::Kotlin => [("2.1.20", true, "76 MB"), ("2.0.21", false, "74 MB")]
             .into_iter()
             .map(|(ver, lts, sz)| CatalogSdkEntry {
@@ -767,8 +780,9 @@ pub fn curated_catalog(ecosystem: EcosystemKind, platform: TargetPlatform) -> Ve
             })
             .collect(),
         EcosystemKind::Dotnet => [
-            ("9.0.203", ".NET SDK 9.0.203 (STS)", false, "215 MB"),
-            ("8.0.408", ".NET SDK 8.0.408 (LTS)", true, "205 MB"),
+            // .NET 8 and 9 are end of life (releases-index.json, 2026-11).
+            ("10.0.404", ".NET SDK 10.0.404 (LTS)", true, "234 MB"),
+            ("11.0.100", ".NET SDK 11.0.100 (STS)", false, "201 MB"),
         ]
         .into_iter()
         .map(|(ver, label, lts, sz)| CatalogSdkEntry {
@@ -929,9 +943,15 @@ pub fn resolve_sdk_download(
                 sha256: None,
             })
         }
-        EcosystemKind::Cpp => Err(
-            "C/C++ compiler toolchains (Clang / GCC / LLVM) are installed via Xcode Command Line Tools (`xcode-select --install`), Homebrew (`brew install llvm`), or your Linux package manager (`apt install clang` / `dnf install clang`), then auto-detected or added via 'Add Local SDK'.".into(),
-        ),
+        EcosystemKind::Cpp => Err(match crate::toolchains::llvm_manifest::llvm_for(platform) {
+            Some(a) => format!(
+                "Only LLVM {} is available as a managed download for {os}/{arch}. Install other versions with your package manager and add them with Add local toolchain.",
+                a.version
+            ),
+            None => format!(
+                "No managed LLVM build is published for {os}/{arch}. Install clang with your package manager and add it with Add local toolchain."
+            ),
+        }),
         EcosystemKind::Kotlin => {
             let clean = ver.trim_start_matches('v').to_string();
             Ok(CatalogSdkEntry {
@@ -1738,10 +1758,7 @@ mod tests {
                 let items = curated_catalog(eco, platform);
                 if matches!(
                     eco,
-                    EcosystemKind::Cpp
-                        | EcosystemKind::Ios
-                        | EcosystemKind::Android
-                        | EcosystemKind::Flutter
+                    EcosystemKind::Ios | EcosystemKind::Android | EcosystemKind::Flutter
                 ) {
                     assert!(
                         items.is_empty(),

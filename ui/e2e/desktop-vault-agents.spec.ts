@@ -323,6 +323,7 @@ test('ui: refine drawer mounts on an open note', async ({ page }) => {
   const tree = page.locator('.tree');
   await tree.getByText('runbooks', { exact: true }).click();
   await tree.getByText('deploy', { exact: true }).click();
+  // Refine is a view of the note's Detail pane (a sheet in this window).
   await page.locator('button[title="Refine with Otto"]').click();
   const drawer = page.locator('.refine-drawer');
   await expect(drawer).toBeVisible();

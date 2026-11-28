@@ -237,8 +237,9 @@ Rules for plain tables and dense lists:
 
 - Header row: `--fs-xs` or `--fs-s`, weight 600, `--text-dim`, **sticky**, with
   a `--border` bottom edge.
-- Rows 28–32 px, a hairline between rows, `--hover` on hover, `--accent-soft`
-  when selected.
+- Table rows 28–32 px, a hairline between rows, `--hover` on hover,
+  `--accent-soft` when selected. Rows in a side pane are `SideRow` (30 px line,
+  44 px two-line, `InboxRow` 64 / 56 / 46) — [layout.md §4.1](./layout.md#41-listdetail-and-the-side-surfaces).
 - **Right-align numbers** with `font-variant-numeric: tabular-nums`. Units go
   in the header ("Size (MB)") or come from the formatters.
 - Truncate long cells with an ellipsis plus `title` (the full value). Show IDs
@@ -295,16 +296,23 @@ Rules:
 - **Phone decisions** (one Approve / Deny, made with a thumb): `bottom` docks
   the sheet to the bottom edge on a phone, full width, with 44 px actions. Back
   closes it like any Modal.
-- **Drawers:** use `shell/Drawer.svelte` (off-canvas slide-over: focus trap via
-  `dialogFocus`, Esc, backdrop, `ui.pushModal()`, a 24 px ✕; `title` adds a
-  header row, `head` a richer one, `onclose` reports a self-dismiss). Don't
-  hand-roll one — the phone `BottomNav` "More" overflow is a titled Drawer too.
-- **Docked detail columns** (a resource's details beside its table — AWS
-  EC2/RDS, Kubernetes) use `lib/components/DockedDrawer.svelte`: an inline
-  column with one header (title or `head` snippet + ✕, Esc closes) on desktop,
-  and the shell Drawer as a full-width sheet on phone (or when `modal`). The
-  caller renders only the body (tabs first); no local `pushModal` /
-  `dialogFocus`.
+- **Side surfaces** are built from `lib/components/side/` and nothing else
+  ([layout.md §4.1](./layout.md#41-listdetail-and-the-side-surfaces)):
+
+  | Block | What it does |
+  |---|---|
+  | `ListDetail` | the page layout: list pane + content (+ `detail`); split, divider, hide / show and ⌘B, tablet clamp, phone push and Back, the empty rule |
+  | `ListPane` | the pane: header (name · count · one primary · ⋯ with "Hide"), `searchRow`, `filterRow`, `views` (the views as the header), `selection`, body (`use:listNav`), `footer`, loading / error. It is a ListDetail's list only in that ListDetail's `list` snippet; elsewhere (a second-level list in the content) it stands alone — pass `name`; nest a ListDetail for a second push |
+  | `SideSection` / `SideRow` | a folding 22 px section head; the one row (line / two-line / tree indent, ⋯ menu, long-press) |
+  | `DetailPane` | the right pane about the selected thing: title or `views`, ONE `action`, ⋯, Close, `footer`; inline and resizable, or a right sheet (full width on a phone); ⌥⌘B with `ontoggle` |
+  | `PhoneBack` | the one phone Back ("‹ Threads"); PageHeader draws it from ListDetail |
+  | `use:listNav` | ↑ / ↓ / Home / End / Enter / Space / → / ← over a list, tree or nav |
+
+- **Drawers:** the shell owns the two that remain — the phone's Navigator
+  drawer and the Side panel sheet — on `shell/Drawer.svelte` (focus trap via
+  `dialogFocus`, Esc, backdrop, `ui.pushModal()`). A module does not mount a
+  Drawer: its right-hand overlay is a `DetailPane`, which brings the same
+  plumbing (the `side-pane` ratchet fails a module `Drawer`).
 
 ## 8. Confirm, prompt and choose: `confirmer`
 
@@ -535,7 +543,6 @@ needs one, and update this doc:
 |---|---|
 | `Button` / `IconButton` (required `label` → `aria-label` plus tooltip) | `.btn` / `.icon-btn` classes (keep the classes as the implementation) |
 | `Segmented` (radiogroup) | `.segmented` without ARIA |
-| `Drawer` | `AwsDrawer`, `RefineDrawer`, `ResourceDrawer`, `RulesDrawer` |
 | `Spinner` / `Loading` | local spinners (the global `.spinner` covers most) |
 | `DataTable` | 51 locally styled `<table>` elements |
 | `use:floating` action | The per-component clamp code behind ctxMenu, NamespacePicker and the git ref popover |

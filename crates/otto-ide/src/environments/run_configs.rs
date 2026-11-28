@@ -503,6 +503,9 @@ impl EnvironmentManager {
             }
         };
 
+        if cfg.runner == IdeRunnerKind::UnityAttach {
+            return Err(Error::Invalid("Attach targets can only be debugged".into()));
+        }
         let mut steps: Vec<(IdeRunConfig, BTreeMap<String, String>)> = Vec::new();
         if cfg.runner == IdeRunnerKind::Compound && !cfg.compound_configs.is_empty() {
             for member_id in cfg.compound_configs.iter().take(12) {
@@ -669,13 +672,14 @@ fn is_allowed_standard_runner_command(runner: IdeRunnerKind, cmd: &str) -> bool 
         IdeRunnerKind::Karma => matches!(cmd, "npx" | "ng" | "karma" | "pnpm" | "yarn"),
         IdeRunnerKind::JavaMain => cmd == "java",
         IdeRunnerKind::JavaJunit | IdeRunnerKind::Maven => matches!(cmd, "mvn" | "./mvnw"),
+        IdeRunnerKind::Kotest => matches!(cmd, "mvn" | "./mvnw" | "gradle" | "./gradlew"),
         IdeRunnerKind::Gradle => matches!(cmd, "gradle" | "./gradlew"),
         IdeRunnerKind::Shell => matches!(cmd, "bash" | "sh" | "bats"),
         IdeRunnerKind::Xcode => matches!(cmd, "xcodebuild" | "swift"),
         IdeRunnerKind::Flutter => matches!(cmd, "flutter" | "dart"),
         IdeRunnerKind::ReactNative => matches!(cmd, "npx" | "npm" | "yarn" | "pnpm"),
         IdeRunnerKind::Compound => true,
-        IdeRunnerKind::Custom => false,
+        IdeRunnerKind::Custom | IdeRunnerKind::UnityAttach => false,
     }
 }
 

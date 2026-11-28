@@ -1,14 +1,16 @@
 <script lang="ts">
-  // "Diagnose with an agent": the side panel with the embedded thread,
-  // mounted ONCE beside the Connections page's main area so it works for DB
-  // tabs, SSH tabs and the empty hub alike. On a phone it is a full-height
-  // sheet. Before a thread exists the panel is the Threads start composer
+  // "Diagnose with an agent": the workbench's Detail pane with the embedded
+  // thread, mounted ONCE at the end of the Connections page's content row so
+  // it works for DB tabs, SSH tabs and the empty hub alike. Inline while the
+  // workbench keeps its room, a right sheet otherwise (full width on a phone),
+  // with Esc, focus return and a backdrop from DetailPane. Before a thread exists the panel is the Threads start composer
   // (the embed's draft state) under the consent text: the person picks the
   // agent, model, effort and access, then starts it. With a thread, the
   // consent dialog offers to run the checks again in it. The user never
   // leaves the page; Detach moves the thread to Threads.
   // State + rules: diagnose.svelte.ts, diagnose-prompt.ts.
   import Icon from '../../lib/components/Icon.svelte';
+  import DetailPane from '../../lib/components/side/DetailPane.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
   import Modal from '../../lib/components/Modal.svelte';
   import { api } from '../../lib/api/client';
@@ -122,16 +124,36 @@
   </Modal>
 {/if}
 
-{#if a && connDiagnose.shown}
-  <aside class="diag" class:max={connDiagnose.maximized} aria-label="Diagnosing {a.conn.name}" data-testid="diagnose-aside">
-    <header class="diag-head">
-      <Icon name="assistant" size={14} />
-      <span class="diag-title ellipsis">Diagnosing {a.conn.name}</span>
-      {#if phaseText(a.phase)}<span class="diag-phase {a.phase}">{phaseText(a.phase)}</span>{/if}
-      <button class="icon-btn" onclick={() => connDiagnose.close()} aria-label="Close — the thread is kept" title="Close — the thread is kept; Diagnose opens it again">
-        <Icon name="x" size={14} />
+{#snippet diagFoot()}
+  {#if a}
+    <div class="diag-foot" data-testid="diagnose-after">
+      <button class="btn small primary" onclick={() => void testAgain()} disabled={retesting}>
+        <Icon name="refresh" size={12} />{retesting ? 'Testing…' : 'Test again'}
       </button>
-    </header>
+      {#if onedit}
+        {@const c = a.conn}
+        <button class="btn small" onclick={() => onedit(c)}><Icon name="edit" size={12} />Edit connection</button>
+      {/if}
+      <!-- Always mounted while finished: the result line changes in place, so it is announced. -->
+      <span class="retest" class:ok={retest?.ok} role="status">{retest?.text ?? ''}</span>
+    </div>
+  {/if}
+{/snippet}
+
+<DetailPane
+  module="database"
+  pane="diagnose"
+  title={a ? `Diagnosing ${a.conn.name}` : 'Diagnose'}
+  open={!!a && connDiagnose.shown}
+  onclose={() => connDiagnose.close()}
+  maximized={connDiagnose.maximized}
+  footer={a?.phase === 'finished' ? diagFoot : undefined}
+  testid="diagnose-aside"
+>
+  {#snippet action()}
+    {#if a && phaseText(a.phase)}<span class="diag-phase {a.phase}">{phaseText(a.phase)}</span>{/if}
+  {/snippet}
+  {#if a}
     <div class="diag-body">
       {#if a.phase === 'failed'}
         <LoadState what="the diagnosis" errorTitle="Couldn’t run the diagnosis" error={a.error ?? 'Unknown error'} empty onretry={() => void connDiagnose.retry()} variant="panel" />
@@ -154,21 +176,8 @@
         <LoadState what="the thread" loading empty variant="panel" />
       {/if}
     </div>
-    {#if a.phase === 'finished'}
-      <footer class="diag-foot" data-testid="diagnose-after">
-        <button class="btn small primary" onclick={() => void testAgain()} disabled={retesting}>
-          <Icon name="refresh" size={12} />{retesting ? 'Testing…' : 'Test again'}
-        </button>
-        {#if onedit}
-          {@const c = a.conn}
-          <button class="btn small" onclick={() => onedit(c)}><Icon name="edit" size={12} />Edit connection</button>
-        {/if}
-        <!-- Always mounted: the result line changes in place, so it is announced. -->
-        <span class="retest" class:ok={retest?.ok} role="status">{retest?.text ?? ''}</span>
-      </footer>
-    {/if}
-  </aside>
-{/if}
+  {/if}
+</DetailPane>
 
 <style>
   .consent p {
@@ -194,35 +203,6 @@
     font-size: var(--fs-xs);
     overflow-wrap: anywhere;
   }
-  .diag {
-    flex: none;
-    width: min(460px, 45%);
-    min-width: 300px;
-    min-height: 0;
-    display: flex;
-    flex-direction: column;
-    border-inline-start: 1px solid var(--border);
-    background: var(--bg);
-  }
-  .diag.max {
-    width: 70%;
-  }
-  .diag-head {
-    flex: none;
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    min-width: 0;
-    padding-block: 6px;
-    padding-inline: 12px 8px;
-    border-block-end: 1px solid var(--border);
-    font-size: var(--fs-s);
-  }
-  .diag-title {
-    flex: 1;
-    min-width: 0;
-    font-weight: 600;
-  }
   .diag-phase {
     flex: none;
     color: var(--text-dim);
@@ -246,13 +226,12 @@
     min-height: 0;
   }
   .diag-foot {
-    flex: none;
     display: flex;
     flex-wrap: wrap;
     align-items: center;
     gap: 6px;
-    padding: 8px 12px;
-    border-block-start: 1px solid var(--border);
+    padding-block: 6px;
+    min-width: 0;
   }
   .retest {
     font-size: var(--fs-s);
@@ -261,20 +240,5 @@
   }
   .retest.ok {
     color: var(--success);
-  }
-  /* Phones (portrait AND landscape, e.g. 932×430) and tablets: a full-height
-     sheet over the page. Below ~1025 px a side split leaves neither the
-     workbench nor a compact thread (≥ 280 px) usable width next to the list. */
-  @media (max-width: 1024px) {
-    .diag,
-    .diag.max {
-      position: fixed;
-      inset: 0;
-      z-index: var(--z-drawer);
-      width: auto;
-      min-width: 0;
-      border-inline-start: none;
-      padding-block-end: env(safe-area-inset-bottom);
-    }
   }
 </style>

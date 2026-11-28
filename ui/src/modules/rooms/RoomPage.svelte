@@ -10,6 +10,7 @@
   import RoomMedia from './RoomMedia.svelte';
   import RoomParticipants from './RoomParticipants.svelte';
   import RoomChat from './RoomChat.svelte';
+  import DetailPane from '../../lib/components/side/DetailPane.svelte';
   import LazyMount from '../../lib/components/LazyMount.svelte';
   import { lazyComponent } from '../../lib/lazy-component.svelte';
   // The Chat view pulls in the conversation renderer — load it on first use.
@@ -81,15 +82,15 @@
   let finishing = $state(false), needsName = $state(false), inviteOpen = $state(false), inviteRole = $state<'viewer' | 'editor'>('viewer');
   let invitation = $state<RoomInvite | null>(null), inviting = $state(false), copied = $state(false);
   let inviteError = $state('');
-  let tab = $state<'session' | 'conversation'>('session');
-  let peopleOpen = $state(true);
+  /** People & chat: a Detail pane beside the session (a right sheet without
+   *  the room for both); open on arrival where it fits inline (desktop). */
+  let peopleOpen = $state(viewport.isDesktop);
   const host = $derived(room?.member_id === room?.host_member_id && !!room?.host_member_id);
   const self = $derived(room?.members?.find(m => m.id === room?.member_id));
   const driver = $derived(room?.members?.find(m => m.id === room?.driver_member_id));
   const connected = $derived(connection === 'connected');
   const canType = $derived(!finishing && connected && room?.admission === 'admitted' && room?.driver_member_id === room?.member_id);
   const origin = $derived(recallRoom(roomId)?.origin ?? location.origin);
-  const narrowRoom = $derived(viewport.isPhone || viewport.isTablet);
   // a11y-6-01: errors and connection edges are announced where they change;
   // the visible lines are inserted with their text, so they are not live regions.
   $effect(() => { if (error) announce(error, { assertive: true }); });
@@ -104,9 +105,9 @@
   $effect(() => { if (controlLine) announce(controlLine); });
   /** Reconnect from the interrupted banner; it stays mounted (and focused) while connecting. */
   function reconnect() { if (connection !== 'connecting') client?.connect(); }
-  $effect(() => { peopleOpen = !narrowRoom; });
   // Host-only: knocks and requests must reach the host on every layout, not only
-  // inside the (collapsed / hidden on narrow windows) People list.
+  // inside the People list (a closed pane, or a sheet on a phone): the status
+  // row's Review and the header's People & chat count.
   const requests = $derived(hostRequests(room));
   let announcement = $state('');
   let announced = new Set<string>();
@@ -116,7 +117,7 @@
     announced = new Set(items.map(item => item.key));
     if (fresh.length) announcement = fresh.map(item => item.text).join(' ');
   });
-  function reviewRequests() { tab = 'conversation'; peopleOpen = true; }
+  function reviewRequests() { peopleOpen = true; }
   function endLabel(): string {
     if (!finishing) return host ? 'End room…' : 'Leave room…';
     if (waitingForRecap) return 'Finishing recap…';
@@ -230,6 +231,7 @@
   <div class="sr-only" aria-live="polite">{host ? announcement : ''}</div>
   <PageHeader title={room?.session_title ?? 'Session room'} subtitle={room ? `${room.provider ? `${providerName(room.provider)} · ` : ''}${room.members?.filter(m => m.admission === 'admitted').length ?? 1}/4 people` : ''}>
     {#snippet actions()}{#if room?.admission === 'admitted'}
+      <button class="icon-btn" class:on={peopleOpen} data-keep aria-pressed={peopleOpen} aria-keyshortcuts="Alt+Meta+B" title="{peopleOpen ? 'Hide' : 'Show'} people & chat (⌥⌘B)" aria-label={host && requests.total ? `People & chat, ${requests.total} ${requests.total === 1 ? 'request' : 'requests'}` : 'People & chat'} onclick={() => (peopleOpen = !peopleOpen)}><Icon name="people" size={14} />{#if host && requests.total}<span class="count" aria-hidden="true">{requests.total}</span>{/if}</button>
       {#if host}
         <button class="icon-btn" data-keep aria-haspopup="menu" title="More room actions" aria-label="More room actions" onclick={(e) => moreMenu(e.currentTarget)}><Icon name="more" size={14} /></button>
         <button class="btn small primary" disabled={!connected} onclick={() => { invitation = null; inviteError = ''; inviteOpen = true; }}>Invite someone…</button>
@@ -263,17 +265,13 @@
       {#if waitingForRecap}<div class="room-status"><span>Finishing recap before ending the room…</span>{#if recapForceReady}<button class="btn small danger" onclick={forceEndWithoutRecap}>End room now</button>{/if}</div>{/if}
       {#if error}<div class="error">{error}<button class="btn small" onclick={dismissError}>Dismiss</button></div>{/if}
       <RoomRecap bind:this={recapPanel} {room} {connected} {send} audioSources={() => mediaPanel?.getRecapAudioSources() ?? new Map()} screenStreams={() => mediaPanel?.getPresentationStreams() ?? new Map()} />
-      <nav class="mobile-tabs" aria-label="Room view"><button class="btn" aria-pressed={tab === 'session'} onclick={() => tab = 'session'}>Session</button><button class="btn" aria-pressed={tab === 'conversation'} aria-label={host && requests.total ? `People & chat, ${requests.total} ${requests.total === 1 ? 'request' : 'requests'}` : undefined} onclick={() => tab = 'conversation'}>People & chat{#if host && requests.total}<span class="count" aria-hidden="true">{requests.total}</span>{/if}</button></nav>
-      <div class="room-workspace"><main class:mobile-hidden={tab !== 'session'}><RoomMedia bind:this={mediaPanel} {room} {send} {connected} />{#if room.session_id && client && connected}<div class="view-switch" role="group" aria-label="Session view"><button class="btn small" aria-pressed={view === 'terminal'} onclick={() => view = 'terminal'}>Terminal</button><button class="btn small" aria-pressed={view === 'chat'} onclick={() => view = 'chat'}>Chat</button></div>{/if}
+<div class="room-workspace"><main><RoomMedia bind:this={mediaPanel} {room} {send} {connected} />{#if room.session_id && client && connected}<div class="view-switch" role="group" aria-label="Session view"><button class="btn small" aria-pressed={view === 'terminal'} onclick={() => view = 'terminal'}>Terminal</button><button class="btn small" aria-pressed={view === 'chat'} onclick={() => view = 'chat'}>Chat</button></div>{/if}
           <div class="session-area">{#if view === 'chat' && room.session_id && client && connected}<div class="chat-pane"><LazyMount lazy={RoomConversationLazy} what="the conversation" variant="panel" props={{ origin: client.origin, credential: client.credential, sessionId: room.session_id, grantEpoch: canType && room.grant_epoch !== undefined ? room.grant_epoch : null }} /></div>{/if}
           <div class="terminal-pane" aria-hidden={view === 'chat' ? 'true' : undefined} inert={view === 'chat'}>{#if room.session_id && client && connected}<Terminal bind:this={termRef} sessionId={room.session_id} socketFactory={() => client!.terminal()} transformFrame={terminalFrame} onImagePaste={pasteImage} readOnly={!canType} readOnlyReason={self?.role === 'viewer' ? 'View only. The host decides who can control the terminal.' : `${driver?.name ?? 'The host'} currently controls the terminal.`} showToolbar={false} scrollback={PRIMARY_SCROLLBACK} preferDom />{/if}</div></div></main>
-        <aside class:mobile-hidden={tab !== 'conversation'}>
-          <details class="people" bind:open={peopleOpen}>
-            <summary>People</summary>
-            <RoomParticipants {room} {send} disabled={!connected} />
-          </details>
+        <DetailPane module="rooms" pane="people" title="People & chat" open={peopleOpen} onclose={() => (peopleOpen = false)} ontoggle={() => (peopleOpen = !peopleOpen)} testid="room-people">
+          <div class="people"><RoomParticipants {room} {send} disabled={!connected} /></div>
           <RoomChat messages={room.messages ?? []} {send} {connected} />
-        </aside>
+        </DetailPane>
       </div>
     {/if}
   </PageBody>
@@ -293,27 +291,15 @@
   .room-status { background: var(--surface); }
   .requests { display: inline-flex; align-items: center; gap: 8px; color: var(--warning); }
   .count { display: inline-block; margin-inline-start: 6px; min-width: 18px; padding-inline: 4px; border-radius: var(--radius-l); background: var(--warning-soft); color: var(--text); font-size: var(--fs-xs); } .error, .alert-text { color: var(--danger); }
-  .room-workspace { flex: 1; min-height: 0; display: grid; grid-template-columns: minmax(0, 1fr) minmax(280px, 340px); }
-  main { min-width: 0; min-height: 0; display: flex; flex-direction: column; } .terminal-pane { flex: 1; min-height: 160px; }
+  .room-workspace { flex: 1; min-height: 0; display: flex; }
+  main { flex: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column; } .terminal-pane { flex: 1; min-height: 160px; }
   /* Chat is drawn OVER the terminal: the terminal keeps its real size while
      hidden (display:none gave it zero width — it shrank its font to fit 80
      columns and came back tiny, and could resize the shared PTY grid). */
   .session-area { position: relative; flex: 1; min-height: 160px; display: flex; flex-direction: column; }
   .chat-pane { position: absolute; inset: 0; z-index: var(--z-sticky); display: flex; flex-direction: column; background: var(--bg); }
   .view-switch { display: flex; gap: 4px; padding: 6px 12px 0; } .view-switch [aria-pressed='true'] { background: var(--accent-soft); color: var(--accent-text); }
-  aside { min-width: 0; min-height: 0; overflow: hidden; border-inline-start: 1px solid var(--border); display: flex; flex-direction: column; background: var(--surface); }
-  .people { flex: 0 1 auto; min-height: 0; overflow: auto; max-height: 45%; border-bottom: 1px solid var(--border); }
-  .people > summary { display: none; }
-  .mobile-tabs { display: none; }
-  @media (max-width: 1024px) {
-    .room-workspace { grid-template-columns: minmax(0, 1fr); }
-    .mobile-tabs { display: flex; gap: 8px; padding: 8px 12px; border-bottom: 1px solid var(--border); }
-    .mobile-hidden { display: none; }
-    aside { border-inline-start: 0; }
-    .people { max-height: none; overflow: visible; flex: 0 0 auto; }
-    .people > summary { display: block; cursor: pointer; padding: 10px 16px; font-size: var(--fs-m); color: var(--text); }
-    .people :global(h2) { display: none; }
-    .people:not([open]) :global(section) { display: none; }
-    .join-form { padding: 16px; }
-  }
+  .people { flex: 0 1 auto; min-height: 0; overflow: auto; max-height: 45%; border-bottom: 1px solid var(--separator); }
+  .on { color: var(--accent-text); }
+  @media (max-width: 640px) { .join-form { padding: 16px; } }
 </style>

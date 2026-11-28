@@ -9,6 +9,10 @@
   import LoadState from '../../../lib/components/LoadState.svelte';
   import Modal from '../../../lib/components/Modal.svelte';
   import Tabs, { type TabItem } from '../../../lib/components/Tabs.svelte';
+  import ListPane from '../../../lib/components/side/ListPane.svelte';
+  import ListDetail from '../../../lib/components/side/ListDetail.svelte';
+  import { ctxMenu, type MenuItem } from '../../../lib/contextmenu.svelte';
+  import { rowMenu } from '../../../lib/rowMenu';
   import SimCreateDeviceForm from '../../../lib/simulators/SimCreateDeviceForm.svelte';
   import SimInstallStatusCard from '../../../lib/simulators/SimInstallStatusCard.svelte';
   import SimReadinessCards from '../../../lib/simulators/SimReadinessCards.svelte';
@@ -33,6 +37,8 @@
   let createModalOpen = $state(false);
   let setupOpen = $state(false);
   let urlInput = $state('');
+  // The device list is the list of a ListDetail nested in the tool window.
+  let phoneOpen = $state(false);
 
   $effect(() => {
     untrack(() => {
@@ -124,6 +130,16 @@
     void ideDevices.setAppearance(dev, next);
   }
 
+  // Boot / Shut down sit on the row; ⋯ (right-click, long-press) holds them and Restart.
+  function deviceMenu(dev: SimDevice): MenuItem[] {
+    const busy = Boolean(ideDevices.busyById[dev.id]);
+    if (dev.state !== 'booted') return [{ label: 'Boot', icon: 'play', disabled: busy || !dev.capabilities.boot, action: () => void ideDevices.boot(dev) }];
+    return [
+      { label: 'Restart', icon: 'refresh', disabled: busy || !dev.capabilities.boot, action: () => void ideDevices.restart(dev) },
+      { label: 'Shut Down', icon: 'stop', disabled: busy || !dev.capabilities.shutdown, action: () => void ideDevices.shutdown(dev) },
+    ];
+  }
+
   function stateTone(state: SimDevice['state']): 'ok' | 'info' | 'bad' | 'neutral' {
     if (state === 'booted') return 'ok';
     if (state === 'booting' || state === 'shutting_down') return 'info';
@@ -134,12 +150,6 @@
 
 <div class="sim-root" data-testid="ide-devices-panel">
   <header class="sim-bar">
-    <div class="segmented sim-plat-seg" role="group" aria-label="Filter devices by platform">
-      <button type="button" class:active={platformFilter === 'all'} aria-pressed={platformFilter === 'all'} onclick={() => (platformFilter = 'all')}>All</button>
-      <button type="button" class:active={platformFilter === 'ios'} aria-pressed={platformFilter === 'ios'} onclick={() => (platformFilter = 'ios')}>iOS</button>
-      <button type="button" class:active={platformFilter === 'android'} aria-pressed={platformFilter === 'android'} onclick={() => (platformFilter = 'android')}>Android</button>
-    </div>
-
     {#if ideDevices.status}
       <div class="sim-status-pills">
         <Badge
@@ -245,75 +255,68 @@
     {/if}
 
     <div class="sim-split">
-      <aside class="sim-list-col" aria-label="Simulators and emulators">
-        {#if filteredDevices.length === 0}
-          <EmptyState
-            icon="phone"
-            title="No simulators found"
-            body="Install an iOS Simulator runtime or create an Android AVD to boot and test apps directly from Otto IDE."
-            actionLabel="Refresh"
-            actionIcon="refresh"
-            actionKind="secondary"
-            onaction={() => void ideDevices.refresh(true)}
-          />
-        {:else}
-          {#each filteredDevices as dev (dev.id)}
-            {@const isSel = selected?.id === dev.id}
-            {@const busy = ideDevices.busyById[dev.id]}
-            <div class="sim-dev-row" class:is-selected={isSel} data-testid="ide-sim-device-row">
-              <button
-                type="button"
-                class="sim-dev-main"
-                aria-pressed={isSel}
-                onclick={() => ideDevices.selectDevice(dev.id)}
-              >
-                <Icon name="phone" size={13} />
-                <div class="sim-dev-meta">
-                  <div class="sim-dev-name ellipsis" dir="ltr" title={dev.name}>{dev.name}</div>
-                  <div class="sim-dev-sub ellipsis" dir="ltr">
-                    {dev.platform === 'ios' ? 'iOS' : 'Android'} {dev.os_version} · {dev.form_factor}
-                  </div>
-                </div>
-                <Badge tone={stateTone(dev.state)} dot={dev.state === 'booted'} live={dev.state === 'booting'} label={busy || dev.state} />
-              </button>
-              <div class="sim-dev-acts">
+      <!-- A list nested in the tool window (the page's list is the explorer).
+           A phone pushes: a tapped device shows its inspector with "‹ Devices"
+           in the page header (the one Back). -->
+      <ListDetail module="ide" pane="devices" name="Devices" open={phoneOpen} onback={() => (phoneOpen = false)}>
+      {#snippet list()}
+        <ListPane count={filteredDevices.length}>
+          {#snippet filterRow()}
+            <div class="segmented" role="group" aria-label="Filter devices by platform">
+              <button type="button" class:active={platformFilter === 'all'} aria-pressed={platformFilter === 'all'} onclick={() => (platformFilter = 'all')}>All</button>
+              <button type="button" class:active={platformFilter === 'ios'} aria-pressed={platformFilter === 'ios'} onclick={() => (platformFilter = 'ios')}>iOS</button>
+              <button type="button" class:active={platformFilter === 'android'} aria-pressed={platformFilter === 'android'} onclick={() => (platformFilter = 'android')}>Android</button>
+            </div>
+          {/snippet}
+          {#if filteredDevices.length === 0}
+            <EmptyState
+              icon="phone"
+              title="No simulators found"
+              body="Install an iOS Simulator runtime or create an Android AVD to boot and test apps directly from Otto IDE."
+              actionLabel="Refresh"
+              actionIcon="refresh"
+              actionKind="secondary"
+              onaction={() => void ideDevices.refresh(true)}
+            />
+          {:else}
+            {#each filteredDevices as dev (dev.id)}
+              {@const isSel = selected?.id === dev.id}
+              {@const busy = ideDevices.busyById[dev.id]}
+              <div class="side-row two-line" class:selected={isSel} data-testid="ide-sim-device-row">
+                <button
+                  type="button"
+                  class="side-row-main"
+                  data-side-row
+                  aria-current={isSel ? 'true' : undefined}
+                  title={dev.name}
+                  onclick={() => { ideDevices.selectDevice(dev.id); phoneOpen = true; }}
+                  oncontextmenu={(e) => { e.preventDefault(); ctxMenu.show(e, deviceMenu(dev)); }}
+                  use:rowMenu
+                >
+                  <Icon name="phone" size={14} />
+                  <span class="side-row-text">
+                    <span class="side-row-title" dir="ltr">{dev.name}</span>
+                    <span class="side-row-meta" dir="ltr">{dev.platform === 'ios' ? 'iOS' : 'Android'} {dev.os_version} · {dev.form_factor}</span>
+                  </span>
+                  <span class="side-row-trailing"><Badge tone={stateTone(dev.state)} dot={dev.state === 'booted'} live={dev.state === 'booting'} label={busy || dev.state} /></span>
+                </button>
                 {#if dev.state === 'booted'}
-                  <button
-                    type="button"
-                    class="icon-btn"
-                    aria-label={`Shut down ${dev.name}`}
-                    title={`Shut down ${dev.name}`}
-                    disabled={Boolean(busy) || !dev.capabilities.shutdown}
-                    onclick={() => void ideDevices.shutdown(dev)}
-                  >
-                    <Icon name="stop" size={12} />
-                  </button>
-                  <button
-                    type="button"
-                    class="icon-btn"
-                    aria-label={`Restart ${dev.name}`}
-                    title={`Restart ${dev.name}`}
-                    disabled={Boolean(busy) || !dev.capabilities.boot}
-                    onclick={() => void ideDevices.restart(dev)}
-                  >
-                    <Icon name="refresh" size={12} />
+                  <button type="button" class="icon-btn" aria-label={`Shut down ${dev.name}`} title={`Shut down ${dev.name}`} disabled={Boolean(busy) || !dev.capabilities.shutdown} onclick={() => void ideDevices.shutdown(dev)}>
+                    <Icon name="stop" size={14} />
                   </button>
                 {:else}
-                  <button
-                    type="button"
-                    class="btn small ghost"
-                    disabled={Boolean(busy) || !dev.capabilities.boot}
-                    onclick={() => void ideDevices.boot(dev)}
-                  >
-                    <Icon name="play" size={12} />
-                    Boot
+                  <button type="button" class="icon-btn" aria-label={`Boot ${dev.name}`} title={`Boot ${dev.name}`} disabled={Boolean(busy) || !dev.capabilities.boot} onclick={() => void ideDevices.boot(dev)}>
+                    <Icon name="play" size={14} />
                   </button>
                 {/if}
+                <button type="button" class="icon-btn side-row-more" tabindex="-1" aria-label={`${dev.name} actions`} title="More" onclick={(e) => ctxMenu.showAt(e.currentTarget as HTMLElement, deviceMenu(dev), { align: 'end' })}>
+                  <Icon name="more" size={14} />
+                </button>
               </div>
-            </div>
-          {/each}
-        {/if}
-      </aside>
+            {/each}
+          {/if}
+        </ListPane>
+      {/snippet}
 
       <section class="sim-detail-col" aria-label="Selected device inspector">
         {#if !selected}
@@ -375,6 +378,7 @@
           {/if}
         {/if}
       </section>
+      </ListDetail>
     </div>
   {/if}
 
@@ -406,7 +410,6 @@
 
 <style>
   .sim-root {
-    container-type: inline-size;
     display: flex; flex-direction: column; block-size: 100%; min-block-size: 0; min-inline-size: 0;
     background: var(--surface);
   }
@@ -420,42 +423,19 @@
   .sim-diag-wrap {
     padding: 8px; border-block-end: 1px solid var(--border); background: var(--surface-2); flex-shrink: 0;
   }
-  .sim-plat-seg, .sim-status-pills { display: inline-flex; align-items: center; gap: 6px; flex-shrink: 0; }
+  .sim-status-pills { display: inline-flex; align-items: center; gap: 6px; flex-shrink: 0; }
   .sim-bar-spacer { flex: 1; min-inline-size: 4px; }
   .sim-state-wrap { flex: 1; display: flex; align-items: center; justify-content: center; padding: 16px; }
   .sim-split { flex: 1; min-block-size: 0; min-inline-size: 0; display: flex; overflow: hidden; }
-  .sim-list-col {
-    inline-size: 280px; flex-shrink: 0; min-inline-size: 0; min-block-size: 0; overflow-y: auto;
-    border-inline-end: 1px solid var(--border); display: flex; flex-direction: column;
-  }
-  .sim-dev-row {
-    display: flex; align-items: center; gap: 4px; padding-inline-end: 6px;
-    border-block-end: 1px solid var(--separator);
-  }
-  .sim-dev-row:hover { background: var(--hover); }
-  .sim-dev-row.is-selected { background: var(--accent-soft); }
-  .sim-dev-main {
-    flex: 1; min-inline-size: 0; display: flex; align-items: center; gap: 8px;
-    padding: 6px 8px; border: 0; background: transparent; color: var(--text); text-align: start; cursor: pointer;
-  }
-  .sim-dev-meta { flex: 1; min-inline-size: 0; display: flex; flex-direction: column; gap: 1px; }
-  .sim-dev-name { font-size: var(--fs-s); font-weight: 500; }
-  .sim-dev-sub { font-size: var(--fs-xs); color: var(--text-dim); }
-  .sim-dev-acts { display: inline-flex; align-items: center; gap: 2px; flex-shrink: 0; }
   .sim-detail-col {
     flex: 1; min-inline-size: 0; min-block-size: 0; display: flex; flex-direction: column; overflow: hidden;
   }
   .sim-detail-empty { flex: 1; display: flex; align-items: center; justify-content: center; padding: 12px; }
-  .sim-detail-head { flex-shrink: 0; border-block-end: 1px solid var(--border); }
+  .sim-detail-head { flex-shrink: 0; display: flex; align-items: center; border-block-end: 1px solid var(--border); }
+  .sim-detail-head :global(.otabs) { flex: 1; min-inline-size: 0; }
   .sim-quick-controls { display: inline-flex; align-items: center; gap: 2px; }
 
-  @container (max-width: 640px) {
-    .sim-split { flex-direction: column; overflow-y: auto; }
-    .sim-list-col { inline-size: 100%; max-block-size: 170px; border-inline-end: 0; border-block-end: 1px solid var(--border); }
-    .sim-detail-col { min-block-size: 240px; }
-  }
   @media (pointer: coarse) {
-    .sim-dev-main { min-block-size: 44px; }
-    .sim-bar :global(.icon-btn), .sim-dev-acts :global(.icon-btn) { min-inline-size: 36px; min-block-size: 36px; }
+    .sim-bar :global(.icon-btn) { min-inline-size: 36px; min-block-size: 36px; }
   }
 </style>

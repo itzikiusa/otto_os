@@ -18,8 +18,9 @@
   import { insightsApi } from '../../lib/api/insights';
   import { toastError } from '../../lib/toastError';
   import { onTabKey } from '../../lib/tabKeys';
-  import PaneDivider from '../../lib/components/PaneDivider.svelte';
-  import { LIST_PANE, loadPaneWidth } from '../../lib/paneResizer';
+  import ListDetail from '../../lib/components/side/ListDetail.svelte';
+  import ListPane from '../../lib/components/side/ListPane.svelte';
+  import type { MenuItem } from '../../lib/contextmenu.svelte';
   import type { InsightReport } from '../../lib/api/types';
   import { scheduleCopy } from './scheduleStatus';
   import { toasts } from '../../lib/toast.svelte';
@@ -51,9 +52,6 @@
   // ---------------------------------------------------------------------------
   // Routing
   // ---------------------------------------------------------------------------
-
-  // The report list's width — drag / ←→ on the divider, remembered across visits.
-  let listW = $state(loadPaneWidth('insights.listW', LIST_PANE.default, LIST_PANE.min, LIST_PANE.max));
 
   const tab = $derived(router.parts[1] === 'health' ? 'health' : 'reports');
 
@@ -145,7 +143,7 @@
 
   const selectedIndex = $derived(s.selectedKey ? filtered.findIndex((r) => keyOf(r) === s.selectedKey) : -1);
   const shownRows = $derived(filtered.slice(0, Math.max(s.listShown, selectedIndex + 1)));
-  /** Phone: list/detail is push navigation — the detail replaces the list. */
+  /** Phone: list/detail is push navigation — the report is pushed ("‹ Reports"). */
   let phoneDetail = $state(false);
   $effect(() => { phoneDetail = routeKey !== null; });
 
@@ -167,8 +165,23 @@
 
   function select(r: InsightReport): void {
     s.selectedKey = keyOf(r);
-    if (viewport.isPhone) phoneDetail = true;
+    phoneDetail = true;
     if (routeKey) router.replace('insights');
+  }
+  function backToList(): void {
+    phoneDetail = false;
+    if (routeKey) router.replace('insights');
+  }
+
+  // The list pane's ⋯: on a phone, where the list is the page and the page's
+  // Run now / period select are not in the one header row, the runs live here.
+  function paneMenu(): MenuItem[] {
+    const busy = s.loading || !!s.loadError || s.running || !!s.pollRunId;
+    return [
+      ...(canRun ? RUN_OPTIONS.map((o): MenuItem => ({ label: `Run report: ${o.label}`, icon: 'play', disabled: busy, action: () => void runNow(o.value) })) : []),
+      ...(canRun ? [{ separator: true } as MenuItem] : []),
+      { label: 'Schedule settings', icon: 'gear', action: () => router.go('settings/insights') },
+    ];
   }
 
   $effect(() => {
@@ -395,6 +408,34 @@
   $effect(() => { if (s.runFailReason) announce(`${s.runFailKind === 'ended' ? 'The insights run didn’t publish a report.' : 'Couldn’t start the insights run.'} ${s.runFailReason}`, { assertive: true }); });
 </script>
 
+{#snippet reportView()}
+  <section class="report-view" aria-label="Report">
+    {#if selected}
+      {@const parsed = parsedByKey.get(keyOf(selected)) ?? parseSummaryCached(selected.summary)}
+      {@const prev = previousOf(selected)}
+      <ReportDetail
+        report={selected}
+        {parsed}
+        markdown={markdownOf(selected)}
+        summaryError={s.summaryError[keyOf(selected)] ?? null} summaryLoading={s.summaryReads.has(keyOf(selected))}
+        onretrysummary={() => s.retrySummary(selected)}
+        {kpis}
+        compareLabel={prev ? periodShort(prev) : null}
+        ledger={s.index.ledger}
+        {mode}
+        onmode={setMode}
+        onopenwindow={() => openWindow(selected)}
+        onexportmd={() => exportMd(selected)}
+        ondownloadhtml={() => downloadHtml(selected)}
+      />
+    {:else if routeKey}
+      <EmptyState variant="page" icon="gauge" title="This report isn’t on disk" body="It may have been removed from the insights folder. Open the list to pick another period.">
+        <button class="btn ghost" onclick={() => router.go('insights')}>Show all reports</button>
+      </EmptyState>
+    {/if}
+  </section>
+{/snippet}
+
 <div class="insights-page">
   <PageHeader
     title="Insights"
@@ -402,13 +443,6 @@
       ? 'What Otto can do right now — config, detected tools and stored accounts'
       : 'Action-first reports on how you work with your agents'}
   >
-    {#snippet leading()}
-      {#if viewport.isPhone && tab === 'reports' && phoneDetail && selected}
-        <button class="icon-btn" onclick={() => { phoneDetail = false; if (routeKey) router.replace('insights'); }} aria-label="Back to reports" title="Back to reports">
-          <Icon name="chevronLeft" size={16} />
-        </button>
-      {/if}
-    {/snippet}
     {#snippet tabs()}
       {#if !detailOnly}
         <div class="segmented" role="tablist" tabindex="-1" aria-label="Insights view" onkeydown={onTabKey}>
@@ -427,7 +461,7 @@
         <button class="icon-btn" data-overflow="-1" data-icon="gear" data-label="Schedule settings" onclick={() => router.go('settings/insights')} aria-label="Schedule settings" title="Schedule settings">
           <Icon name="gear" size={14} />
         </button>
-        {#if canRun && (s.reports.length > 0 || s.loading)}
+        {#if canRun && (s.reports.length > 0 || s.loading) && !viewport.navDrawer}
           <select class="input run-period" bind:value={s.runChoice} disabled={s.loading || !!s.loadError || s.running || !!s.pollRunId} aria-label="Period to report on" title="Period to report on">
             {#each RUN_OPTIONS as o (o.value)}<option value={o.value}>{o.label}</option>{/each}
           </select>
@@ -484,16 +518,10 @@
       {#if s.loadError && s.reports.length > 0}
         <LoadState what="insight reports" variant="compact" error={s.loadError} empty={true} onretry={load} />
       {/if}
-      {#if s.loading && s.reports.length === 0}
-        <div class="split">
-          <!-- One announcing skeleton (the list); the detail's is silent. -->
-          <aside class="list-pane"><Skeleton rows={6} height={84} label="insight reports" /></aside>
-          <section class="detail-pane" class:hide-phone={viewport.isPhone}><Skeleton rows={4} height={36} announce={false} /></section>
-        </div>
-      {:else if s.loadError && s.reports.length === 0}
+      {#if s.loadError && s.reports.length === 0 && !s.loading}
         <!-- Same inline error + Retry as every other module's failed load. -->
         <LoadState what="insight reports" variant="page" loading={s.loading} error={s.loadError} empty onretry={load} />
-      {:else if s.reports.length === 0}
+      {:else if s.reports.length === 0 && !s.loading}
         <EmptyState
           variant="page"
           icon="gauge"
@@ -505,95 +533,85 @@
         >
           <button class="btn ghost" onclick={() => router.go('settings/insights')}>{emptySchedule.offerTurnOn ? 'Turn on scheduled reports' : 'Schedule settings'}</button>
         </EmptyState>
+      {:else if detailOnly}
+        <!-- A pop-out window of one report: no list pane, just the report. -->
+        {@render reportView()}
       {:else}
-        <div class="split" class:detail-only={detailOnly}>
-          {#if !detailOnly}
-            <aside class="list-pane" class:hide-phone={viewport.isPhone && phoneDetail} aria-label="Reports" style="--list-pane-w:{listW}px">
-              <div class="filters" role="group" aria-label="Filter by period">
-                {#each visibleKinds as k (k.id)}
-                  <button class="filter-chip" class:active={s.filter === k.id} aria-pressed={s.filter === k.id} onclick={() => { s.setFilter(k.id); if (routeKey) router.replace('insights'); }}>
-                    {k.label} <span class="count">{counts[k.id] ?? 0}</span>
+        <ListDetail module="insights" name="Reports" open={phoneDetail && !!selected} onback={backToList} legacy={{ w: 'insights.listW' }}>
+          {#snippet list()}
+            <ListPane
+              count={s.reports.length}
+              primary={viewport.navDrawer && canRun && !s.pollRunId ? { icon: 'play', label: 'Run now', onclick: () => void runNow() } : undefined}
+              menu={paneMenu}
+              loading={s.loading && s.reports.length === 0}
+              testid="report-list"
+            >
+              {#snippet filterRow()}
+                <div class="filters" role="group" aria-label="Filter by period">
+                  {#each visibleKinds as k (k.id)}
+                    <button class="filter-chip" class:active={s.filter === k.id} aria-pressed={s.filter === k.id} onclick={() => { s.setFilter(k.id); if (routeKey) router.replace('insights'); }}>
+                      {k.label} <span class="count">{counts[k.id] ?? 0}</span>
+                    </button>
+                  {/each}
+                </div>
+              {/snippet}
+              {#each shownRows as r (keyOf(r))}
+                {@const p = parsedByKey.get(keyOf(r))}
+                {@const acts = actionSummary(r)}
+                {@const stats = rowStats(r)}
+                <div class="side-row rep" class:selected={keyOf(r) === s.selectedKey}>
+                  <button type="button" class="side-row-main rep-row" data-side-row aria-current={keyOf(r) === s.selectedKey ? 'true' : undefined} onclick={() => select(r)}>
+                    <span class="rep-body">
+                      <span class="row-top">
+                        <span class="chip">{kindLabel(r.kind)}</span>
+                        <span class="row-date">{periodShort(r)}</span>
+                        <span class="grow"></span>
+                        {#if r.created_at}<span class="dim row-rel" title={new Date(r.created_at).toLocaleString()}>{rel(r.created_at)}</span>{/if}
+                      </span>
+                      {#if p?.headline}
+                        <span class="row-headline">{p.headline}</span>
+                      {:else if !r.summary.trim() && !r.html_path}
+                        <span class="row-headline dim">{Date.now() - Date.parse(r.created_at) > 2 * 3600_000 ? 'Files missing — no HTML report was saved.' : 'No summary yet — the run may still be writing it.'}</span>
+                      {/if}
+                      {#if stats.length > 0}
+                        <span class="row-stats">
+                          {#each stats as st (st.key)}
+                            <span class="stat {st.d?.tone ?? 'neutral'}" title={statTitle(st.key, st.value)}>
+                              {statText(st.key, st.value)}
+                              {#if st.d && st.d.direction !== 'flat'}<Icon name={st.d.direction === 'up' ? 'arrowUp' : 'arrowDown'} size={12} />{/if}
+                            </span>
+                          {/each}
+                        </span>
+                      {/if}
+                      {#if acts.total > 0}
+                        <span class="row-actions">
+                          <span class="dim">{plural(acts.total, 'action')}</span>
+                          {#if acts.regressed}<StatusBadge variant="text" tone="warning" label="{acts.regressed} regressed" />{/if}
+                          {#if acts.improved}<StatusBadge variant="text" tone="success" label="{acts.improved} improved" />{/if}
+                          {#if acts.fresh}<StatusBadge variant="text" tone="info" label="{acts.fresh} new" />{/if}
+                        </span>
+                      {/if}
+                    </span>
                   </button>
-                {/each}
-              </div>
-              <div class="list" data-testid="report-list">
-                {#each shownRows as r (keyOf(r))}
-                  {@const p = parsedByKey.get(keyOf(r))}
-                  {@const acts = actionSummary(r)}
-                  {@const stats = rowStats(r)}
-                  <button class="rep-row" class:active={keyOf(r) === s.selectedKey} aria-current={keyOf(r) === s.selectedKey ? 'true' : undefined} onclick={() => select(r)}>
-                    <div class="row-top">
-                      <span class="chip">{kindLabel(r.kind)}</span>
-                      <span class="row-date">{periodShort(r)}</span>
-                      <span class="grow"></span>
-                      {#if r.created_at}<span class="dim row-rel" title={new Date(r.created_at).toLocaleString()}>{rel(r.created_at)}</span>{/if}
-                    </div>
-                    {#if p?.headline}
-                      <div class="row-headline">{p.headline}</div>
-                    {:else if !r.summary.trim() && !r.html_path}
-                      <div class="row-headline dim">{Date.now() - Date.parse(r.created_at) > 2 * 3600_000 ? 'Files missing — no HTML report was saved.' : 'No summary yet — the run may still be writing it.'}</div>
-                    {/if}
-                    {#if stats.length > 0}
-                      <div class="row-stats">
-                        {#each stats as st (st.key)}
-                          <span class="stat {st.d?.tone ?? 'neutral'}" title={statTitle(st.key, st.value)}>
-                            {statText(st.key, st.value)}
-                            {#if st.d && st.d.direction !== 'flat'}<Icon name={st.d.direction === 'up' ? 'arrowUp' : 'arrowDown'} size={12} />{/if}
-                          </span>
-                        {/each}
-                      </div>
-                    {/if}
-                    {#if acts.total > 0}
-                      <div class="row-actions">
-                        <span class="dim">{plural(acts.total, 'action')}</span>
-                        {#if acts.regressed}<StatusBadge variant="text" tone="warning" label="{acts.regressed} regressed" />{/if}
-                        {#if acts.improved}<StatusBadge variant="text" tone="success" label="{acts.improved} improved" />{/if}
-                        {#if acts.fresh}<StatusBadge variant="text" tone="info" label="{acts.fresh} new" />{/if}
-                      </div>
-                    {/if}
-                  </button>
-                {:else}
-                  <p class="dim list-empty">No {s.filter === 'adhoc' ? 'ad-hoc' : s.filter} reports. <button class="btn small ghost" onclick={() => s.setFilter('all')}>Show all</button></p>
-                {/each}
-                {#if s.olderError}
-                  <LoadState what="older reports" variant="compact" loading={s.loadingMore} error={s.olderError} empty onretry={loadOlderReports} />
-                {:else if filtered.length > shownRows.length || s.hasMoreReports}
-                  <button class="btn small ghost more-reports" onclick={loadOlderReports} disabled={s.loadingMore}>
-                    {s.loadingMore ? 'Loading older reports…' : 'Show older reports'}
-                  </button>
-                {/if}
-              </div>
-            </aside>
-            {#if !viewport.isPhone}
-              <PaneDivider bind:width={listW} storageKey="insights.listW" label="Resize the reports list" />
-            {/if}
+                </div>
+              {:else}
+                <p class="dim list-empty">No {s.filter === 'adhoc' ? 'ad-hoc' : s.filter} reports. <button class="btn small ghost" onclick={() => s.setFilter('all')}>Show all</button></p>
+              {/each}
+              {#if s.olderError}
+                <LoadState what="older reports" variant="compact" loading={s.loadingMore} error={s.olderError} empty onretry={loadOlderReports} />
+              {:else if filtered.length > shownRows.length || s.hasMoreReports}
+                <button class="btn small ghost more-reports" onclick={loadOlderReports} disabled={s.loadingMore}>
+                  {s.loadingMore ? 'Loading older reports…' : 'Show older reports'}
+                </button>
+              {/if}
+            </ListPane>
+          {/snippet}
+          {#if s.loading && s.reports.length === 0}
+            <div class="report-view"><Skeleton rows={4} height={36} announce={false} /></div>
+          {:else}
+            {@render reportView()}
           {/if}
-          <section class="detail-pane" class:hide-phone={viewport.isPhone && !phoneDetail && !detailOnly}>
-            {#if selected}
-              {@const parsed = parsedByKey.get(keyOf(selected)) ?? parseSummaryCached(selected.summary)}
-              {@const prev = previousOf(selected)}
-              <ReportDetail
-                report={selected}
-                {parsed}
-                markdown={markdownOf(selected)}
-                summaryError={s.summaryError[keyOf(selected)] ?? null} summaryLoading={s.summaryReads.has(keyOf(selected))}
-                onretrysummary={() => s.retrySummary(selected)}
-                {kpis}
-                compareLabel={prev ? periodShort(prev) : null}
-                ledger={s.index.ledger}
-                {mode}
-                onmode={setMode}
-                onopenwindow={() => openWindow(selected)}
-                onexportmd={() => exportMd(selected)}
-                ondownloadhtml={() => downloadHtml(selected)}
-              />
-            {:else if routeKey}
-              <EmptyState variant="page" icon="gauge" title="This report isn’t on disk" body="It may have been removed from the insights folder. Open the list to pick another period.">
-                <button class="btn ghost" onclick={() => router.go('insights')}>Show all reports</button>
-              </EmptyState>
-            {/if}
-          </section>
-        </div>
+        </ListDetail>
       {/if}
     </PageBody>
   {/if}
@@ -655,20 +673,7 @@
     }
   }
 
-  .split {
-    flex: 1;
-    min-height: 0;
-    display: flex;
-  }
-  .list-pane {
-    width: var(--list-pane-w, 280px);
-    flex: none;
-    display: flex;
-    flex-direction: column;
-    min-height: 0;
-    background: var(--surface);
-  }
-  .detail-pane {
+  .report-view {
     flex: 1;
     min-width: 0;
     min-height: 0;
@@ -679,8 +684,6 @@
     display: flex;
     flex-wrap: wrap;
     gap: 4px;
-    padding: 10px 12px;
-    border-bottom: 1px solid var(--border);
   }
   .filter-chip {
     display: inline-flex;
@@ -714,40 +717,23 @@
     .filter-chip { min-height: var(--hit-min); height: auto; }
   }
 
-  .list {
-    flex: 1;
-    min-height: 0;
-    overflow-y: auto;
-    padding: 6px;
-    display: flex;
-    flex-direction: column;
-    gap: 2px;
-  }
-  .rep-row {
+  /* A rich report row on the shared row look (.side-row): ~96 px, so the
+     list paints only what is on screen. */
+  .rep {
     content-visibility: auto;
     contain-intrinsic-size: auto 96px;
+  }
+  .rep-body {
+    flex: 1;
+    min-width: 0;
     display: flex;
     flex-direction: column;
-    align-items: stretch;
-    width: 100%;
     gap: 4px;
-    padding: 8px 10px;
-    border: 1px solid transparent;
-    border-radius: var(--radius-m);
-    background: transparent;
-    color: var(--text);
-    text-align: start;
-    cursor: pointer;
-    font: inherit;
+    padding-block: 8px;
   }
-  .rep-row:hover {
-    background: var(--hover);
-  }
-  .rep-row.active {
-    background: var(--accent-soft);
-    border-color: var(--accent-soft-strong);
-  }
-  .row-top {
+  .row-top,
+  .row-stats,
+  .row-actions {
     display: flex;
     align-items: center;
     gap: 8px;
@@ -761,6 +747,7 @@
   }
   .row-headline {
     font-size: var(--fs-s);
+    font-weight: 400;
     line-height: 1.45;
     color: var(--text);
     display: -webkit-box;
@@ -773,7 +760,6 @@
     color: var(--text-dim);
   }
   .row-stats {
-    display: flex;
     gap: 10px;
     flex-wrap: wrap;
     font-size: var(--fs-xs);
@@ -792,27 +778,15 @@
     color: var(--warning);
   }
   .row-actions {
-    display: flex;
-    align-items: center;
-    gap: 8px;
     flex-wrap: wrap;
     font-size: var(--fs-xs);
   }
   .more-reports {
-    align-self: center;
-    margin: 6px 0;
+    display: block;
+    margin: 6px auto;
   }
   .list-empty {
     padding: 12px;
     font-size: var(--fs-s);
-  }
-
-  @media (max-width: 640px) {
-    .list-pane {
-      width: 100%;
-    }
-    .hide-phone {
-      display: none;
-    }
   }
 </style>

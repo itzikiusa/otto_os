@@ -1670,6 +1670,7 @@ pub fn route_class(method: &Method, matched_path: &str) -> Option<RouteClass> {
                     | "/ide/debug/sessions"
                     | "/ide/spring/devtools-restart"
                     | "/ide/notebooks/execute"
+                    | "/ide/notebooks/input"
                     | "/ide/notebooks/interrupt"
                     | "/ide/notebooks/restart"
                     | "/ide/notebooks/shutdown"
@@ -1689,9 +1690,11 @@ pub fn route_class(method: &Method, matched_path: &str) -> Option<RouteClass> {
                     | "/workflow-runs/{id}/approve"
                     | "/database-changes/{id}/approve"
                     | "/runtime-sessions/{id}/requests/{request_id}"
-                    | "/ide/projects/{id}/security/dast"
-                    | "/ide/projects/{id}/security/dast/run"
             )
+            // Every DAST write — confirm a target, start an active scan, allow
+            // scheduled active checks — is a person's own decision, by prefix
+            // so a future DAST route cannot be added without it.
+            || p.starts_with("/ide/projects/{id}/security/dast")
             || p.starts_with("/state/git/")
             // MCP control-plane registry (S11-301): a server row names the
             // command the daemon spawns unsandboxed; a tool row / allowlist

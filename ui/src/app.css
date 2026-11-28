@@ -486,6 +486,320 @@ button.chip:focus-visible {
   white-space: nowrap;
 }
 
+/* ---------- Side surfaces (docs/design/guidelines/layout.md "Side surfaces") ----------
+   The one look of every list pane, section and row (lib/components/side/:
+   ListPane, SideSection, SideRow). Trees and virtual lists that draw their own
+   rows use these classes too: .side-row (+ .selected / .two-line), the
+   --side-depth indent, .side-row-main as the focusable row ([data-side-row]
+   for use:listNav). One text edge: 16 px in (8 px inset + 8 px padding). */
+.side-list {
+  display: flex;
+  flex-direction: column;
+  block-size: 100%;
+  min-width: 0;
+  min-height: 0;
+  background: var(--bg-sidebar);
+  border-inline-end: 1px solid var(--separator);
+}
+.side-pane-head {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  block-size: 36px;
+  padding-inline: 16px 6px;
+}
+.side-pane-head.views,
+.side-pane-head.selecting {
+  padding-inline-start: 8px;
+  gap: 4px;
+}
+.sph-title {
+  margin: 0;
+  min-width: 0;
+  font-size: var(--fs-m);
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.sph-count {
+  margin-inline-start: 6px;
+  font-size: var(--fs-xs);
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+}
+.sph-grow {
+  flex: 1;
+}
+.sph-views {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.side-pane-head .sph-primary {
+  color: var(--text);
+}
+.side-pane-search,
+.side-pane-filters {
+  flex: none;
+  padding-block: 0 8px;
+  padding-inline: 8px;
+}
+/* The ONE list-pane search field (design.md §7.15): a bordered box with the
+   search glyph, a bare input and at most one clear (plus an options) control.
+   Put it in ListPane's `searchRow` (or a tree's own search row). */
+.side-search {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  block-size: 28px;
+  padding-inline: 8px 2px;
+  border: 1px solid var(--control-border);
+  border-radius: var(--radius-s);
+  background: var(--surface);
+  color: var(--text-dim);
+}
+.side-search:focus-within {
+  color: var(--text);
+  border-color: var(--accent-text);
+}
+.side-search input {
+  flex: 1;
+  min-width: 0;
+  block-size: 100%;
+  border: 0;
+  padding: 0;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: var(--fs-m);
+  outline: none;
+}
+.side-search input::placeholder {
+  color: var(--text-dim);
+}
+/* One clear button: ours, not WebKit's as well. */
+.side-search input::-webkit-search-cancel-button {
+  display: none;
+}
+/* Touch: finger-sized, with room for a 44 px clear button. */
+@media (pointer: coarse) {
+  .side-search {
+    block-size: 44px;
+    padding-inline-end: 0;
+  }
+}
+/* A phone list page: the header is the page's, so the first row needs its own top edge. */
+.side-pane-search:first-child,
+.side-pane-filters:first-child {
+  padding-block-start: 8px;
+}
+.side-pane-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding-block: 0 8px;
+  padding-inline: 8px;
+}
+.side-pane-foot {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-block-size: 32px;
+  padding-inline: 8px;
+  border-block-start: 1px solid var(--separator);
+  font-size: var(--fs-xs);
+  color: var(--text-dim);
+}
+/* A footer says something or is not shown (decision 13): one with no element
+   in it (a meter with no numbers yet) takes no row. */
+.side-list .side-pane-foot:not(:has(*)) {
+  display: none;
+}
+.side-section + .side-section {
+  margin-block-start: 8px;
+}
+.side-section-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  block-size: 22px;
+  padding-inline: 8px 6px;
+  color: var(--text-dim);
+}
+.side-section-head .ssh-btn {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  block-size: 100%;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-s);
+  background: none;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+.side-section-head .ssh-btn:hover {
+  color: var(--text);
+}
+.side-section-head .ssh-btn:focus-visible {
+  outline-offset: -2px;
+}
+.side-section-head .ssh-btn > svg {
+  opacity: 0;
+}
+.side-section-head.folded .ssh-btn > svg,
+.side-section-head .ssh-btn:is(:hover, :focus-visible) > svg {
+  opacity: 1;
+}
+.ssh-title {
+  margin: 0;
+  margin-inline-end: auto;
+  min-width: 0;
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.ssh-count {
+  font-size: var(--fs-xs);
+  font-variant-numeric: tabular-nums;
+}
+.side-row {
+  position: relative;
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  border-radius: var(--radius-s);
+  color: var(--text);
+}
+.side-row:hover {
+  background: var(--hover);
+}
+.side-row.selected {
+  background: var(--accent-soft);
+}
+.side-row-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-block-size: 30px;
+  padding-block: 0;
+  padding-inline: calc(8px + var(--side-depth, 0) * 12px) 6px;
+  border: 0;
+  border-radius: var(--radius-s);
+  background: none;
+  color: inherit;
+  font: inherit;
+  font-size: var(--fs-m);
+  text-align: start;
+  cursor: pointer;
+}
+.side-row.two-line .side-row-main {
+  min-block-size: 44px;
+  padding-block: 4px;
+}
+/* Keyboard focus: an inset ring, no fill (a scrolling list never clips it). */
+.side-row-main:focus-visible {
+  outline-offset: -2px;
+}
+.side-row-main > svg {
+  flex: none;
+  color: var(--text-dim);
+}
+.side-row.selected .side-row-main > svg {
+  color: var(--text);
+}
+.side-twisty {
+  position: absolute;
+  inset-inline-start: calc(var(--side-depth, 0) * 12px - 4px);
+  z-index: 1;
+  display: grid;
+  place-items: center;
+  inline-size: 12px;
+  block-size: 100%;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--text-dim);
+  cursor: pointer;
+}
+.side-row:has(.side-twisty) .side-row-main {
+  padding-inline-start: calc(12px + var(--side-depth, 0) * 12px);
+}
+.side-row-text {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+.side-row-title,
+.side-row-meta {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.side-row.two-line .side-row-title {
+  font-weight: 500;
+}
+.side-row.selected .side-row-title {
+  font-weight: 600;
+}
+.side-row-meta {
+  font-size: var(--fs-s);
+  color: var(--text-dim);
+}
+.side-row-trailing {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--fs-xs);
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+}
+.side-row-more {
+  display: none;
+  flex: none;
+  margin-inline-end: 4px;
+}
+.side-row:is(:hover, :focus-within) .side-row-more {
+  display: inline-flex;
+}
+/* Touch: finger-sized rows; actions live in the long-press menu. */
+@media (pointer: coarse) {
+  .side-row-main {
+    min-block-size: 40px;
+  }
+  .side-row.two-line .side-row-main {
+    min-block-size: 52px;
+  }
+  .side-section-head {
+    block-size: 28px;
+  }
+  .side-pane-head .icon-btn {
+    inline-size: 36px;
+    block-size: 36px;
+  }
+  .side-row:is(:hover, :focus-within) .side-row-more {
+    display: none;
+  }
+}
+
 /* Secondary row actions (close ✕, ⋯, delete, drag grip) that stay out of the
    way until the row is pointed at. Never hover-ONLY: the control shows when
    its parent (or a `.reveal-host` ancestor) is hovered or holds focus, when

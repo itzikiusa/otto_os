@@ -1493,8 +1493,13 @@ int main() {
         "expected mutated counter=99 and sum=102 in C++ output, got: {out}"
     );
 
-    // 2. C++ exception breakpoint (`break_on_exceptions: true` catches `throw std::runtime_error`)
-    let throw_cpp = ws.join("src/throw_demo.cpp");
+    // 2. C++ exception breakpoint (`break_on_exceptions: true` catches `throw std::runtime_error`).
+    // A standalone file outside the CMake project: a project source that no
+    // executable target lists is refused (BUG-10).
+    let throw_dir = tmp.path().join("cpp-throw");
+    std::fs::create_dir_all(&throw_dir).unwrap();
+    let throw_dir_str = throw_dir.to_string_lossy().into_owned();
+    let throw_cpp = throw_dir.join("throw_demo.cpp");
     std::fs::write(
         &throw_cpp,
         "#include <stdexcept>\nint main() {\n    throw std::runtime_error(\"deliberate cpp boom\");\n}\n",
@@ -1506,9 +1511,9 @@ int main() {
         Method::POST,
         "/ide/debug/sessions",
         Some(json!({
-            "target": { "kind": "local", "root": ws_str },
+            "target": { "kind": "local", "root": throw_dir_str },
             "language": "cpp",
-            "launch": { "program": throw_str, "cwd": ws_str },
+            "launch": { "program": throw_str, "cwd": throw_dir_str },
             "breakpoints": [],
             "break_on_exceptions": true,
         })),

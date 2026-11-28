@@ -749,8 +749,18 @@ fn discover_dotnet(
                 Some("Assembly-CSharp.csproj".into()),
             ));
         }
-        // Note: Unity Editor uses the Mono Soft Debugger protocol (not DAP);
-        // direct DAP attach requires a dedicated Unity DAP plugin.
+        // Debug-only: DotRush's monodbg bridges DAP to the Editor's Mono Soft
+        // Debugger (dap/adapters_unity.rs); Run refuses this target.
+        out.push(make_auto_config(
+            root_badge,
+            IdeRunnerKind::UnityAttach,
+            "unity-editor-attach",
+            "Attach to Unity Editor".into(),
+            None,
+            Vec::new(),
+            cwd.clone(),
+            Some("unity://editor".into()),
+        ));
         return;
     }
 

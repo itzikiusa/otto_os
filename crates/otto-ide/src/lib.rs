@@ -51,6 +51,17 @@ use otto_state::DbPool;
 pub use lsp_service::extract_go_file_build_tags;
 pub use types::IdeSshSpec;
 
+/// A notification-center notice from unattended IDE work (scheduled active
+/// security checks); its click opens the IDE.
+pub struct IdeNotice {
+    /// De-dupe and streak key.
+    pub key: String,
+    pub severity: otto_core::domain::NoticeSeverity,
+    pub title: String,
+    pub body: String,
+    pub user_id: String,
+}
+
 /// Host context required by `otto-ide`'s routers and services.
 pub trait IdeCtx: Clone + Send + Sync + 'static {
     fn ide(&self) -> &Arc<IdeEngine>;
@@ -61,6 +72,13 @@ pub trait IdeCtx: Clone + Send + Sync + 'static {
     fn security_scan_busy(&self) -> BoxFuture<'_, bool> {
         Box::pin(async { false })
     }
+    /// Posts a notification-center notice about unattended work; with
+    /// `streak`, only the first failure of a streak on `notice.key` posts.
+    fn post_notice(&self, _notice: IdeNotice, _streak: bool) -> BoxFuture<'_, ()> {
+        Box::pin(async {})
+    }
+    /// Ends the failure streak on `key`: the next failure notifies again.
+    fn end_notice_streak(&self, _key: &str) {}
     /// The daemon event bus; `None` (contexts without one) disables the live
     /// project-tree watcher ([`fs_watch`]).
     fn events(&self) -> Option<&tokio::sync::broadcast::Sender<otto_core::event::Event>> {

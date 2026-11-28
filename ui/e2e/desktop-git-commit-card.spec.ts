@@ -68,23 +68,23 @@ test('dirty repo: History on the WIP row → Commit and push → Create pull req
   // Someone else opens the PR (an agent, the forge) — no reload: back on
   // History the card reads it again and offers it (it used to keep "Create").
   open = [{ number: 42, title: 'Ship the commit card', state: 'open', source_branch: repo.branch, target_branch: 'main', url: 'https://github.com/acme/x/pull/42' }];
-  await page.locator('.rv-tab', { hasText: 'Pull requests' }).click();
-  await page.locator('.rv-tab', { hasText: 'History' }).click();
+  await page.locator('.rv-tabs [role="tab"]', { hasText: 'Pull requests' }).click();
+  await page.locator('.rv-tabs [role="tab"]', { hasText: 'History' }).click();
   await expect(next).toHaveAttribute('data-kind', 'pr', { timeout: 15_000 });
   // Merged meanwhile: no open PR any more, the card follows.
   open = [];
-  await page.locator('.rv-tab', { hasText: 'Pull requests' }).click();
-  await page.locator('.rv-tab', { hasText: 'History' }).click();
+  await page.locator('.rv-tabs [role="tab"]', { hasText: 'Pull requests' }).click();
+  await page.locator('.rv-tabs [role="tab"]', { hasText: 'History' }).click();
   await expect(next).toHaveAttribute('data-kind', 'create-pr', { timeout: 15_000 });
   // With a PR open for the branch the primary opens it (Pull requests view).
   // A reload lands on History's checked-out commit with that step.
   open = [{ number: 42, title: 'Ship the commit card', state: 'open', source_branch: repo.branch, target_branch: 'main', url: 'https://github.com/acme/x/pull/42' }];
   await page.reload();
-  await expect(page.locator('.rv-tab[aria-selected="true"]')).toContainText('History', { timeout: 15_000 });
+  await expect(page.locator('.rv-tabs [role="tab"][aria-selected="true"]')).toContainText('History', { timeout: 15_000 });
   await expect(next).toHaveAttribute('data-kind', 'pr', { timeout: 15_000 });
   await expect(next).toHaveText(/Open pull request/);
   await next.click();
-  await expect(page.locator('.rv-tab[aria-selected="true"]')).toContainText('Pull requests');
+  await expect(page.locator('.rv-tabs [role="tab"][aria-selected="true"]')).toContainText('Pull requests');
 });
 
 // A clean default branch has no pull-request step: History must not mount
@@ -119,34 +119,25 @@ test('unpublished branch: after Commit only, Publish is the primary', async ({ p
   await expect(page.locator('.git-header .ph-actions').getByRole('button', { name: /^Publish/ })).toHaveClass(/primary/, { timeout: 15_000 });
 });
 
-// 1100 px with the right panel open: the diff's layout switch wraps into
-// view, and the branches stay one click away while the refs column steps aside.
-test('narrow pane: the diff toolbar fits and the branches peek in', async ({ page }, info) => {
+// 1100 px with the right panel open: the Detail pane is a sheet over the
+// graph, the diff's layout switch wraps into view in it, and the branches
+// keep their list pane.
+test('narrow pane: the diff toolbar fits in the Detail sheet and the branches stay listed', async ({ page }, info) => {
   test.skip(info.project.name !== 'desktop-browser', 'desktop-browser project only');
   await page.addInitScript(() => { localStorage.setItem('otto_right_open', '1'); localStorage.setItem('otto_right_tab', 'git'); localStorage.setItem('otto_right_width', '300'); });
   await page.setViewportSize({ width: 1100, height: 900 });
   const r = await seedCardRepo('e2e-card-narrow');
   await stubForge(page);
   await openPage(page, 'git/' + r.id);
-  await expect(page.locator('.wip-row')).toHaveAttribute('aria-pressed', 'true', { timeout: 20_000 });
+  // No room beside the graph: History waits for the WIP row's click.
+  await page.locator('.wip-row').click();
+  const sheet = page.getByRole('dialog', { name: 'Changes' });
+  await expect(sheet).toBeVisible();
+  await sheet.locator('.wp-name').first().click();
   await expect(page.locator('.wp-diff')).toBeVisible({ timeout: 15_000 });
   await expectFullyInViewport(page, page.locator('.wp-diff').getByRole('button', { name: 'Side by side' }), 'diff layout switch');
-  await expect(page.locator('.refs-panel')).toBeHidden();
-  // The branch button sits clear of the column heading and, once open, of the
-  // refs list's first heading (it overlapped "BRANCH / TAG" and "LOCAL").
-  const peek = page.getByRole('button', { name: 'Branches & tags' });
-  const textBox = (sel: string, text: string) => page.evaluate(([s, t]) => {
-    const el = [...document.querySelectorAll(s)].find((e) => e.textContent?.trim().startsWith(t))!;
-    const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
-    let n: Node | null; while ((n = walker.nextNode()) && !n.textContent?.trim()) { /* first text */ }
-    const r = document.createRange(); r.selectNodeContents(n!); const b = r.getBoundingClientRect();
-    return { x: b.x, y: b.y, width: b.width, height: b.height };
-  }, [sel, text] as const);
-  const apart = (a: { x: number; y: number; width: number; height: number }, b: typeof a) =>
-    a.x + a.width <= b.x || b.x + b.width <= a.x || a.y + a.height <= b.y || b.y + b.height <= a.y;
-  expect(apart((await peek.boundingBox())!, await textBox('.gh-branch', 'BRANCH')), 'peek vs BRANCH / TAG').toBe(true);
-  await peek.click();
+  await sheet.getByRole('button', { name: 'Close Changes' }).click();
+  await expect(sheet).toHaveCount(0);
   await expect(page.locator('.refs-panel')).toBeVisible();
-  expect(apart((await peek.boundingBox())!, await textBox('.refs-panel *', 'LOCAL')), 'peek vs LOCAL').toBe(true);
   await expect(page.locator('.refs-panel')).toContainText(r.branch.split('/').pop()!);
 });

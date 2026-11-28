@@ -144,6 +144,8 @@ pub enum EvictReason {
     ServerCap,
     /// The project's Go build tags changed; reattach for a server with the new tags.
     BuildTagsChanged,
+    /// The project's selected toolchain changed (C/C++: which clangd runs).
+    ToolchainChanged,
     /// The user switched workspace roots (only servers with no socket).
     WorkspaceSwitched,
     /// Over the RSS budget (only servers with no socket).
@@ -157,6 +159,7 @@ impl EvictReason {
         match self {
             Self::ServerCap => "server_cap",
             Self::BuildTagsChanged => "build_tags_changed",
+            Self::ToolchainChanged => "toolchain_changed",
             Self::WorkspaceSwitched => "workspace_switched",
             Self::MemoryBudget => "memory_budget",
             Self::Shutdown => "shutdown",

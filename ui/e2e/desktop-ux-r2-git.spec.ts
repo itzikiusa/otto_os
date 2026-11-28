@@ -8,6 +8,12 @@ import { expectFullyInViewport, expectNoHorizontalOverflow } from './helpers';
 // Route fixtures must bypass the mobile service worker.
 test.use({ serviceWorkers: 'block' });
 
+/** The PR's details card is the workspace's Detail pane: inline when there is room, else a sheet behind ⓘ. */
+async function openPrDetails(page: Page): Promise<void> {
+  if (!(await page.getByTestId('pr-details-card').isVisible())) await page.getByTestId('pr-details-toggle').click();
+  await expect(page.getByTestId('pr-details-card')).toBeVisible();
+}
+
 // Real isolated repository; only errors, races and forge responses are stubbed.
 let repoId = '';
 let workspaceId = '';
@@ -100,7 +106,7 @@ test('Focus quick view ignores a late issue and closes when account changes', as
   await page.waitForTimeout(150);
   await expect(page.locator('.fx-quick-summary')).toContainText('AUDIT-2');
   await page.getByTitle('Issue-tracker account', { exact: true }).selectOption('account-b');
-  await expect(page.locator('.fx-quick')).toHaveCount(0);
+  await expect(page.getByTestId('fx-quick')).toHaveCount(0);
 });
 test('phone Focus quick view traps focus, closes with Escape and restores its trigger', async ({ page }) => {
   await focusFixtures(page);
@@ -108,12 +114,13 @@ test('phone Focus quick view traps focus, closes with Escape and restores its tr
   await openRepo(page, 'focus');
   const trigger = page.getByTitle('Quick view AUDIT-1', { exact: true });
   await trigger.click();
-  const panel = page.locator('.fx-quick');
+  // A phone shows the Detail pane as a full-width sheet (a modal dialog).
+  const panel = page.getByRole('dialog', { name: 'AUDIT-1' });
   await expect.poll(() => panel.evaluate(el => el.contains(document.activeElement))).toBe(true);
   await expect(panel).toHaveAttribute('aria-modal', 'true');
   await page.keyboard.press('?');
   await expect(page.getByRole('dialog')).toHaveCount(1);
-  await panel.getByRole('button', { name: 'Close issue quick view' }).focus();
+  await panel.getByRole('button', { name: 'Close AUDIT-1' }).focus();
   await page.keyboard.press('Tab');
   await expect.poll(() => panel.evaluate(el => el.contains(document.activeElement))).toBe(true);
   await page.keyboard.press('Escape');
@@ -140,19 +147,22 @@ test('stash, stale worktree and submodule actions are accessible by keyboard and
   await page.route('**/api/v1/repos/*/worktrees', r => r.fulfill({ json: [{ path: '/tmp/stale-audit-tree', sha: firstSha, branch: 'stale-audit', is_main: false, locked: false, prunable: true, dirty: false, dirty_known: true }] }));
   await page.route('**/api/v1/repos/*/submodules', r => r.fulfill({ json: [{ path: 'vendor/audit-submodule', sha: firstSha, url: 'https://example.test/submodule', state: 'uninitialized' }] }));
   await openRepo(page);
-  for (const section of ['STASHES', 'WORKTREES', 'SUBMODULES']) await page.locator('.ref-header').filter({ hasText: section }).click();
-  for (const name of ['Actions for stash stash@{0}', 'Actions for worktree /tmp/stale-audit-tree', 'Actions for submodule vendor/audit-submodule']) {
-    const button = page.getByRole('button', { name, exact: true });
-    await expect(button).toBeVisible();
-    await button.focus();
-    await page.keyboard.press('Enter');
+  const head = (section: string) => page.locator('.refs-panel .side-section-head').filter({ hasText: section }).getByRole('button').first();
+  for (const section of ['Stashes', 'Worktrees', 'Submodules']) await head(section).click();
+  // Each row's menu: ⇧F10 on the focused row (the submodule row IS its menu button).
+  for (const row of [page.locator('.stash-row').first(), page.locator('.stash-row', { hasText: 'stale-audit' }), page.getByRole('treeitem', { name: 'Actions for submodule vendor/audit-submodule' })]) {
+    await row.focus();
+    await page.keyboard.press('Shift+F10');
     await expectFullyInViewport(page, page.locator('.ctx-menu'));
     await page.keyboard.press('Escape');
   }
+  // On a phone the Branches list is the page; the stash row's ⋯ is a click away.
   await page.setViewportSize({ width: 390, height: 844 });
-  await page.locator('.mob-sec-head').filter({ hasText: 'Branches' }).click();
-  const stashSection = page.locator('.ref-header').filter({ hasText: 'STASHES' });
-  if (await stashSection.getAttribute('aria-expanded') === 'false') await stashSection.click();
+  // The open commit comes along as a sheet over the graph: close it, then Back to the list.
+  await page.getByRole('button', { name: 'Close Commit detail' }).click();
+  await page.getByRole('button', { name: 'Back to Branches' }).click();
+  if (await head('Stashes').getAttribute('aria-expanded') === 'false') await head('Stashes').click();
+  await page.locator('.stash-row').first().hover();
   await page.getByRole('button', { name: 'Actions for stash stash@{0}', exact: true }).click();
   await expectFullyInViewport(page, page.locator('.ctx-menu'));
 });
@@ -242,7 +252,8 @@ test('PR Decline: confirms which PR and what happens, posts it, then reads close
   await expect(decline).toBeVisible();
   await expect(page.getByRole('menuitem', { name: /^Check out/ })).toHaveCount(0);
   await expect(page.locator('.prd-body').getByRole('button', { name: /Close PR|Decline/ })).toHaveCount(0);
-  await expect(page.getByTestId('pr-checkout')).toHaveCount(1);
+  // (the card is the Detail pane: a closed sheet at this width, so at most one)
+  expect(await page.getByTestId('pr-checkout').count()).toBeLessThanOrEqual(1);
   // Cancel sends nothing.
   await decline.click();
   const dialog = page.getByRole('dialog', { name: 'Close pull request #1?' });
@@ -309,9 +320,9 @@ for (const scenario of [
     await page.getByTitle('Quick view AUDIT-1', { exact: true }).click();
     await expect(page.locator('.fx-quick-summary')).toContainText('AUDIT-1');
     await expectNoHorizontalOverflow(page);
-    await expectFullyInViewport(page, page.locator('.fx-quick'));
+    await expectFullyInViewport(page, page.getByTestId('fx-quick'));
     await page.screenshot({ path: testInfo.outputPath('focus.png'), fullPage: true });
-    await page.getByRole('button', { name: 'Close issue quick view' }).click();
+    await page.getByRole('button', { name: 'Close AUDIT-1' }).click();
     await page.evaluate(id => { location.hash = `#/git/${id}/pr/1`; }, repoId);
     await expect(page.locator('.prd-title')).toContainText('PR 1:');
     await expectNoHorizontalOverflow(page);
@@ -321,7 +332,8 @@ for (const scenario of [
     await expectNoHorizontalOverflow(page);
     await page.screenshot({ path: testInfo.outputPath('pr-files.png'), fullPage: true });
     await page.getByRole('tab', { name: 'Conversation', exact: true }).click();
-  await page.getByRole('button', { name: 'AI review', exact: true }).click();
+    await openPrDetails(page);
+    await page.getByRole('button', { name: 'AI review', exact: true }).click();
     await expect(page.locator('.rp-comment')).toBeVisible();
     await page.getByTestId('rp-post-comment').scrollIntoViewIfNeeded();
     await expectFullyInViewport(page, page.getByTestId('rp-post-comment'));
@@ -364,6 +376,7 @@ test('PR files and review code keep LTR gutters in an RTL interface', async ({ p
   await expect(page.locator('.dtable')).toHaveCSS('direction', 'ltr');
   await expect(page.locator('.hunk-header')).toHaveCSS('direction', 'ltr');
   await page.getByRole('tab', { name: 'Conversation', exact: true }).click();
+  await openPrDetails(page);
   await page.getByRole('button', { name: 'AI review', exact: true }).click();
   await expect(page.locator('.rp-diff-snippet')).toHaveCSS('direction', 'ltr');
 });
@@ -376,6 +389,7 @@ test('draft review posting previews destination and audience before sending', as
   });
   await page.goto(`/#/git/${repoId}/pr/1`);
   await page.getByRole('tab', { name: 'Conversation', exact: true }).click();
+  await openPrDetails(page);
   await page.getByRole('button', { name: 'AI review', exact: true }).click();
   await page.getByTestId('rp-post-comment').click();
   const dialog = page.getByRole('dialog', { name: 'Post comment to PR #1?' });
@@ -481,8 +495,8 @@ test('Focus quick-view failure explains the error and retries in place', async (
     : route.fulfill({ json: issue('AUDIT-1') }));
   await openRepo(page, 'focus');
   await page.getByTitle('Quick view AUDIT-1', { exact: true }).click();
-  await expect(page.locator('.fx-quick')).toContainText('Jira temporarily unavailable');
+  await expect(page.getByTestId('fx-quick')).toContainText('Jira temporarily unavailable');
   fail = false;
-  await page.locator('.fx-quick').getByRole('button', { name: 'Retry', exact: true }).click();
+  await page.getByTestId('fx-quick').getByRole('button', { name: 'Retry', exact: true }).click();
   await expect(page.locator('.fx-quick-summary')).toContainText('AUDIT-1');
 });

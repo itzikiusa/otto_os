@@ -120,7 +120,28 @@ export default defineConfig({
   plugins: [d2WorkerReady(), excalidrawFonts(), helpGuideIndex(), svelte()],
   // dist/.vite/manifest.json feeds scripts/bundle-budget.mjs (the CI byte
   // budget walks each entry's static-import closure from it).
-  build: { manifest: true },
+  build: {
+    manifest: true,
+    // The shared side surfaces (lib/components/side: ListDetail, ListPane,
+    // DetailPane, SideRow…, plus PageHeader, Tabs, PaneDivider, PaneControls,
+    // the shell Drawer and rightTabs) are ONE chunk, loaded with every document
+    // instead of counted again in every page that uses them (rc6, measured in
+    // scripts/bundle-budget.mjs: entry + shell −13 KB gzip per document, every
+    // page smaller). Their dependencies come with them, so the chunk sits in
+    // the entry's closure.
+    rolldownOptions: {
+      output: {
+        codeSplitting: {
+          groups: [
+            {
+              name: 'side',
+              test: /src[\\/]lib[\\/]components[\\/](side[\\/]|PaneDivider|PaneControls|Tabs\.svelte|PageHeader)|src[\\/]shell[\\/]Drawer\.svelte|src[\\/]lib[\\/]rightTabs/,
+            },
+          ],
+        },
+      },
+    },
+  },
   optimizeDeps: {
     // Scan lazy pages/widgets before serving the first page. Discovering their
     // dependencies later changes shared chunk hashes and can load two Svelte

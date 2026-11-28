@@ -253,6 +253,7 @@ pub(crate) fn apply_run_config_sdk_override(
         }
         IdeRunnerKind::JavaMain
         | IdeRunnerKind::JavaJunit
+        | IdeRunnerKind::Kotest
         | IdeRunnerKind::Maven
         | IdeRunnerKind::Gradle => {
             map.insert("JAVA_HOME".into(), trimmed.to_string());
@@ -279,7 +280,10 @@ pub(crate) fn apply_run_config_sdk_override(
         | IdeRunnerKind::Unreal => {
             super::env_layers::apply_cpp_toolchain_env(trimmed, target_kind, map, path_dirs);
         }
-        IdeRunnerKind::DotnetBuild | IdeRunnerKind::DotnetRun | IdeRunnerKind::DotnetTest => {
+        IdeRunnerKind::DotnetBuild
+        | IdeRunnerKind::DotnetRun
+        | IdeRunnerKind::DotnetTest
+        | IdeRunnerKind::UnityAttach => {
             if trimmed.starts_with('/') {
                 map.insert("DOTNET_ROOT".into(), trimmed.to_string());
                 push_unique(path_dirs, trimmed.to_string());
@@ -618,6 +622,7 @@ pub(super) fn row_to_run_config(row: &sqlx::sqlite::SqliteRow) -> IdeRunConfig {
         before_launch: row.try_get("before_launch").ok().flatten(),
         target_path: row.try_get("target_path").ok().flatten(),
         test_filter: row.try_get("test_filter").ok().flatten(),
+        test_path: Vec::new(),
         compound_configs: serde_json::from_str(&compound_s).unwrap_or_default(),
         maven_profiles: serde_json::from_str(&maven_s).unwrap_or_default(),
         spring_profiles: serde_json::from_str(&spring_s).unwrap_or_default(),

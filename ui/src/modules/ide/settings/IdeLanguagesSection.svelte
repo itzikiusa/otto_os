@@ -54,9 +54,16 @@
   }
 
   function openCppPlusMenu(e: MouseEvent): void {
-    ctxMenu.show(e, [
-      { label: 'Add local toolchain…', icon: 'folder', action: () => (pickerEco = 'cpp') },
-    ]);
+    const llvm = cppEco?.downloadable[0];
+    const items: MenuItem[] = [{ label: 'Add local toolchain…', icon: 'folder', action: () => (pickerEco = 'cpp') }];
+    if (llvm) {
+      items.push({
+        label: `Download LLVM ${llvm.version}…`,
+        icon: 'download',
+        action: () => void import('../store/ideLlvmInstall').then((m) => m.downloadLlvm(llvm, (p) => ideSettings.patchEnv({ cpp_toolchain: p }))),
+      });
+    }
+    ctxMenu.show(e, items);
   }
 
   function openKotlinPlusMenu(e: MouseEvent): void {
@@ -413,7 +420,7 @@
         >
           <option value="">&lt;Auto-detect clang / gcc from PATH&gt;</option>
           {#each cppEco?.installed ?? [] as sdk (sdk.path)}
-            <option value={sdk.path}>C/C++ {sdk.version} ({sdk.path}){isBroken(sdk) ? ' [Invalid]' : ''}</option>
+            <option value={sdk.path}>{sdk.source === 'otto' ? `LLVM ${sdk.version} (Otto)` : `C/C++ ${sdk.version} (${sdk.path})`}{isBroken(sdk) ? ' [Invalid]' : ''}</option>
           {/each}
           {#each cppDetected as det (`det:${det.home_path || det.path}`)}
             <option value={det.home_path || det.path}>{det.label || `Detected C/C++ ${det.version}`} ({det.home_path || det.path})</option>

@@ -100,7 +100,7 @@ async function openRepo(page: Page): Promise<void> {
     await menu.getByRole('menuitem', { name: REPO_NAME }).first().click();
   }
   await expect(page.locator('.rv-tabs')).toBeVisible();
-  await expect(page.locator('.rv-tab[aria-selected="true"]')).toHaveText('History');
+  await expect(page.locator('.rv-tabs [role="tab"][aria-selected="true"]')).toHaveText('History');
   await expect(page.locator('.refs-panel')).toBeVisible({ timeout: 20_000 });
 }
 

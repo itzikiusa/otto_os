@@ -50,15 +50,21 @@ test('guest admission, driver handoff and chat stay isolated from owner APIs', a
   await expect(page.locator('.room-status').getByText(/Maya controls the terminal/)).toBeVisible();
   await page.getByRole('button', {name: 'Request control', exact: true}).click();
   await expect.poll(() => actions.some(a => a.type === 'request_control')).toBeTruthy();
-  // ≤1024 px the room shows one view at a time behind Session | People & chat tabs.
+  // People & chat is the room's Detail pane: open beside the session on a
+  // desktop; on a phone / tablet the header's People & chat opens it as a sheet.
   const narrow = (page.viewportSize()?.width ?? 1280) <= 1024;
-  if (narrow) await page.getByRole('button', {name: 'People & chat'}).click();
+  const people = page.getByRole('button', {name: 'People & chat', exact: true});
+  await expect(people).toHaveAttribute('aria-pressed', narrow ? 'false' : 'true');
+  if (narrow) await people.click();
   await page.getByLabel('Message everyone').fill('<script>hello</script>');
   await page.getByRole('button', {name: 'Send', exact: true}).click();
   await expect(page.getByText('<script>hello</script>', {exact: true})).toBeVisible();
   await expect(page.getByLabel('Message everyone')).toHaveValue('');
   expect(terminalInput).toEqual([]);
-  if (narrow) await page.getByRole('button', {name: 'Session', exact: true}).click();
+  if (narrow) {
+    await page.getByRole('button', {name: 'Close People & chat'}).click();
+    await expect(page.getByLabel('Message everyone')).toHaveCount(0);
+  }
   membership!.send(JSON.stringify({type: 'snapshot', room: {...admitted, driver_member_id: 'guest', grant_epoch: 4}}));
   await expect(page.getByRole('button', {name: 'Release control'})).toBeVisible();
   await page.locator('.xterm-helper-textarea').focus();

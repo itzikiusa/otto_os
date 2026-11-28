@@ -70,7 +70,7 @@ test('loaded evaluation actions fit five themes and tablet reports can use full 
   await page.setViewportSize(v); await page.evaluate(v => { localStorage.setItem('otto_theme', v.theme); localStorage.setItem('otto_scheme', v.scheme); localStorage.setItem('otto_direction', v.direction); }, v); await page.reload();
   await expect(page.locator('.rd-title')).toContainText('repository-recovery');
   await page.screenshot({ path: `/tmp/otto-ux-r4-settings-eval-${v.key}-before.png` });
-  if(v.width === 834) { await page.getByRole('button', { name: 'Hide evaluations list', exact: true }).click(); expect((await page.locator('.se-main').boundingBox())!.width).toBeGreaterThan(480); await page.getByRole('button', { name: 'Show evaluations list', exact: true }).press('Enter'); await expect(page.locator('.se-item.active')).toContainText('repository-recovery'); await page.getByRole('button', { name: 'Hide evaluations list', exact: true }).press('Enter'); }
+  if(v.width === 834) { await page.getByTestId('evaluations-list-more').click(); await page.getByRole('menuitem', { name: /Hide Evaluations/ }).click(); expect((await page.locator('.se-main').boundingBox())!.width).toBeGreaterThan(480); await page.getByTestId('show-list-pane').press('Enter'); await expect(page.locator('.se-item.active')).toContainText('repository-recovery'); await page.keyboard.press('Meta+b'); }
   await page.getByRole('button', { name: 'Promote improved', exact: true }).scrollIntoViewIfNeeded();
   for(const row of await page.locator('.skill-actions, .rate-row, .improve-top, .iter-head').all()) expect(await row.evaluate(e => e.scrollWidth <= e.clientWidth + 1)).toBeTruthy();
   await expectNoHorizontalOverflow(page);
@@ -205,7 +205,7 @@ test('loaded Review report stays readable across themes and tablet history can c
  ]) {
   await page.setViewportSize(v); await page.evaluate(v => { localStorage.setItem('otto_theme', v.theme); localStorage.setItem('otto_scheme', v.scheme); localStorage.setItem('otto_direction', v.direction); }, v); await page.reload(); await expect(page.getByTestId('static-report')).toBeVisible();
   await page.screenshot({ path: `/tmp/otto-ux-r4-settings-review-${v.key}-before.png` });
-  if(v.width === 834) { await page.getByRole('button', { name: 'Hide reviews list', exact: true }).click(); expect((await page.locator('.lr-main').boundingBox())!.width).toBeGreaterThan(480); await page.getByRole('button', { name: 'Show reviews list', exact: true }).press('Enter'); await expect(page.locator('.lr-item.active')).toContainText('alpha synthetic review'); await page.getByRole('button', { name: 'Hide reviews list', exact: true }).press('Enter'); }
+  if(v.width === 834) { await page.getByTestId('reviews-list-more').click(); await page.getByRole('menuitem', { name: /Hide Reviews/ }).click(); expect((await page.locator('.lr-main').boundingBox())!.width).toBeGreaterThan(480); await page.getByTestId('show-list-pane').press('Enter'); await expect(page.locator('.lr-item.active')).toContainText('alpha synthetic review'); await page.keyboard.press('Meta+b'); }
   for(const row of await page.locator('.lr-static, .lr-score, .lr-verdict, .lr-fix').all()) expect(await row.evaluate(e => e.scrollWidth <= e.clientWidth + 1)).toBeTruthy();
   for(const sel of ['.lr-detail h3', '.lr-notes', '.lr-verdict-badge', '.lr-detail .badge']) { expect(await contrastOf(page, sel)).toBeGreaterThanOrEqual(4.5); expect(await page.locator(sel).first().evaluate(e => parseFloat(getComputedStyle(e).fontSize))).toBeGreaterThanOrEqual(11); }
   await expectNoHorizontalOverflow(page); await page.screenshot({ path: `/tmp/otto-ux-r4-settings-review-${v.key}.png` });
@@ -226,5 +226,7 @@ test('tablet access administration gives group fields usable width beside both n
  await page.route('**/api/v1/users', r => r.fulfill({ json: users })); await page.route('**/api/v1/users/*/grants', r => r.fulfill({ json: { grants: [] } })); await page.route('**/api/v1/workspaces/*/members', r => r.fulfill({ json: [] }));
  await page.goto('/#/settings/users'); await page.getByRole('button', { name: 'By user', exact: true }).click(); await expect(page.getByRole('group', { name: 'Set the role in every workspace' })).toBeVisible(); await page.screenshot({ path: '/tmp/otto-ux-r4-settings-users-tablet.png' });
  await page.goto('/#/settings/access-groups'); await expect(page.getByLabel('Group name', { exact: true })).toHaveValue(groups[0].name); await page.screenshot({ path: '/tmp/otto-ux-r4-settings-groups-tablet-before.png' });
+ // No room beside the Settings nav for the groups list and the form: the nested list pushes (‹ Groups).
+ if (!(await page.locator('fieldset.detail').isVisible())) await page.getByRole('button', { name: groups[0].name, exact: true }).click();
  expect((await page.locator('fieldset.detail').boundingBox())!.width).toBeGreaterThan(280); await expectNoHorizontalOverflow(page); await page.screenshot({ path: '/tmp/otto-ux-r4-settings-groups-tablet.png' });
 });

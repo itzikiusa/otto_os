@@ -16,7 +16,6 @@ test.describe('Workflows & older goal loops UX closure (phone + tablet, light + 
         localStorage.setItem('otto_scheme', scheme);
         localStorage.setItem('otto_firstrun_dismissed', '1');
         localStorage.setItem('otto_rail_expanded', '0');
-        localStorage.setItem('otto_wf_dock_side', '1');
       }, { workspace, scheme });
 
       const wf = {

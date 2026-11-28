@@ -45,33 +45,3 @@ export function flashUserTurnBubble(target: HTMLElement): void {
     { duration: matchMedia('(prefers-reduced-motion: reduce)').matches ? 0 : 900 },
   );
 }
-
-export function bindPanelPointerResize(
-  e: PointerEvent,
-  w0: number,
-  getConvW: () => number,
-  setPanelW: (w: number) => void,
-  storageKey: string,
-): void {
-  const el = e.currentTarget as HTMLElement;
-  el.setPointerCapture(e.pointerId);
-  const x0 = e.clientX;
-  const rtl = getComputedStyle(el).direction === 'rtl';
-  let latest = w0;
-  const move = (ev: PointerEvent): void => {
-    const dx = (ev.clientX - x0) * (rtl ? -1 : 1);
-    latest = Math.max(300, Math.min(getConvW() - 360, w0 - dx));
-    setPanelW(latest);
-  };
-  const up = (): void => {
-    el.removeEventListener('pointermove', move);
-    el.removeEventListener('pointerup', up);
-    try {
-      localStorage.setItem(storageKey, String(Math.round(latest)));
-    } catch {
-      /* storage unavailable: the width lasts this session */
-    }
-  };
-  el.addEventListener('pointermove', move);
-  el.addEventListener('pointerup', up);
-}

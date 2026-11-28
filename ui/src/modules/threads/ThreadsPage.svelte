@@ -6,22 +6,21 @@
   import PageBody from '../../lib/components/PageBody.svelte';
   import PageHeader from '../../lib/components/PageHeader.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
-  import Drawer from '../../shell/Drawer.svelte';
-  import PaneDivider from '../../lib/components/PaneDivider.svelte';
+  import ListDetail from '../../lib/components/side/ListDetail.svelte';
+  import { pageNav } from '../../lib/components/side/pageNav.svelte';
   import { registry } from '../../lib/commands.svelte';
   import { keyContext } from '../../lib/keys';
   import { ctxMenu, type MenuItem } from '../../lib/contextmenu.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
   import { toastError } from '../../lib/toastError';
-  import { loadPaneWidth } from '../../lib/paneResizer';
   import { router } from '../../lib/router.svelte';
   import { openFile } from '../../lib/stores/openfile.svelte';
   import { pageChrome } from '../../lib/stores/pageChrome.svelte';
   import { foldNavWhileMounted } from '../../lib/foldNavWhileMounted.svelte';
   import { ui } from '../../lib/stores/ui.svelte';
   import { viewport } from '../../lib/stores/viewport.svelte';
-  import { lightMode } from '../../lib/lightMode.svelte';
   import { keyboard } from '../../lib/stores/keyboard.svelte';
+  import { isTouchFirst } from '../../lib/enterSends';
   import { trackComposerFocus, typingChrome } from './threadsTyping'; import { consumeThreadDraftHandoff } from './recapThreadConsumer';
   import { SCRATCH_WORKSPACE_ID, ws } from '../../lib/stores/workspace.svelte';
   import ThreadCanvas from './ThreadCanvas.svelte';
@@ -40,7 +39,6 @@
   import { relatedPopover } from './relatedPopover.svelte';
   import { threadsPageMenu } from './threadsPageMenu';
   import { threadPrefs } from './runtime/threadPrefs.svelte';
-  import { MIN_CONVERSATION_BESIDE_SURFACE_W, MIN_CONVERSATION_W, SURFACE_W, fitRightPanel } from './threadsLayout';
   import { prepareDeepLink } from '../../lib/deepLinkOpen';
   import { runtimeThreadMenu } from './runtime/runtimeMenu';
   import { asThreadSession, isRuntimeThread, runtimeThreads } from './runtime/runtimeThreads.svelte';
@@ -51,41 +49,17 @@
   import { threads, type ThreadsLayoutMode } from './threadsStore.svelte';
   import { initialThreadId } from './threadNav.svelte';
 
-  const SIDEBAR_W_KEY = 'threads.sidebarW';
-  const INSPECTOR_W_KEY = 'threads.inspectorW';
-
-  let sidebarW = $state(loadPaneWidth(SIDEBAR_W_KEY, 272, 240, 380));
-  let inspectorW = $state(loadPaneWidth(INSPECTOR_W_KEY, 380, 300, 560));
-  // A surface opens wider, at its own remembered width; "wide" gives it all but the conversation's floor.
-  const SURFACE_W_KEY = 'threads.surfaceW';
-  let surfaceW = $state(loadPaneWidth(SURFACE_W_KEY, SURFACE_W, 300, 1200));
-  const surfaceOpen = $derived(threadsChrome.surfaces.includes(threads.inspectorTab));
-  let stageWidth = $state(1280);
   let centerWidth = $state(1000);
   let roomSessionId = $state<string | null>(null);
-  let mobileSidebarOpen = $state(false);
-  $effect(() => { if (threads.inspectorOverlayOpen) mobileSidebarOpen = false; });
 
-  const compact = $derived(
-    viewport.isPhone || viewport.isTablet || (stageWidth > 0 && stageWidth < 860),
-  );
-  // The thread list is a column wherever it leaves the conversation room (an
-  // iPad in portrait once the navigator folds), a drawer below that — and on
-  // a phone on its side, where the conversation needs the width more.
-  const listDrawer = $derived(viewport.isPhone || viewport.isShort || (stageWidth > 0 && stageWidth < 760));
-  // At 1280 with both panels open the right panel gives way (never below its
-  // minimum) so the conversation keeps ~640 px; a manual width comes back
-  // whenever there is room for it.
-  const inspectorShownW = $derived(
-    fitRightPanel(
-      threadsChrome.maximized ? stageWidth : surfaceOpen ? surfaceW : inspectorW,
-      stageWidth,
-      !listDrawer && threads.sidebarOpen ? sidebarW : 0,
-      surfaceOpen ? MIN_CONVERSATION_BESIDE_SURFACE_W : MIN_CONVERSATION_W,
-    ),
-  );
-
-  $effect(() => threads.setInspectorCompact(compact));
+  // Menus and the floating card read "compact" (a phone or a tablet; the card
+  // also needs a whole reading column beside it, threadDetails.ts). The thread
+  // list and the inspector follow the shared rules instead (ListDetail /
+  // DetailPane): a column while there is room, push / a sheet below.
+  const compact = $derived(viewport.isPhone || viewport.isTablet);
+  // Until the inspector's chunk decides (DetailPane: inline or a sheet), the
+  // old guess picks which open flag its toggle drives.
+  onMount(() => untrack(() => threads.setInspectorCompact(compact)));
 
   // Typing with the on-screen keyboard up: what folds away (threadsTyping.ts).
   // `focusIn` is where the caret is — the composer, the attention dock above
@@ -106,6 +80,8 @@
     return () => cancelAnimationFrame(frame);
   });
   onMount(() => () => threads.setInspectorCompact(false));
+  let inspectorWanted = $state(false);
+  onMount(() => whenIdle(() => (inspectorWanted = true), 600));
 
   // Newest activity first, so the page opens on the most recent thread (not
   // an agent's routine run or another module's helper).
@@ -154,14 +130,13 @@
     untrack(() => runtimeThreads.loadAll()).catch(() => {});
   });
 
-  // Like T3, no side-panel rail and no status bar while Threads is open (the
-  // sidebar's status dots carry the working count). Not persisted: a saved
-  // open Side panel is shown closed here (transient) and comes back on
-  // leaving; opening it on purpose (shortcut / ⌘K) shows it.
+  // Like T3, no status bar while Threads is open (the list's status words
+  // carry the working count). The Side panel's rail stays (design.md §1: on
+  // every page); a saved open Side panel is shown closed here (transient, so
+  // the inspector is the one right column) and comes back on leaving; opening
+  // it on purpose (rail, ⌘J, ⌘K) shows it.
   onMount(() => {
-    // foldNav: an iPad folds Otto's navigator to its rail, so the thread list
-    // gets the left column (App.svelte).
-    const restoreChrome = pageChrome.set({ hideSideRail: true, hideStatusBar: true, foldNav: true });
+    const restoreChrome = pageChrome.set({ hideStatusBar: true });
     const hadTransient = ui.rightTransient !== null;
     if (!hadTransient && ui.rightOpen) ui.rightTransient = { open: false, tab: ui.rightTab };
     return () => {
@@ -400,10 +375,10 @@
         terminalOpen: threadsChrome.terminalOpen,
         cardOn: cardRoom ? threadsChrome.cardVisible : null,
         threadId: focused?.id ?? null,
-        compact, touch: typeof matchMedia === 'function' && matchMedia('(hover: none) and (pointer: coarse)').matches,
+        compact, touch: isTouchFirst(),
         // A phone on its side is tablet-wide but still the phone: no hand-off to itself.
         phone: viewport.isPhone || viewport.isShort,
-        sidebarVisible: !listDrawer && threads.sidebarOpen,
+        sidebarVisible: !viewport.isPhone && !pageNav.show,
         midTurn: threadPrefs.midTurn,
         tools: threadPrefs.tools,
       },
@@ -420,12 +395,30 @@
     ));
   }
 
-  function toggleLeftBar(): void {
-    if (listDrawer) {
-      mobileSidebarOpen = !mobileSidebarOpen;
-      if (mobileSidebarOpen) threads.setInspectorOpen(false);
-    } else threads.toggleSidebar();
+  // Phone (design.md §2): `#/threads` is the list; a thread, the new-thread
+  // composer or Pull requests is pushed over it, with "‹ Threads" in the header.
+  // The new-thread stage counts as pushed only when the person started it from
+  // a list that has threads (the stage shown because there are none is the page).
+  let draftPushed = $state(false);
+  $effect(() => {
+    const on = threads.newDraftMode;
+    untrack(() => (draftPushed = on && (draftPushed || liveThreadIds.length > 0)));
+  });
+  const phoneOpen = $derived(!!router.parts[1] || draftPushed || !!threadsChrome.stageView);
+  function backToList(): void {
+    threadsChrome.stageView = null;
+    if (threads.newDraftMode && liveThreadIds.length > 0) threads.newDraftMode = false;
+    router.go('threads');
   }
+  // The empty rule: no thread anywhere (live, closed or in History) → no list
+  // pane; the new-thread stage owns the page. History loads once to know.
+  const listSettled = $derived(ws.listSettled && !ws.sessionsLoading && (!ws.currentId || !!runtimeThreads.loaded[ws.currentId]));
+  $effect(() => {
+    if (listSettled && liveThreadIds.length === 0 && !ws.archivedLoaded && !ws.archivedLoading) untrack(() => void ws.loadArchived());
+  });
+  const listEmpty = $derived(
+    listSettled && liveThreadIds.length === 0 && ws.archivedLoaded && Object.keys(runtimeThreads.byId).length === 0 && !ws.archivedSessions.some((s) => isThreadSession(s)),
+  );
 
   function toggleRightBar(): void {
     threads.toggleInspector();
@@ -447,39 +440,6 @@
   bind:this={pageEl}
 >
   <PageHeader title="Threads">
-    {#snippet leading()}
-      {#if viewport.isShort || (viewport.isPhone && !lightMode.active)}
-        <!-- Phone landscape, or Phone portrait in Full mode (where the shell
-             top bar steps aside): keep Otto's Navigator, workspace switcher and
-             notification bell one tap away. -->
-        <button
-          type="button"
-          class="icon-btn"
-          aria-label="Open navigator"
-          title="Open navigator"
-          aria-haspopup="dialog"
-          aria-expanded={ui.navDrawerOpen}
-          data-testid="threads-open-navigator"
-          onclick={() => (ui.navDrawerOpen = !ui.navDrawerOpen)}
-        >
-          <Icon name="sidebar" size={14} />
-        </button>
-      {/if}
-      <button
-        type="button"
-        class="icon-btn"
-        class:th-btn-on={listDrawer ? mobileSidebarOpen : threads.sidebarOpen}
-        aria-pressed={listDrawer ? mobileSidebarOpen : threads.sidebarOpen}
-        aria-label="Thread list"
-        title={(listDrawer ? mobileSidebarOpen : threads.sidebarOpen) ? 'Hide the thread list' : 'Show the thread list'}
-        data-testid="threads-toggle-sidebar"
-        onclick={toggleLeftBar}
-      >
-        <!-- The threads icon, not a sidebar glyph: the app rail's own sidebar
-             button sits right beside it and toggles the navigator. -->
-        <Icon name="threads" size={14} />
-      </button>
-    {/snippet}
 
     {#snippet titleContent()}
       <span class="th-crumbs" data-testid="threads-breadcrumb">
@@ -504,13 +464,13 @@
         class="icon-btn"
         class:th-btn-on={rightOpen}
         aria-pressed={rightOpen}
-        aria-label="Right panel"
-        title={rightOpen ? 'Hide the right panel' : 'Show the right panel: files, changes, pull request, side chat'}
-        data-icon="panel" data-keep
+        aria-label="Thread details"
+        title={rightOpen ? 'Hide thread details (⌥⌘B)' : 'Show thread details: files, changes, pull request, side chat (⌥⌘B)'}
+        data-icon="info" data-keep
         data-testid="threads-toggle-inspector"
         onclick={toggleRightBar}
       >
-        <Icon name="panel" size={14} />
+        <Icon name="info" size={14} />
       </button>
       <button
         type="button"
@@ -530,74 +490,51 @@
   </PageHeader>
 
   <PageBody width="full" padded={false} fill>
-    <div class="th-workspace" class:compact bind:clientWidth={stageWidth}>
-      {#if !listDrawer && threads.sidebarOpen}
-        <div class="th-left-col" style:inline-size="{compact ? Math.min(sidebarW, 240) : sidebarW}px">
+    <div class="th-workspace" class:compact>
+      <ListDetail
+        module="threads"
+        name="Threads"
+        open={phoneOpen}
+        onback={backToList}
+        empty={listEmpty}
+        legacy={{ w: 'threads.sidebarW', hidden: () => (threads.sidebarOpen ? null : true) }}
+      >
+        {#snippet list()}
           <ThreadSidebar onstartroom={(sid) => (roomSessionId = sid)} />
-        </div>
-        <PaneDivider
-          bind:width={sidebarW}
-          storageKey={SIDEBAR_W_KEY}
-          min={240}
-          max={380}
-          defaultWidth={272}
-          label="Resize threads inbox"
-        />
-      {/if}
-
-      <div class="th-center-col" bind:clientWidth={centerWidth}>
-        {#if threadListError && !(liveThreadIds.length === 0 && showWelcomeStage)}
-          <LoadState what="threads" variant="compact" error={threadListError} onretry={retryThreads} />
-        {/if}
-        <div class="th-stage" style:--thread-card-reserve={cardShown ? `${CARD_RESERVE}px` : '0px'}>
-          {#if threadListError && liveThreadIds.length === 0 && showWelcomeStage}
-            <LoadState what="threads" error={threadListError} empty onretry={retryThreads} />
-          {:else if threadsChrome.stageView === 'prs'}
-            <LazyMount lazy={PullRequestsView} what="pull requests" variant="panel" props={{ repo: contextRepo }} />
-          {:else if showWelcomeStage}
-            <LazyMount lazy={NewThreadStageView} what="the new thread" variant="panel" props={{}} />
-          {:else}
-            <ThreadCanvas onstartroom={(sid) => (roomSessionId = sid)} />
+        {/snippet}
+        <div class="th-center-col" bind:clientWidth={centerWidth}>
+          {#if threadListError && !(liveThreadIds.length === 0 && showWelcomeStage)}
+            <LoadState what="threads" variant="compact" error={threadListError} onretry={retryThreads} />
           {/if}
-          {#if cardShown && cardIdle && contextCwd && DetailsCardView.component}
-            <div class="th-card-float">
-              <DetailsCardView.component floating cwd={contextCwd} threadId={focused?.id ?? null} ondismiss={() => threadsChrome.toggleCard()} />
-            </div>
+          <div class="th-stage" style:--thread-card-reserve={cardShown ? `${CARD_RESERVE}px` : '0px'}>
+            {#if threadListError && liveThreadIds.length === 0 && showWelcomeStage}
+              <LoadState what="threads" error={threadListError} empty onretry={retryThreads} />
+            {:else if threadsChrome.stageView === 'prs'}
+              <LazyMount lazy={PullRequestsView} what="pull requests" variant="panel" props={{ repo: contextRepo }} />
+            {:else if showWelcomeStage}
+              <LazyMount lazy={NewThreadStageView} what="the new thread" variant="panel" props={{}} />
+            {:else}
+              <ThreadCanvas onstartroom={(sid) => (roomSessionId = sid)} />
+            {/if}
+            {#if cardShown && cardIdle && contextCwd && DetailsCardView.component}
+              <div class="th-card-float">
+                <DetailsCardView.component floating cwd={contextCwd} threadId={focused?.id ?? null} ondismiss={() => threadsChrome.toggleCard()} />
+              </div>
+            {/if}
+          </div>
+          {#if threadsChrome.terminalOpen}
+            <LazyMount lazy={TerminalDock} what="the terminal" variant="compact" props={{ cwd: contextCwd }} />
           {/if}
         </div>
-        {#if threadsChrome.terminalOpen}
-          <LazyMount lazy={TerminalDock} what="the terminal" variant="compact" props={{ cwd: contextCwd }} />
-        {/if}
-      </div>
-
-      {#if !compact && threads.inspectorOpen}
-        <PaneDivider
-          bind:width={() => (surfaceOpen ? surfaceW : inspectorW), (v) => (surfaceOpen ? (surfaceW = v) : (inspectorW = v))}
-          storageKey={surfaceOpen ? SURFACE_W_KEY : INSPECTOR_W_KEY}
-          min={300}
-          max={surfaceOpen ? 1200 : 560}
-          defaultWidth={surfaceOpen ? SURFACE_W : 380}
-          invert
-          label="Resize thread inspector"
-        />
-        <div class="th-right-col" style:inline-size={`${inspectorShownW}px`}>
-          <LazyMount lazy={ThreadInspector} what="the thread details" variant="panel" props={{}} />
-        </div>
-      {/if}
-
-      {#if listDrawer}
-        <Drawer bind:open={mobileSidebarOpen} side="left" title="Threads" width="min(360px, 100vw)">
-          <ThreadSidebar
-            onselect={() => (mobileSidebarOpen = false)}
-            onstartroom={(sid) => { mobileSidebarOpen = false; roomSessionId = sid; }}
-          />
-        </Drawer>
-      {/if}
-      {#if compact}
-        <Drawer bind:open={threads.inspectorOverlayOpen} side="right" title="Thread details" width="min(420px, 100vw)">
-          <LazyMount lazy={ThreadInspector} what="the thread details" variant="panel" props={{}} />
-        </Drawer>
-      {/if}
+        {#snippet detail()}
+          <!-- The inspector is a DetailPane (ThreadInspector): inline while the
+               conversation keeps its floor, else a right sheet. Its chunk loads
+               once the page is idle, so the toggle knows which it will be. -->
+          {#if inspectorWanted || threads.inspectorVisible}
+            <LazyMount lazy={ThreadInspector} what="the thread details" variant="panel" quiet={!threads.inspectorVisible} props={{}} />
+          {/if}
+        {/snippet}
+      </ListDetail>
     </div>
   </PageBody>
 </div>
@@ -667,13 +604,6 @@
     min-width: 0;
     min-height: 0;
     overflow: hidden;
-  }
-  .th-left-col,
-  .th-right-col {
-    flex-shrink: 0;
-    min-height: 0;
-    display: flex;
-    flex-direction: column;
   }
   .th-stage {
     position: relative;

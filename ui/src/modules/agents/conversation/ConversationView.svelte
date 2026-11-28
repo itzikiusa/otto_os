@@ -41,12 +41,11 @@
   // `transcript_appended`. Rev 6 (chat v2): the conversation uses the pane's
   // width (gutters scale with it; only prose keeps a measure), you and the
   // agent read as two speakers (blue bubble / green response), settled work
-  // folds, and a side panel previews files, code and diffs next to the chat
-  // (over it when the pane is narrow). Everything sheds chrome by the PANE's
+  // folds, and a Detail pane previews files, code and diffs next to the chat
+  // (a right sheet when the pane is narrow). Everything sheds chrome by the PANE's
   // width.
   import { setContext, tick, untrack } from 'svelte';
   import Icon from '../../../lib/components/Icon.svelte';
-  import { splitter } from '../../../lib/paneResizer';
   import TurnItem from './TurnItem.svelte';
   import { modelChangeFlags, turnEdits, turnMatchesOptimistic, turnText } from './turnQueries';
   import Composer from './Composer.svelte';
@@ -85,7 +84,6 @@
   } from './conversationMenu';
   import { copyLoadedTranscriptMarkdown } from './exportMarkdown';
   import {
-    bindPanelPointerResize,
     captureFirstTurnAnchor,
     findAdjacentUserTurn,
     flashUserTurnBubble,
@@ -258,30 +256,6 @@
   function closePreview(): void {
     preview = null;
     listEl?.focus({ preventScroll: true });
-  }
-  /** Panel width (px) beside the chat; remembered per app. */
-  const PANEL_KEY = 'otto_chat_panel_w';
-  let panelW = $state(untrack(() => {
-    try {
-      const v = Number(localStorage.getItem(PANEL_KEY));
-      return Number.isFinite(v) && v >= 280 ? v : 0;
-    } catch {
-      return 0;
-    }
-  }));
-  /** Beside the chat only when both fit; below that the panel covers the chat. */
-  const panelBeside = $derived(convW >= 760);
-  const panelPx = $derived(Math.round(Math.min(Math.max(panelW || convW * 0.46, 300), convW - 360)));
-  function startResize(e: PointerEvent): void {
-    bindPanelPointerResize(e, panelPx, () => convW, (w) => (panelW = w), PANEL_KEY);
-  }
-  function resizeKey(e: KeyboardEvent): void {
-    const step = e.shiftKey ? 64 : 16;
-    if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
-      e.preventDefault();
-      const grow = (e.key === 'ArrowLeft') !== (getComputedStyle(e.currentTarget as HTMLElement).direction === 'rtl');
-      panelW = Math.max(300, Math.min(convW - 360, panelPx + (grow ? step : -step)));
-    }
   }
 
   // ---- links ------------------------------------------------------------------
@@ -885,7 +859,7 @@
     onloadearlier={() => void loadEarlier()}
   />
 
-  <div class="conv-main" class:with-panel={!!preview} class:beside={panelBeside}>
+  <div class="conv-main">
   <div class="conv-chat">
   <!-- The scroller's frame: the jump pill anchors to ITS bottom edge, so it
        always sits just above the composer whatever the composer's height. -->
@@ -1044,24 +1018,14 @@
     {/key}
   {/if}
   </div>
+  <!-- The Detail pane (PreviewPanel → DetailPane): beside the chat while it
+       keeps its floor, else a right sheet. Its chunk loads on first open. -->
   {#if preview}
-    {#if panelBeside}
-      <div
-        class="pv-resize"
-        role="separator"
-        aria-orientation="vertical"
-        aria-label="Resize the preview panel"
-        aria-valuenow={panelPx}
-        use:splitter={{ onkeydown: resizeKey, onpointerdown: startResize }}
-      ></div>
+    {#if PreviewPanel.component}
+      <PreviewPanel.component req={preview} onclose={closePreview} />
+    {:else if PreviewPanel.error}
+      <LoadState what="the preview" variant="compact" empty error={PreviewPanel.error} onretry={() => PreviewPanel.retry()} />
     {/if}
-    <div class="pv-slot" style:inline-size={panelBeside ? `${panelPx}px` : null}>
-      {#if PreviewPanel.component}
-        <PreviewPanel.component req={preview} onclose={closePreview} />
-      {:else}
-        <LoadState what="the preview" variant="panel" empty loading={!PreviewPanel.error} error={PreviewPanel.error} onretry={() => PreviewPanel.retry()} />
-      {/if}
-    </div>
   {/if}
   </div>
   <div class="sr-only" aria-live="polite">{announce}</div>
@@ -1119,35 +1083,6 @@
     /* Turns shed chrome by the CHAT column's width (it narrows beside the
        panel); the header still answers to the whole pane. */
     container-type: inline-size;
-  }
-  .pv-slot {
-    flex-shrink: 0;
-    min-width: 0;
-    min-height: 0;
-    display: flex;
-    flex-direction: column;
-  }
-  .pv-slot > :global(*) {
-    flex: 1;
-  }
-  /* Narrow pane: the panel covers the chat (Esc / ✕ returns to it). */
-  .conv-main:not(.beside) .pv-slot {
-    position: absolute;
-    inset: 0;
-    z-index: var(--z-sticky);
-  }
-  .pv-resize {
-    flex-shrink: 0;
-    width: 6px;
-    margin-inline: -2px;
-    cursor: col-resize;
-    position: relative;
-    z-index: var(--z-sticky);
-  }
-  .pv-resize:hover,
-  .pv-resize:focus-visible {
-    background: var(--accent-line);
-    outline: none;
   }
   .conv-frame {
     flex: 1;

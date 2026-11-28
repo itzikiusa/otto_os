@@ -19,7 +19,9 @@ use super::session::{
     mark_resumed, ActiveConnection, BoxRead, BoxWrite, DapStartContext, DapWireClient,
     SessionEntry, MAX_TERMINATED_DEBUG_SESSIONS,
 };
+use super::session_children::on_start_debugging;
 use super::session_inspect::{apply_breakpoint_event, handle_stopped_event, sync_all_breakpoints};
+use super::session_steps::on_step_end;
 use super::shell_bridge::spawn_shell_dap_bridge;
 use super::wire::DapEvent;
 use super::{spawn_target_process, ssh_tunnel_config, BridgeGuard};
@@ -107,12 +109,37 @@ pub(super) async fn boot_session_connection(
 ) -> Result<()> {
     let io = connect_adapter_transport(entry, &resolved.adapter_name, resolved.transport, req, ctx)
         .await?;
+    // A Unity attach names the Editor's soft-debugger port as `processId`.
+    let unity_port = (resolved.adapter_name == super::adapters_dotnet::unity::MONODBG)
+        .then(|| resolved.launch_args["processId"].as_u64())
+        .flatten();
     let cmds = (
         resolved.initialize_args,
         resolved.launch_command.as_str(),
         resolved.launch_args,
     );
-    handshake_and_run(sessions, entry, io, cmds).await
+    let res = handshake_and_run(sessions, entry, io, cmds).await;
+    match unity_port {
+        Some(port) => {
+            use super::adapters_dotnet::unity::{attach_failed, ATTACHED_HINT};
+            let err = match res {
+                Ok(()) if !entry.is_terminal() => {
+                    entry.append_output("console", ATTACHED_HINT.into());
+                    return Ok(());
+                }
+                // monodbg answers the attach, then reports `terminated` when the
+                // Editor's soft debugger refuses the connection (Release mode).
+                Ok(()) => {
+                    attach_failed(port as u16, "the Editor's debugger refused the connection")
+                }
+                Err(e) => attach_failed(port as u16, &e.to_string()),
+            };
+            // That `terminated` may have ended the session already: say why anyway.
+            entry.fail_start(sessions, &err);
+            Err(err)
+        }
+        None => res,
+    }
 }
 
 async fn connect_adapter_transport(
@@ -157,6 +184,14 @@ async fn connect_adapter_transport(
             env,
             companion,
         } => {
+            if let Some(mut lines) = companion.take_output() {
+                let entry_out = entry.clone();
+                tokio::spawn(async move {
+                    while let Some(line) = lines.recv().await {
+                        entry_out.append_output("stdout", format!("{line}\n"));
+                    }
+                });
+            }
             guard.push_companion(companion);
             let mut child =
                 spawn_target_process(&req.target, ctx.ssh.as_ref(), &command, &args, &cwd, &env)
@@ -185,7 +220,41 @@ async fn connect_adapter_transport(
             env,
         } => {
             let cmd_spec = (command.as_str(), args.as_slice(), cwd.as_str(), &env);
-            spawn_tcp_listen_adapter(entry, adapter_name, cmd_spec, req, ctx, guard).await
+            spawn_tcp_listen_adapter(entry, adapter_name, cmd_spec, req, ctx, guard)
+                .await
+                .map(|(io, _)| io)
+        }
+        DapAdapterTransport::JsDebug {
+            command,
+            args,
+            cwd,
+            env,
+            companion,
+        } => {
+            if let Some(companion) = companion {
+                if let Some(mut lines) = companion.take_output() {
+                    let entry_out = entry.clone();
+                    tokio::spawn(async move {
+                        while let Some(line) = lines.recv().await {
+                            entry_out.append_output("stdout", format!("{line}\n"));
+                        }
+                    });
+                }
+                guard.push_companion(companion);
+            }
+            let cmd_spec = (command.as_str(), args.as_slice(), cwd.as_str(), &env);
+            let (io, (host, port)) =
+                spawn_tcp_listen_adapter(entry, adapter_name, cmd_spec, req, ctx, guard).await?;
+            // Each process js-debug debugs gets its own connection to this endpoint;
+            // a breakpoint's state is rebuilt from those connections.
+            entry.targets.enable(host, port);
+            entry.mutate_and_broadcast(|snap| {
+                for bp in &mut snap.breakpoints {
+                    bp.verified = None;
+                    bp.message = None;
+                }
+            });
+            Ok(io)
         }
         DapAdapterTransport::DirectTcpAttach { host, port } => {
             let (connect_host, connect_port) =
@@ -227,7 +296,7 @@ async fn spawn_tcp_listen_adapter(
     req: &IdeStartDebugReq,
     ctx: &DapStartContext,
     guard: Arc<BridgeGuard>,
-) -> Result<(BoxRead, BoxWrite, Arc<BridgeGuard>)> {
+) -> Result<((BoxRead, BoxWrite, Arc<BridgeGuard>), (String, u16))> {
     let mut child =
         spawn_target_process(&req.target, ctx.ssh.as_ref(), command, args, cwd, env).await?;
     let (port_tx, mut port_rx) = mpsc::unbounded_channel::<(String, String)>();
@@ -286,7 +355,10 @@ async fn spawn_tcp_listen_adapter(
         .map_err(|e| Error::Upstream(format!("connect DAP {connect_host}:{connect_port}: {e}")))?;
     let _ = tcp.set_nodelay(true);
     let (r, w) = tcp.into_split();
-    Ok((Box::new(r), Box::new(w), guard))
+    Ok((
+        (Box::new(r), Box::new(w), guard),
+        (connect_host, connect_port),
+    ))
 }
 
 pub(super) async fn handshake_and_run(
@@ -329,6 +401,7 @@ pub(super) async fn handshake_and_run(
         supports_terminate,
         supports_set_variable,
         exception_filters,
+        attached: launch_command == "attach",
     });
     *entry.conn.write().unwrap_or_else(|e| e.into_inner()) = Some(active_conn.clone());
     entry.mutate_and_broadcast(|snap| {
@@ -366,17 +439,12 @@ pub(super) async fn handshake_and_run(
     }
 
     sync_all_breakpoints(entry, &active_conn).await?;
-    if let Err(err) = wire.request("configurationDone", Some(json!({}))).await {
-        let msg = err.to_string();
-        let msg_lc = msg.to_ascii_lowercase();
-        let benign_unsupported = supports_config_done == Some(false)
-            && (msg_lc.contains("unsupported")
-                || msg_lc.contains("unrecognized")
-                || msg_lc.contains("not implemented")
-                || msg_lc.contains("unknown command"));
-        if !benign_unsupported {
-            return Err(Error::Invalid(format!("configurationDone failed: {msg}")));
-        }
+    // DAP: `configurationDone` only when the adapter advertises it, as VS Code
+    // does (DotRush's monodbg does not, and exits on the request).
+    if supports_config_done == Some(true) {
+        wire.request("configurationDone", Some(json!({})))
+            .await
+            .map_err(|err| Error::Invalid(format!("configurationDone failed: {err}")))?;
     }
 
     if !launch_done {
@@ -434,9 +502,10 @@ fn spawn_event_driver(
                 "initialized" => {
                     entry.initialized_notify.notify_one();
                 }
+                "__startDebugging__" => on_start_debugging(&entry, wire.clone(), ev),
                 "breakpoint" => {
                     if let Some(body) = &ev.body {
-                        apply_breakpoint_event(&entry, body);
+                        apply_breakpoint_event(&entry, &wire.bp_ids, body);
                     }
                 }
                 "output" => {
@@ -493,12 +562,22 @@ fn spawn_event_driver(
                         .unwrap_or(0);
                     let cat = if exit_code == 0 { "console" } else { "stderr" };
                     entry.append_output(cat, format!("Process exited with code {exit_code}\n"));
+                    if let Some(run) = entry
+                        .steps
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .as_mut()
+                    {
+                        run.exit_code = Some(exit_code);
+                    }
                     let sessions_fallback = Arc::clone(&sessions);
                     let entry_fallback = entry.clone();
                     let wire_fallback = wire.clone();
                     tokio::spawn(async move {
                         tokio::time::sleep(Duration::from_millis(250)).await;
-                        if wire_fallback.is_retired() {
+                        if wire_fallback.is_retired()
+                            || on_step_end(&sessions_fallback, &entry_fallback, &wire_fallback)
+                        {
                             return;
                         }
                         entry_fallback.disconnect_and_kill();
@@ -509,6 +588,9 @@ fn spawn_event_driver(
                     });
                 }
                 "terminated" | "__eof__" => {
+                    if on_step_end(&sessions, &entry, &wire) {
+                        break;
+                    }
                     entry.disconnect_and_kill();
                     if !entry.is_terminal() {
                         entry.mark_terminated();

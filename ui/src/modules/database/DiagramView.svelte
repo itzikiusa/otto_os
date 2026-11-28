@@ -15,6 +15,7 @@
   // caps how many it introspects. Engines without FK metadata (Redis/Mongo)
   // render table cards with a "no relationships" hint.
   import Icon from '../../lib/components/Icon.svelte';
+  import DetailPane from '../../lib/components/side/DetailPane.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import { announceShown } from '../../lib/announce.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
@@ -55,6 +56,10 @@
   let panX = $state(0);
   let panY = $state(0);
   let viewportEl = $state<HTMLDivElement | null>(null);
+  // The table picker is the diagram's Detail pane: opened on first load only while it fits
+  // beside the stage, else a sheet from the toolbar's "Tables" button (⌥⌘B toggles it).
+  let pickerOpen = $state(false), pickerSheet = $state(false), pickerAuto = true;
+  $effect(() => void (graph && pickerAuto && ((pickerAuto = false), (pickerOpen = !pickerSheet))));
 
   // Drag state — either panning the canvas or moving one card.
   let panning = $state(false);
@@ -377,46 +382,11 @@
   }
 </script>
 
+{#snippet pickerFoot()}
+  {#if graph}<span>{shown.size} / {graph.tables.length} shown{#if graph.truncated} · capped{/if}</span>{/if}
+{/snippet}
+
 <div class="diagram">
-  <aside class="picker">
-    <div class="picker-top">
-      <label class="lbl" for="erd-db">Schema</label>
-      <select id="erd-db" class="db-select" bind:value={selectedDb} onchange={onDbChange}>
-        {#each databases as d (d.path)}
-          <option value={d.path}>{d.name || '(default)'}</option>
-        {/each}
-      </select>
-    </div>
-
-    {#if graph}
-      <div class="picker-tools">
-        <input dir="auto" aria-label="Filter tables" class="search" placeholder="Filter tables…" bind:value={tableSearch} />
-        <div class="quick">
-          <button class="link" onclick={showRelatedOnly} title="Show only tables with relationships">Related</button>
-          <button class="link" onclick={showAll}>All</button>
-          <button class="link" onclick={showNone}>None</button>
-        </div>
-      </div>
-      <div class="tlist">
-        {#each filteredTables as t (t.id)}
-          <label class="trow" class:on={shown.has(t.id)}>
-            <input type="checkbox" checked={shown.has(t.id)} onchange={() => toggleTable(t.id)} />
-            <Icon name={t.kind === 'view' ? 'eye' : 'grid'} size={12} />
-            <span class="tname" title={t.name}>{t.name}</span>
-            <span class="tmeta">{t.columns.length}</span>
-          </label>
-        {/each}
-        {#if !filteredTables.length}
-          <p class="muted small">No tables match.</p>
-        {/if}
-      </div>
-      <div class="picker-foot muted small">
-        {shown.size} / {graph.tables.length} shown
-        {#if graph.truncated}· capped{/if}
-      </div>
-    {/if}
-  </aside>
-
   <div class="stage">
     <div class="toolbar">
       <div class="zoom">
@@ -427,6 +397,7 @@
         <button class="zb" onclick={relayout} title="Re-layout cards" aria-label="Re-layout"><Icon name="grid" size={12} /></button>
       </div>
       <span class="grow"></span>
+      <button class="btn small ghost" aria-pressed={pickerOpen} onclick={() => (pickerOpen = !pickerOpen)} title="Pick the tables shown (⌥⌘B)" data-testid="erd-tables-toggle"><Icon name="grid" size={12} /> Tables</button>
       {#if graph && !graph.relationships}
         <span class="rel-hint" title="This engine doesn’t expose foreign-key relationships">
           <Icon name="info" size={12} /> No relationships
@@ -453,7 +424,7 @@
     {:else if !graph}
       <div class="center"><EmptyState icon="link" title="No schema selected" body="Pick a schema to draw its tables and relationships." /></div>
     {:else if shown.size === 0}
-      <div class="center"><EmptyState icon="grid" title="No tables shown" body="Pick tables on the left to add them to the diagram." /></div>
+      <div class="center"><EmptyState icon="grid" title="No tables shown" body="Pick tables in the Tables pane to add them to the diagram." /></div>
     {:else}
       <div
         role="group"
@@ -514,6 +485,43 @@
       </div>
     {/if}
   </div>
+  <DetailPane module="database" pane="erd" title="Tables" open={pickerOpen} onclose={() => (pickerOpen = false)} ontoggle={() => (pickerOpen = !pickerOpen)}
+    bind:sheet={pickerSheet} minContent={360} footer={graph ? pickerFoot : undefined} testid="erd-picker">
+    <div class="picker">
+      <div class="picker-top">
+        <label class="lbl" for="erd-db">Schema</label>
+        <select id="erd-db" class="db-select" bind:value={selectedDb} onchange={onDbChange}>
+          {#each databases as d (d.path)}
+            <option value={d.path}>{d.name || '(default)'}</option>
+          {/each}
+        </select>
+      </div>
+
+      {#if graph}
+        <div class="picker-tools">
+          <input dir="auto" aria-label="Filter tables" class="search" placeholder="Filter tables…" bind:value={tableSearch} />
+          <div class="quick">
+            <button class="link" onclick={showRelatedOnly} title="Show only tables with relationships">Related</button>
+            <button class="link" onclick={showAll}>All</button>
+            <button class="link" onclick={showNone}>None</button>
+          </div>
+        </div>
+        <div class="tlist">
+          {#each filteredTables as t (t.id)}
+            <label class="side-row trow" class:on={shown.has(t.id)}>
+              <input type="checkbox" checked={shown.has(t.id)} onchange={() => toggleTable(t.id)} />
+              <Icon name={t.kind === 'view' ? 'eye' : 'grid'} size={12} />
+              <span class="tname" title={t.name}>{t.name}</span>
+              <span class="tmeta">{t.columns.length}</span>
+            </label>
+          {/each}
+          {#if !filteredTables.length}
+            <p class="muted small">No tables match.</p>
+          {/if}
+        </div>
+      {/if}
+    </div>
+  </DetailPane>
 </div>
 
 <style>
@@ -523,14 +531,11 @@
     min-height: 0;
   }
 
-  /* ── Left picker ── */
+  /* ── The table picker (the diagram's Detail pane) ── */
   .picker {
-    width: 220px;
-    flex: 0 0 220px;
+    flex: 1;
     display: flex;
     flex-direction: column;
-    border-inline-end: 1px solid var(--border);
-    background: var(--surface);
     min-height: 0;
   }
   .picker-top {
@@ -593,18 +598,14 @@
     padding: 4px 6px;
     min-height: 0;
   }
+  /* A checklist row on the shared .side-row look: shown = full text colour. */
   .trow {
-    display: flex;
-    align-items: center;
     gap: 6px;
-    padding: 2px 6px;
-    border-radius: var(--radius-s);
+    min-block-size: 30px;
+    padding-inline: 8px 6px;
     cursor: pointer;
     color: var(--text-dim);
     font-size: var(--fs-s);
-  }
-  .trow:hover {
-    background: var(--hover);
   }
   .trow.on {
     color: var(--text);
@@ -622,10 +623,6 @@
     font-size: var(--fs-xs);
     color: var(--text-dim);
     font-variant-numeric: tabular-nums;
-  }
-  .picker-foot {
-    padding: 6px 10px;
-    border-top: 1px solid var(--border);
   }
 
   /* ── Stage ── */

@@ -1,6 +1,6 @@
 import { test, expect, type Page } from '@playwright/test';
 import { apiCtx, seedWorkspace } from './seed';
-import { expectNoHorizontalOverflow } from './helpers';
+import { expectNoHorizontalOverflow, showThreadList, hideThreadList } from './helpers';
 import { ITEMS, mockThread, TURNS } from './threadsReadingFixture';
 
 // The floating thread details card beside the 760 px reading column
@@ -44,16 +44,16 @@ test('the details card never covers the reading column, at any width, list open 
   const thread = page.getByTestId('runtime-thread-lay-1');
   await expect(thread.getByText('Offline edits now survive')).toBeVisible({ timeout: 30_000 });
   await shots(page, 'integrated-1600');
-  const toggle = page.getByTestId('threads-toggle-sidebar');
+  const list = page.getByTestId('threads-sidebar');
   for (const width of [1280, 1440, 1600, 1920]) {
     for (const listOpen of [true, false]) {
       await page.setViewportSize({ width, height: 1000 });
-      if ((await toggle.getAttribute('aria-pressed')) !== String(listOpen)) await toggle.click();
-      await expect(toggle).toHaveAttribute('aria-pressed', String(listOpen));
+      if ((await list.isVisible()) !== listOpen) await (listOpen ? showThreadList(page) : hideThreadList(page));
       const centre = (await page.locator('.th-center-col').boundingBox())!;
       const shouldFloat = centre.width >= 760 + 48 + 296;
-      // The commonest laptop width floats it, list open or not.
-      if (width >= 1440) expect(shouldFloat, `${width} list ${listOpen ? 'open' : 'closed'}: room to float`).toBe(true);
+      // A wide window floats it, list open or not (at 1440 the Side panel's rail
+      // and the list leave the column just under the card's room: it heads the panel).
+      if (width >= 1600) expect(shouldFloat, `${width} list ${listOpen ? 'open' : 'closed'}: room to float`).toBe(true);
       const card = page.getByTestId('thread-details-card');
       await expect(card, `${width} list ${listOpen ? 'open' : 'closed'}: floats`).toHaveCount(shouldFloat ? 1 : 0);
       if (!shouldFloat) continue;

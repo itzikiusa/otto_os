@@ -118,14 +118,14 @@ test('Database saved and history failures offer retry; tabs follow keyboard focu
   await setup(page,'database');
   const tabs = page.getByRole('tablist',{name:'Sidebar view'});
   await tabs.getByRole('tab',{name:'Saved',exact:true}).click();
-  await expect(page.locator('.side-body').getByRole('button',{name:'Retry',exact:true})).toBeVisible();
+  await expect(page.getByTestId('db-side').getByRole('button',{name:'Retry',exact:true})).toBeVisible();
   await expect(page.getByText('No saved queries', { exact: true })).toHaveCount(0);
   fail = false;
-  await page.locator('.side-body').getByRole('button',{name:'Retry',exact:true}).click();
+  await page.getByTestId('db-side').getByRole('button',{name:'Retry',exact:true}).click();
   await expect(page.getByText('No saved queries', { exact: true })).toBeVisible();
   await tabs.getByRole('tab',{name:'History',exact:true}).click();
-  await expect(page.locator('.side-body').getByRole('button',{name:'Retry',exact:true})).toBeVisible();
-  await page.locator('.side-body').getByRole('button',{name:'Retry',exact:true}).click();
+  await expect(page.getByTestId('db-side').getByRole('button',{name:'Retry',exact:true})).toBeVisible();
+  await page.getByTestId('db-side').getByRole('button',{name:'Retry',exact:true}).click();
   await expect(page.getByText('No query history yet', { exact: true })).toBeVisible();
   await tabs.getByRole('tab',{name:'History',exact:true}).press('Home');
   // The connection list is its own page now: Tables is the first view.

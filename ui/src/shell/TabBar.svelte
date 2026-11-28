@@ -26,6 +26,11 @@
   import { onTabKey } from '../lib/tabKeys';
   import { tick } from 'svelte';
   import { checkOpenTabs } from './openTabsCheck';
+  import HeaderChrome from '../lib/components/side/HeaderChrome.svelte';
+  import AgentDrivingBar from '../lib/components/AgentDrivingBar.svelte';
+  import { pageNav } from '../lib/components/side/pageNav.svelte';
+  import { uiControl } from '../lib/stores/uiControl.svelte';
+  import { viewport } from '../lib/stores/viewport.svelte';
 
   // Share modal: tracks the session id we're sharing; null = closed.
   let shareSessionId = $state<string | null>(null);
@@ -314,6 +319,12 @@
   $effect(() => (barEl ? embedChrome.claim(barEl) : undefined));
   const hostsPrimaryPane = $derived(!isEmbedded && isTauri && sidePane.active && !!barEl && embedChrome.owner === barEl);
   const hostsPane = $derived(isEmbedded && !!barEl && embedChrome.owner === barEl);
+  // A tablet (design.md §7.12): this strip is the page's one header row, as a
+  // PageHeader is elsewhere — the shell bar steps aside, the Side panel button
+  // ends the row and the agent-driving strip sits under it.
+  const tabletRow = $derived(!viewport.isDesktop && !isTauri && !isEmbedded);
+  $effect(() => (barEl && tabletRow ? uiControl.claimBar(barEl) : undefined));
+  const hostsBar = $derived(!!barEl && uiControl.barOwner === barEl);
   /** Tiled → the free layout: the tiles in their current order as an equal grid. */
   function freeLayout(): void {
     const tiles = applyTileOrder([...ws.mainSessions, ...ws.threadPanes.map((id) => ({ id, thread: true as const }))], layout.tileOrder);
@@ -333,6 +344,10 @@
   data-tauri-drag-region
   onmousedown={startWindowDrag}
 >
+  <!-- The strip is Agents' page header row (design.md §7.3, §7.12): "Show
+       Sessions" at its start while the list pane is hidden; on a tablet the
+       Side panel button at its end (the shell bar steps aside). -->
+  <HeaderChrome part="lead" show={pageNav.show} />
   <!-- The strip only with two or more tabs in the tabbed view (A3): one tab
        repeats the pane's own header, and the tiled grid shows every tab. -->
   <div class="tabs" class:overflowing bind:this={tabsEl} onscroll={measureOverflow} role="tablist" aria-label="Session tabs">
@@ -455,7 +470,9 @@
     <Icon name="plus" size={13} />
   </button>
   {#if hostsPane}<PaneControls />{:else if hostsPrimaryPane}<PaneControls pane="primary" />{/if}
+  {#if tabletRow}<HeaderChrome part="trail" />{/if}
 </div>
+{#if hostsBar}<AgentDrivingBar />{/if}
 
 <style>
   .tabbar {

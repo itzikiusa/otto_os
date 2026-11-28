@@ -23,6 +23,7 @@
     mirroredSim: SimDevice | null;
     canShowMarksRail?: boolean;
     showMarksRail?: boolean;
+    showAgent?: boolean;
   }
 
   export interface BrowserUrlBarActions {
@@ -42,6 +43,8 @@
     summarize: () => void;
     vaultSave: (e: MouseEvent) => void;
     toggleMarksRail?: () => void;
+    /** The page's agent (the Detail pane's Agent view). */
+    toggleAgent?: () => void;
   }
 </script>
 
@@ -117,6 +120,7 @@
   function openCompactTools(e: MouseEvent): void {
     const tab = browser.activeTab;
     const items: MenuItem[] = [];
+    if (actions.toggleAgent) items.push({ label: tools.showAgent ? 'Hide agent' : 'Show agent', icon: 'assistant', action: actions.toggleAgent });
     if ((live.activeRemote && browserLive.ready) || live.activeLive) {
       const remote = live.activeRemote ? live.remoteState?.session : undefined;
       items.push(
@@ -316,6 +320,10 @@
       <Icon name="key" size={14} />
     </button>
   {/if}
+  {#if actions.toggleAgent}
+    <button class="icon-btn tool desktop-tool" class:active={!!tools.showAgent} onclick={actions.toggleAgent} aria-pressed={!!tools.showAgent}
+      aria-label={tools.showAgent ? 'Hide agent' : 'Show agent'} title={tools.showAgent ? 'Hide agent (⌥⌘B)' : 'Show agent (⌥⌘B)'}><Icon name="assistant" size={14} /></button>
+  {/if}
   {#if browser.activeTab}
     {#if tools.canShowMarksRail && actions.toggleMarksRail}
       <button
@@ -404,6 +412,9 @@
 
 <style>
   .urlbar {
+    /* Its own query container: the page's Detail pane sheet (position: fixed)
+       must not sit inside a container (containment makes it the sheet's box). */
+    container-type: inline-size;
     display: flex;
     align-items: center;
     gap: 6px;

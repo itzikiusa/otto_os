@@ -10,6 +10,8 @@
 //!   `netcoredbg` directly to that PID.
 //! - **Process attach:** supports explicit PID (`launch.attach_pid` or `DOTNET_ATTACH_PID`)
 //!   for local/SSH `netcoredbg` attach, and direct TCP DAP attach when `attach_port` is provided.
+//! - **Unity Editor attach** (`unity://editor`, this Mac): DotRush's `monodbg`
+//!   bridges DAP to the Editor's Mono Soft Debugger ([`unity`]).
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -23,6 +25,12 @@ use super::adapters::{
 };
 use super::{run_target_command, DapStartContext};
 use crate::types::{IdeDebugOutputEntry, IdeStartDebugReq, IdeTargetKind};
+
+#[path = "adapters_dotnet_steps.rs"]
+mod steps;
+#[path = "adapters_unity.rs"]
+pub(crate) mod unity;
+pub(crate) use steps::plan_dotnet_test_steps;
 
 /// Parse `<TargetFramework>`, `<TargetFrameworks>`, and `<AssemblyName>` from a
 /// `.csproj` / `.fsproj` XML document.
@@ -77,7 +85,6 @@ pub(crate) fn parse_vstest_host_pid(output: &str) -> Option<u32> {
 }
 
 /// Check whether `dir` (or an ancestor up to `root`) is a Unity project (`Assets/` + `ProjectSettings/`).
-#[cfg(test)]
 #[allow(clippy::disallowed_methods)]
 pub(crate) fn detect_unity_project_root(
     start: &Path,
@@ -273,6 +280,9 @@ pub(super) async fn resolve_dotnet_adapter(
                 .into(),
         ));
     }
+    if raw_program.to_ascii_lowercase().starts_with("unity://") {
+        return unity::resolve_unity_attach(data_dir, req, cwd, env).await;
+    }
 
     // Check for explicit direct TCP DAP attach port (e.g. remote netcoredbg --server=PORT).
     // netcoredbg requires a target `processId` on `attach` requests (API-6).
@@ -365,7 +375,11 @@ pub(super) async fn resolve_dotnet_adapter(
 
     // Test debugging mode (`xUnit` / `NUnit` / `MSTest`) — covers both filtered single-test
     // gutter actions and unfiltered whole-project `.NET Test` runs (BUG-25).
-    if let Some(opt_test_name) = detect_dotnet_test_debug_intent(req, ctx, &norm_program, cwd) {
+    // A Microsoft.Testing.Platform Debug All step launches its built test app.
+    let mtp_step = req.launch.debug_step && norm_program.ends_with(".dll");
+    if let Some(opt_test_name) =
+        detect_dotnet_test_debug_intent(req, ctx, &norm_program, cwd).filter(|_| !mtp_step)
+    {
         return resolve_dotnet_test_debug(
             language,
             adapter_name,
@@ -549,8 +563,24 @@ async fn resolve_dotnet_test_debug(
     ctx: &DapStartContext,
     cwd: &str,
     env: BTreeMap<String, String>,
-    mut initial_output: Vec<IdeDebugOutputEntry>,
+    initial_output: Vec<IdeDebugOutputEntry>,
 ) -> Result<ResolvedDapAdapter> {
+    // A Debug All step's project was built by the run's plan.
+    if req.launch.debug_step {
+        return attach_vstest_host(
+            language,
+            adapter_name,
+            adapter_bin,
+            dotnet_bin,
+            (norm_program, test_name),
+            req,
+            ctx,
+            cwd,
+            env,
+            initial_output,
+        )
+        .await;
+    }
     let proj_path = match req.target.kind {
         IdeTargetKind::Local => select_local_dotnet_test_project(norm_program, cwd)?,
         IdeTargetKind::Ssh => {
@@ -587,7 +617,36 @@ async fn resolve_dotnet_test_debug(
             err_txt.trim()
         )));
     }
+    attach_vstest_host(
+        language,
+        adapter_name,
+        adapter_bin,
+        dotnet_bin,
+        (&proj_path, test_name),
+        req,
+        ctx,
+        cwd,
+        env,
+        initial_output,
+    )
+    .await
+}
 
+/// Run `dotnet test` on the built `proj_path` with `VSTEST_HOST_DEBUG=1` and attach
+/// to the one test host it pauses (`-f` keeps a multi-targeted project to one host).
+#[allow(clippy::too_many_arguments)]
+async fn attach_vstest_host(
+    language: &str,
+    adapter_name: &str,
+    adapter_bin: String,
+    dotnet_bin: String,
+    (proj_path, test_name): (&str, Option<&str>),
+    req: &IdeStartDebugReq,
+    ctx: &DapStartContext,
+    cwd: &str,
+    env: BTreeMap<String, String>,
+    mut initial_output: Vec<IdeDebugOutputEntry>,
+) -> Result<ResolvedDapAdapter> {
     let filter_expr = test_name.map(|t| {
         if t.contains('=') || t.contains('~') {
             t.to_string()
@@ -605,9 +664,21 @@ async fn resolve_dotnet_test_debug(
         test_args.push("--filter".into());
         test_args.push(f.clone());
     }
-    test_args.push(proj_path.clone());
+    if let Some(tfm) = req
+        .launch
+        .test_framework
+        .as_deref()
+        .filter(|f| !f.is_empty())
+    {
+        test_args.push("-f".into());
+        test_args.push(tfm.to_string());
+    }
+    // Per-test `Passed` / `Failed` lines for the console and the step result.
+    test_args.push("--logger".into());
+    test_args.push("console;verbosity=normal".into());
+    test_args.push(proj_path.to_string());
     let label = test_name.map(str::to_string).unwrap_or_else(|| {
-        let proj = Path::new(&proj_path);
+        let proj = Path::new(proj_path);
         let name = proj
             .file_name()
             .unwrap_or(proj.as_os_str())
@@ -652,7 +723,8 @@ async fn resolve_dotnet_test_debug(
         let mut lines = BufReader::new(stdout).lines();
         let mut host_pid: Option<u32> = None;
         let mut captured = String::new();
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+        // A cold test host on a large solution can take longer than 20 s.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
         while tokio::time::Instant::now() < deadline {
             match tokio::time::timeout(Duration::from_secs(2), lines.next_line()).await {
                 Ok(Ok(Some(line))) => {
@@ -669,8 +741,22 @@ async fn resolve_dotnet_test_debug(
             }
         }
         if let Some(pid) = host_pid {
-            // Drain remaining stdout lines so `dotnet test` never blocks on a full pipe.
-            tokio::spawn(async move { while let Ok(Some(_)) = lines.next_line().await {} });
+            // `dotnet test`'s own output (per-test lines, the summary) goes to the
+            // console; reading it to the end also keeps its pipe from filling up.
+            let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+            companion.set_output(rx);
+            tokio::spawn(async move {
+                while let Ok(Some(line)) = lines.next_line().await {
+                    let _ = tx.send(line);
+                }
+            });
+            if !captured.trim().is_empty() {
+                initial_output.push(IdeDebugOutputEntry {
+                    seq: 0,
+                    category: "stdout".into(),
+                    text: captured.clone(),
+                });
+            }
             initial_output.push(IdeDebugOutputEntry {
                 seq: 0,
                 category: "console".into(),
@@ -781,18 +867,29 @@ fn dotnet_solution_test_projects(sln: &Path) -> Vec<PathBuf> {
         .collect()
 }
 
-/// Select the local `.csproj`/`.fsproj` (or `.sln`) target for `.NET` test debugging:
+/// The test projects a `.NET` "Debug Tests" of `norm_program` covers.
+#[derive(Debug, Default)]
+pub(crate) struct DotnetTestSelection {
+    /// Test projects, sorted (an explicitly requested project is the one entry).
+    pub(crate) tests: Vec<PathBuf>,
+    /// The `.sln`/`.slnx` asked for, if any.
+    pub(crate) solution: Option<PathBuf>,
+    /// What a single session targets when no test project was found.
+    pub(crate) fallback: Option<PathBuf>,
+    /// Where the scan started (names are shown relative to it).
+    pub(crate) root: PathBuf,
+}
+
+/// Select the local `.csproj`/`.fsproj` (or `.sln`) targets for `.NET` test debugging:
 /// - An explicitly requested `.csproj`/`.fsproj` is used as-is, even when its
 ///   `IsTestProject`/`Microsoft.NET.Test.Sdk` comes from `Directory.Build.props` (BUG3-8).
+/// - A `.sln`/`.slnx` gives the test projects it references.
 /// - A directory/repo root is scanned (depth <= 3) for test projects.
-/// - One VSTest debug session attaches to ONE test host, so a solution or directory holding
-///   several test projects is refused with their names instead of silently debugging only
-///   the first one (BUG-25).
 #[allow(clippy::disallowed_methods)] // bounded depth-3 scan at debug session start
-pub(crate) fn select_local_dotnet_test_project(
+pub(crate) fn select_local_dotnet_test_projects(
     norm_program: &str,
     cwd: &str,
-) -> Result<Option<PathBuf>> {
+) -> DotnetTestSelection {
     let prog_path = Path::new(norm_program);
     let ext = prog_path
         .extension()
@@ -801,19 +898,25 @@ pub(crate) fn select_local_dotnet_test_project(
         .unwrap_or_default();
     let is_file = !norm_program.is_empty() && prog_path.is_file();
     if is_file && matches!(ext.as_str(), "csproj" | "fsproj") {
-        return Ok(Some(prog_path.to_path_buf()));
+        return DotnetTestSelection {
+            tests: vec![prog_path.to_path_buf()],
+            ..DotnetTestSelection::default()
+        };
     }
     if is_file && matches!(ext.as_str(), "sln" | "slnx") {
-        let tests = dotnet_solution_test_projects(prog_path);
-        let dir = prog_path.parent().unwrap_or(Path::new(""));
-        return match tests.len() {
-            0 | 1 => Ok(Some(prog_path.to_path_buf())),
-            _ => Err(multiple_dotnet_test_projects_err(&tests, dir)),
+        return DotnetTestSelection {
+            tests: dotnet_solution_test_projects(prog_path),
+            solution: Some(prog_path.to_path_buf()),
+            fallback: Some(prog_path.to_path_buf()),
+            root: prog_path.parent().unwrap_or(Path::new("")).to_path_buf(),
         };
     }
     if is_file {
         if let Some(direct) = find_local_dotnet_project(norm_program, cwd) {
-            return Ok(Some(direct));
+            return DotnetTestSelection {
+                tests: vec![direct],
+                ..DotnetTestSelection::default()
+            };
         }
     }
     let root = if !norm_program.is_empty() && prog_path.is_dir() {
@@ -857,10 +960,31 @@ pub(crate) fn select_local_dotnet_test_project(
         }
     }
     test_projects.sort();
-    match test_projects.len() {
-        0 => Ok(sln_fallback.or_else(|| find_local_dotnet_project(norm_program, cwd))),
-        1 => Ok(test_projects.pop()),
-        _ => Err(multiple_dotnet_test_projects_err(&test_projects, &root)),
+    DotnetTestSelection {
+        tests: test_projects,
+        solution: None,
+        fallback: sln_fallback.or_else(|| find_local_dotnet_project(norm_program, cwd)),
+        root,
+    }
+}
+
+/// The one target of a single `.NET` test session. A folder or solution holding
+/// several test projects is refused with their names: an unfiltered run plans
+/// one Debug All step per project instead, and one filtered `dotnet test`
+/// over several projects would pause one host per project (BUG-25).
+pub(crate) fn select_local_dotnet_test_project(
+    norm_program: &str,
+    cwd: &str,
+) -> Result<Option<PathBuf>> {
+    single_dotnet_test_target(select_local_dotnet_test_projects(norm_program, cwd))
+}
+
+fn single_dotnet_test_target(mut sel: DotnetTestSelection) -> Result<Option<PathBuf>> {
+    match sel.tests.len() {
+        0 => Ok(sel.fallback),
+        1 if sel.solution.is_some() => Ok(sel.solution),
+        1 => Ok(sel.tests.pop()),
+        _ => Err(multiple_dotnet_test_projects_err(&sel.tests, &sel.root)),
     }
 }
 
@@ -904,9 +1028,25 @@ async fn select_ssh_dotnet_test_project(
     cwd: &str,
     env: &BTreeMap<String, String>,
 ) -> Result<Option<PathBuf>> {
+    single_dotnet_test_target(
+        select_ssh_dotnet_test_projects(req, ctx, norm_program, cwd, env).await?,
+    )
+}
+
+/// SSH twin of [`select_local_dotnet_test_projects`], on a read-only local mirror.
+pub(crate) async fn select_ssh_dotnet_test_projects(
+    req: &IdeStartDebugReq,
+    ctx: &DapStartContext,
+    norm_program: &str,
+    cwd: &str,
+    env: &BTreeMap<String, String>,
+) -> Result<DotnetTestSelection> {
     let low = norm_program.to_ascii_lowercase();
     if low.ends_with(".csproj") || low.ends_with(".fsproj") {
-        return Ok(Some(PathBuf::from(norm_program)));
+        return Ok(DotnetTestSelection {
+            tests: vec![PathBuf::from(norm_program)],
+            ..DotnetTestSelection::default()
+        });
     }
     let program = if norm_program.is_empty() {
         cwd
@@ -926,7 +1066,7 @@ async fn select_ssh_dotnet_test_project(
     .await?;
     let mirror = tempfile::tempdir()
         .map_err(|e| Error::Internal(format!("dotnet test project mirror: {e}")))?;
-    select_dotnet_test_project_from_snapshot(
+    select_dotnet_test_projects_from_snapshot(
         mirror.path(),
         &String::from_utf8_lossy(&out.stdout),
         program,
@@ -935,14 +1075,14 @@ async fn select_ssh_dotnet_test_project(
 }
 
 /// Write an [`SSH_DOTNET_TEST_SNAPSHOT_SH`] snapshot under `mirror`, run the local selection
-/// on it and map the pick back to the remote path. Paths with `..` never leave the mirror.
+/// on it and map the picks back to remote paths. Paths with `..` never leave the mirror.
 #[allow(clippy::disallowed_methods)] // small temp mirror written at debug session start
-fn select_dotnet_test_project_from_snapshot(
+fn select_dotnet_test_projects_from_snapshot(
     mirror: &Path,
     snapshot: &str,
     program: &str,
     cwd: &str,
-) -> Result<Option<PathBuf>> {
+) -> Result<DotnetTestSelection> {
     let local = |remote: &str| {
         let rel = Path::new(remote).strip_prefix("/").ok()?;
         rel.components()
@@ -960,7 +1100,7 @@ fn select_dotnet_test_project_from_snapshot(
         }
     }
     let (Some(prog), Some(cwd)) = (local(program), local(cwd)) else {
-        return Ok(None);
+        return Ok(DotnetTestSelection::default());
     };
     std::fs::create_dir_all(&cwd).map_err(io)?;
     if kind == "D" {
@@ -969,8 +1109,26 @@ fn select_dotnet_test_project_from_snapshot(
         std::fs::create_dir_all(prog.parent().unwrap_or(mirror)).map_err(io)?;
         std::fs::write(&prog, "").map_err(io)?;
     }
-    let picked = select_local_dotnet_test_project(&prog.to_string_lossy(), &cwd.to_string_lossy())?;
-    Ok(picked.map(|p| Path::new("/").join(p.strip_prefix(mirror).unwrap_or(&p))))
+    let sel = select_local_dotnet_test_projects(&prog.to_string_lossy(), &cwd.to_string_lossy());
+    let remote = |p: PathBuf| Path::new("/").join(p.strip_prefix(mirror).unwrap_or(&p));
+    Ok(DotnetTestSelection {
+        tests: sel.tests.into_iter().map(remote).collect(),
+        solution: sel.solution.map(remote),
+        fallback: sel.fallback.map(remote),
+        root: remote(sel.root),
+    })
+}
+
+#[cfg(test)]
+fn select_dotnet_test_project_from_snapshot(
+    mirror: &Path,
+    snapshot: &str,
+    program: &str,
+    cwd: &str,
+) -> Result<Option<PathBuf>> {
+    single_dotnet_test_target(select_dotnet_test_projects_from_snapshot(
+        mirror, snapshot, program, cwd,
+    )?)
 }
 
 /// Extract an explicit `.NET` attach PID from `launch.attach_pid` or `DOTNET_ATTACH_PID`

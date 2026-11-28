@@ -5,9 +5,9 @@
   // hero to start a new canvas. You never write Mermaid — you describe what you
   // want in the Assistant and the agent edits the file; the board re-renders live.
   import { untrack } from 'svelte';
-  import PaneDivider from '../../lib/components/PaneDivider.svelte';
   import PageBody from '../../lib/components/PageBody.svelte';
-  import { LIST_PANE, loadPaneWidth } from '../../lib/paneResizer';
+  import ListDetail from '../../lib/components/side/ListDetail.svelte';
+  import DetailPane from '../../lib/components/side/DetailPane.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
   import { initialSelection, rememberSelection } from '../../lib/lastSelection';
@@ -37,8 +37,10 @@
   const isExcalidraw = $derived(canvas.format === 'excalidraw');
   const isD2 = $derived(canvas.format === 'd2');
 
-  // Phone collapses the scene list once a board is open (more room).
   const isPhone = $derived(viewport.isPhone);
+  // Phone push (ListDetail): the board is the page once a scene was chosen;
+  // Back returns to the list with the scene still open and marked.
+  let phoneOpen = $state(false);
   const openTitle = $derived(
     canvas.scenes.find((scene) => scene.id === canvas.currentId)?.title,
   );
@@ -49,9 +51,6 @@
   >(undefined);
   // The Assistant panel (the agent shell + Ask-AI input) — opens on demand.
   let showConvo = $state(false);
-  // The scene list's width — drag / ←→ on the divider, remembered across visits.
-  let listW = $state(loadPaneWidth('canvas.listW', LIST_PANE.default, LIST_PANE.min, LIST_PANE.max));
-  let showTabletScenes = $state(true);
   let workspaceEmpty: HTMLDivElement | undefined = $state();
 
   // Canvas is global — list the user's scenes across all workspaces. A failure
@@ -61,8 +60,8 @@
   });
 
   // List/detail: with scenes, open on one (the remembered scene, else the
-  // first) instead of the "start a new canvas" hero. Not on phone — opening a
-  // board collapses the scene list there, which is the first screen. Also
+  // first) instead of the "start a new canvas" hero. Not on a phone, where the
+  // list is the first screen (a board loaded behind it would size to 0). Also
   // re-picks after the open scene is deleted. A failed open stops the loop
   // (it shows inline with Retry).
   //
@@ -73,7 +72,7 @@
   // would then never re-run (e.g. never re-pick after the open scene is deleted).
   let picking = false;
   $effect(() => {
-    if (viewport.isPhone) return;
+    if (viewport.navDrawer) return;
     if (canvas.currentId || canvas.pendingOpenId || canvas.loadError) return;
     if (canvas.listLoading || canvas.scenes.length === 0) return;
     if (picking) return;
@@ -103,6 +102,7 @@
     if (id) {
       canvas.pendingOpenId = null;
       picking = true;
+      phoneOpen = true;
       void canvas
         .open(id)
         .catch(() => {})
@@ -125,9 +125,9 @@
     return { type: 'otto-canvas', version: 1, format: 'mermaid', source: '' };
   }
 
-  /** Header "New scene ▾": pick the format from the shared (viewport-clamped) menu. */
-  function newSceneMenu(e: MouseEvent): void {
-    ctxMenu.show(e, [
+  /** The list pane's "New scene": pick the format from the shared (viewport-clamped) menu. */
+  function newSceneMenu(anchor: Element | null): void {
+    ctxMenu.showAt(anchor, [
       { label: 'Excalidraw board', icon: 'shapes', action: () => void createBlank('excalidraw') },
       { label: 'Mermaid diagram', icon: 'branch', action: () => void createBlank('mermaid') },
       { label: 'D2 diagram', icon: 'layers', action: () => void createBlank('d2') },
@@ -139,13 +139,6 @@
   /** The list failed with nothing to show — the main pane owns the error + Retry. */
   const listFailed = $derived(!!canvas.listError && canvas.scenes.length === 0);
 
-  /** Phone push-nav back: save a pending edit first (closeScene drops the
-   *  autosave timer), then return to the scene list. */
-  async function backToList(): Promise<void> {
-    if (canvas.dirty) await canvas.saveNow().catch(() => {});
-    showConvo = false;
-    canvas.closeScene();
-  }
 
   // ⌘K: the page's verbs (new scene per format; the assistant while a scene
   // is open). Group = the module name.
@@ -165,6 +158,7 @@
   async function createBlank(format: CanvasFormat = 'excalidraw'): Promise<void> {
     try {
       const created = await canvas.create('Untitled canvas', blankDoc(format));
+      phoneOpen = true;
       await canvas.open(created.id);
     } catch (e) {
       toastError('Couldn’t create canvas', e);
@@ -178,30 +172,7 @@
   title={openTitle || 'Canvas'}
   subtitle="Diagrams an agent draws and refines as you chat"
   crumbs={isPhone ? [] : [{ label: 'Design Hall', onclick: () => router.go('design') }]}
->
-  {#snippet leading()}
-    {#if isPhone && canvas.currentId}
-      <button class="icon-btn" onclick={() => void backToList()} aria-label="Back to scenes" title="Back to scenes">
-        <Icon name="chevronLeft" size={16} />
-      </button>
-    {:else if viewport.isTablet && canvas.currentId && !noScenes && !listFailed}
-      <button class="icon-btn" onclick={() => (showTabletScenes = !showTabletScenes)}
-        aria-label={showTabletScenes ? 'Hide scenes' : 'Show scenes'}
-        title={showTabletScenes ? 'Hide scenes' : 'Show scenes'} aria-expanded={showTabletScenes}
-        aria-controls="canvas-scene-list">
-        <Icon name="sidebar" size={16} />
-      </button>
-    {/if}
-  {/snippet}
-  {#snippet actions()}
-    <!-- One primary per page: with no scenes yet the hero's mode cards own "new". -->
-    {#if ws.currentId && !noScenes}
-      <button class="btn small primary" onclick={newSceneMenu} aria-haspopup="menu" data-testid="canvas-new-scene">
-        <Icon name="plus" size={13} /> New scene <Icon name="chevronDown" size={12} />
-      </button>
-    {/if}
-  {/snippet}
-</PageHeader>
+/>
 {#each Object.entries(canvas.docSaveErrors) as [id, error] (id)}
   <div class="save-error" role="alert">
     <span>Couldn’t save {canvas.scenes.find(scene => scene.id === id)?.title ?? 'scene'}. Your draft is kept in this app. {error}</span>
@@ -239,23 +210,19 @@
     />
   </div>
 {:else}
-  <!-- Phone: push navigation — the scene list IS the first screen (full
-       width); opening a scene replaces it and the header gets a Back button. -->
-  <div class="canvas-page" class:phone={isPhone} class:tablet={viewport.isTablet}>
-    <aside
-      id="canvas-scene-list"
-      class="scenes"
-      class:hidden={(isPhone && canvas.currentId) || (viewport.isTablet && canvas.currentId && !showTabletScenes) || noScenes || listFailed}
-      class:full={isPhone && !canvas.currentId}
-      style="--list-pane-w:{listW}px"
-    >
-      <SceneList />
-    </aside>
-    {#if !isPhone && !viewport.isTablet && !noScenes && !listFailed}
-      <PaneDivider bind:width={listW} storageKey="canvas.listW" label="Resize the scenes list" />
-    {/if}
-
-    <section class="main" class:hidden={isPhone && !canvas.currentId && !noScenes && !listFailed && !canvas.loadError}>
+  <ListDetail
+    module="canvas"
+    name="Scenes"
+    open={phoneOpen && (!!canvas.currentId || !!canvas.loadError)}
+    onback={() => (phoneOpen = false)}
+    empty={noScenes || listFailed}
+    legacy={{ w: 'canvas.listW' }}
+    testid="canvas-page"
+  >
+    {#snippet list()}
+      <SceneList onnew={newSceneMenu} onpick={() => (phoneOpen = true)} />
+    {/snippet}
+    <section class="main">
       {#if canvas.loadError && canvas.scene && canvas.currentId}
         <!-- Opening another scene failed: keep the open board, say so above it. -->
         <LoadState what="that scene" variant="compact" error={canvas.loadError} empty onretry={retryOpen} />
@@ -274,34 +241,26 @@
       {:else if canvas.scene && canvas.currentId}
         <!-- Remount the board when switching scenes so each loads its own source. -->
         {#key canvas.currentId}
-          <div class="editor-split" class:with-convo={showConvo}>
-            <div class="editor-host">
-              {#if isExcalidraw}
-                <ExcalidrawCanvas bind:this={editor} />
-              {:else if isD2}
-                <D2Canvas bind:this={editor} />
-              {:else}
-                <MermaidCanvas bind:this={editor} />
-              {/if}
-              {#if !showConvo}
-                <!-- Open the Assistant (Ask-AI lives in the conversation panel). -->
-                <div class="ai-bar">
-                  <button class="ai-fab" onclick={() => (showConvo = true)} title="Open the assistant: describe a change and the agent redraws the scene">
-                    <Icon name="sparkle" size={14} /> Ask Otto
-                  </button>
-                </div>
-              {/if}
-            </div>
-            {#if showConvo}
-              <aside class="convo-panel" class:overlay={isPhone}>
-                <ConversationPanel {editor} onclose={() => (showConvo = false)} />
-              </aside>
+          <div class="editor-host">
+            {#if isExcalidraw}
+              <ExcalidrawCanvas bind:this={editor} />
+            {:else if isD2}
+              <D2Canvas bind:this={editor} />
+            {:else}
+              <MermaidCanvas bind:this={editor} />
+            {/if}
+            {#if !showConvo}
+              <!-- Open the Assistant (the Detail pane; Ask-AI lives in it). -->
+              <div class="ai-bar">
+                <button class="ai-fab" onclick={() => (showConvo = true)} title="Open the assistant: describe a change and the agent redraws the scene (⌥⌘B)">
+                  <Icon name="sparkle" size={14} /> Ask Otto
+                </button>
+              </div>
             {/if}
           </div>
         {/key}
       {:else if !noScenes}
-        <!-- Listing / auto-opening a scene (phone hides this pane: the list
-             is the screen until a scene opens). -->
+        <!-- Listing / auto-opening a scene. -->
         <LoadState what="scenes" variant="page" loading empty />
       {:else}
         <div class="hero">
@@ -330,7 +289,24 @@
         </div>
       {/if}
     </section>
-  </div>
+    {#snippet detail()}
+      {#if canvas.scene && canvas.currentId}
+        <!-- The assistant is the page's Detail pane: inline beside the board
+             while it keeps 480 px, else a right sheet (full width on a phone). -->
+        <DetailPane
+          module="canvas"
+          pane="assistant"
+          title="Assistant"
+          open={showConvo}
+          onclose={() => (showConvo = false)}
+          ontoggle={() => (showConvo = !showConvo)}
+          testid="canvas-assistant"
+        >
+          {#key canvas.currentId}<ConversationPanel {editor} />{/key}
+        </DetailPane>
+      {/if}
+    {/snippet}
+  </ListDetail>
 {/if}
 </PageBody>
 </div>
@@ -345,53 +321,18 @@
     height: 100%;
     min-height: 0;
   }
-  .canvas-page {
+  .canvas-page.empty-ws {
     display: flex;
     flex: 1;
-    min-height: 0;
-    background: var(--bg);
-    color: var(--text);
-  }
-  .canvas-page.empty-ws {
     flex-direction: column;
-  }
-  .scenes {
-    width: var(--list-pane-w, 280px);
-    flex: 0 0 var(--list-pane-w, 280px);
-    overflow-y: auto;
-    background: var(--surface);
-  }
-  .scenes.full {
-    flex: 1 1 auto;
-    width: auto;
-    border-inline-end: none;
-  }
-  /* A second fixed rail left only 374px for the editor on an 834px tablet.
-     Stack a bounded, collapsible list without remounting the editor or draft. */
-  .tablet { flex-direction: column; }
-  .tablet .scenes {
-    width: auto;
-    flex: 0 1 auto;
-    max-height: 160px;
-    border-inline-end: none;
-    border-block-end: 1px solid var(--border);
-  }
-  .scenes.hidden,
-  .main.hidden {
-    display: none;
+    min-height: 0;
   }
   .main {
     flex: 1 1 auto;
     min-width: 0;
+    min-height: 0;
     display: flex;
     flex-direction: column;
-  }
-  /* Editor + optional conversation side panel. */
-  .editor-split {
-    flex: 1 1 auto;
-    display: flex;
-    min-height: 0;
-    min-width: 0;
   }
   .editor-host {
     container: canvas-editor / inline-size;
@@ -399,23 +340,6 @@
     position: relative;
     min-width: 0;
     min-height: 0;
-  }
-  .convo-panel {
-    width: 380px;
-    flex: none;
-    border-inline-start: 1px solid var(--border);
-    display: flex;
-    min-height: 0;
-    min-width: 0;
-  }
-  /* On phones the assistant replaces the board until closed. Keep the editor
-     mounted so closing the panel preserves its zoom and pending work. */
-  .phone .with-convo .editor-host {
-    display: none;
-  }
-  .convo-panel.overlay {
-    width: 100%;
-    border-inline-start: none;
   }
   /* Ask-AI launcher — bottom-center so it clears Excalidraw's top toolbar. */
   .ai-bar {
@@ -432,7 +356,7 @@
     .ai-bar { bottom: 66px; }
   }
   /* A floating launcher, not a second primary: a raised neutral pill with an
-     accent glyph (the header's New scene is the page's one primary). */
+     accent glyph (the list pane's New scene is the page's one primary). */
   .ai-fab {
     display: inline-flex;
     align-items: center;

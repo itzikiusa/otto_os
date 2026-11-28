@@ -20,12 +20,12 @@ use crate::report::{text, MAX_FINDINGS};
 use crate::{Check, EngineRun, Finding, ScanMetrics, ScanMode, ScanSettings, Severity};
 
 const TEMPLATES_REFRESH_HOURS: i64 = 24;
-const RATE_LIMIT_PER_SEC: u32 = 20;
+pub(crate) const RATE_LIMIT_PER_SEC: u32 = 20;
 const REQUEST_TIMEOUT_SECS: u32 = 5;
 const MAX_HOST_ERRORS: u32 = 30;
-const EXCLUDED_TAGS: &str = "dos,fuzz,fuzzing,intrusive,bruteforce,brute-force";
-const SAFE_SEVERITIES: &str = "low,medium,high,critical";
-const DEV_TEMPLATE_SUBDIRS: &[&str] = &[
+pub(crate) const EXCLUDED_TAGS: &str = "dos,fuzz,fuzzing,intrusive,bruteforce,brute-force";
+pub(crate) const SAFE_SEVERITIES: &str = "low,medium,high,critical";
+pub(crate) const DEV_TEMPLATE_SUBDIRS: &[&str] = &[
     "http/exposures/configs",
     "http/exposures/files",
     "http/exposures/apis",
@@ -61,7 +61,7 @@ pub(crate) async fn run<V, Fut>(
     verify_before_spawn: V,
 ) -> Result<(EngineRun, Vec<Finding>)>
 where
-    V: Fn() -> Fut,
+    V: Fn(Vec<SocketAddr>) -> Fut,
     Fut: Future<Output = Result<()>>,
 {
     run_with_resolver(
@@ -86,7 +86,7 @@ async fn run_with_resolver<V, Fut, R, RFut>(
     resolve: R,
 ) -> Result<(EngineRun, Vec<Finding>)>
 where
-    V: Fn() -> Fut,
+    V: Fn(Vec<SocketAddr>) -> Fut,
     Fut: Future<Output = Result<()>>,
     R: Fn(String, bool) -> RFut,
     RFut: Future<Output = std::result::Result<(String, Vec<SocketAddr>), String>>,
@@ -130,11 +130,11 @@ where
     // Single probe-boundary consent gate: re-verify that human consent for this
     // exact target and its live run configuration still holds AFTER binary,
     // template, DNS, and scratch preparation, immediately before opening the
-    // proxy and spawning Nuclei.
+    // proxy and spawning Nuclei. It sees the exact addresses the proxy dials.
     if cancel.is_cancelled() {
         return Err(cancelled());
     }
-    verify_before_spawn().await?;
+    verify_before_spawn(addrs.clone()).await?;
     if cancel.is_cancelled() {
         return Err(cancelled());
     }
@@ -1049,7 +1049,7 @@ mod tests {
                     Path::new("/project"),
                     &settings,
                     &cancel,
-                    || async { Ok(()) }
+                    |_| async { Ok(()) }
                 )
                 .await
                 .is_err(),
@@ -1110,7 +1110,7 @@ mod tests {
             &root,
             &ScanSettings::default(),
             &CancellationToken::new(),
-            || async { Ok(()) },
+            |_| async { Ok(()) },
         )
         .await
         .unwrap_err();
@@ -1233,7 +1233,7 @@ printf '%s\n' '{{"template-id":"probe-ran","matched-at":"'"$TARGET"'/probe","inf
             {
                 let revoked = revoked.clone();
                 let checks = checks.clone();
-                move || {
+                move |_| {
                     let revoked = revoked.clone();
                     let checks = checks.clone();
                     async move {
@@ -1289,7 +1289,7 @@ printf '%s\n' '{{"template-id":"probe-ran","matched-at":"'"$TARGET"'/probe","inf
             {
                 let revoked_dns = revoked_dns.clone();
                 let dns_checks = dns_checks.clone();
-                move || {
+                move |_| {
                     let revoked_dns = revoked_dns.clone();
                     let dns_checks = dns_checks.clone();
                     async move {
@@ -1360,7 +1360,7 @@ printf '%s\n' '{{"template-id":"probe-ran","matched-at":"'"$TARGET"'/probe","inf
             &root,
             &ScanSettings::default(),
             &CancellationToken::new(),
-            || async { Ok(()) },
+            |_| async { Ok(()) },
         )
         .await
         .unwrap();
@@ -1415,7 +1415,7 @@ printf '%s\n' '{{"template-id":"git-config","matched-at":"'"$TARGET"'/.git/confi
                 &ScanSettings::default(),
                 true,
                 &CancellationToken::new(),
-                || async { Ok(()) },
+                |_| async { Ok(()) },
             )
             .await
             .unwrap();
@@ -1483,10 +1483,11 @@ printf '%s\n' '{{"template-id":"git-config","matched-at":"'"$TARGET"'/.git/confi
             .enqueue_job(
                 pool.clone(),
                 "obs-project".into(),
+                crate::ScanTrigger::Manual,
                 || async { false },
                 move |settings, cancel, _| async move {
                     let (run, findings) = runner
-                        .run_dast(&target, &root_clone, &settings, true, &cancel, || async {
+                        .run_dast(&target, &root_clone, &settings, true, &cancel, |_| async {
                             Ok(())
                         })
                         .await?;
@@ -1560,7 +1561,7 @@ printf '%s\n' '{{"template-id":"git-config","matched-at":"'"$TARGET"'/.git/confi
         let settings = ScanSettings::default();
         let cancel = CancellationToken::new();
         let (passive_run, _) = service
-            .run_dast(&target, &root, &settings, false, &cancel, || async {
+            .run_dast(&target, &root, &settings, false, &cancel, |_| async {
                 Ok(())
             })
             .await
@@ -1593,7 +1594,7 @@ esac
         .unwrap();
         std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o700)).unwrap();
         let (active_run, active_findings) = service
-            .run_dast(&target, &root, &settings, true, &cancel, || async {
+            .run_dast(&target, &root, &settings, true, &cancel, |_| async {
                 Ok(())
             })
             .await
@@ -1622,7 +1623,7 @@ esac
                 &settings,
                 true,
                 &cancel_hang,
-                || async { Ok(()) },
+                |_| async { Ok(()) },
             )
             .await
             .unwrap_err();
@@ -1679,7 +1680,7 @@ esac
             ..Default::default()
         };
         let cancel = CancellationToken::new();
-        let (run_info, findings) = run(&engine, &target, &root, &settings, &cancel, || async {
+        let (run_info, findings) = run(&engine, &target, &root, &settings, &cancel, |_| async {
             Ok(())
         })
         .await

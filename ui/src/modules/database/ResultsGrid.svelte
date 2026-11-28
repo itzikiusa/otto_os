@@ -1270,7 +1270,7 @@
   }
   const exportMenu = (e: MouseEvent): void => showMenu(e, exportItems());
   function moreMenu(e: MouseEvent): void { // a phone keeps the view switch + filter in the toolbar, the rest here
-    const items: MenuItem[] = viewport.isPhone ? [...(mode === 'grid' ? [{ label: 'Filter row', icon: 'filter', checked: filterRow, action: toggleFilterRow }, { label: 'Row detail', icon: 'panel', checked: showDetail, action: toggleDetail }] : []), ...(flow.insert.target ? [{ label: engine === 'mongodb' ? 'Insert document' : 'Add row', icon: 'plus', action: () => void flow.insert.open() }] : []), { separator: true }, ...exportItems(), { separator: true }] : [];
+    const items: MenuItem[] = viewport.isPhone ? [...(mode === 'grid' ? [{ label: 'Filter row', icon: 'filter', checked: filterRow, action: toggleFilterRow }, { label: 'Row detail', icon: 'info', checked: showDetail, action: toggleDetail }] : []), ...(flow.insert.target ? [{ label: engine === 'mongodb' ? 'Insert document' : 'Add row', icon: 'plus', action: () => void flow.insert.open() }] : []), { separator: true }, ...exportItems(), { separator: true }] : [];
     if (engine === 'mongodb' && connectionId) {
       items.push({ label: 'Aggregate pipeline…', icon: 'layers', action: () => (pipelineOpen = true) });
     }
@@ -1539,8 +1539,8 @@
             aria-pressed={showDetail}
             onclick={toggleDetail}
             aria-label="Row detail"
-            title="Row detail — the selected record, one field per line"
-          ><Icon name="panel" size={13} /></button>
+            title="Row detail — the selected record, one field per line (⌥⌘B)"
+          ><Icon name="info" size={13} /></button>
         {/if}
         <span class="grow"></span>
         {#if !viewport.isPhone}<AddRowButton {flow} variant="toolbar" />
@@ -1694,8 +1694,8 @@
           onheadermenu={headerMenu}
           oncyclesort={cycleSort}
         />
-        {#if showDetail && !mini}
-          <RowDetail
+        {#if !mini}
+          <RowDetail open={showDetail} ontoggle={toggleDetail}
             {result}
             row={detailRow === null ? null : (liveRows[detailRow] ?? null)}
             rowIdx={detailRow}
@@ -2086,13 +2086,12 @@
     flex-shrink: 0;
     min-width: 0;
   }
-  /* Grid + (optional) row-detail panel, side by side. */
+  /* Grid + the row detail (its Detail pane), side by side. */
   .grid-body {
     flex: 1;
     min-height: 0;
     min-width: 0;
     display: flex;
-    gap: 8px;
   }
   .grid-body.mini {
     display: contents;

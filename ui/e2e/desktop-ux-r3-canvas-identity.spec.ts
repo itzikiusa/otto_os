@@ -57,7 +57,7 @@ test('Canvas logout invalidates a mounted editor debounce without flushing as th
   await ctx.dispose();
   await page.addInitScript(id => localStorage.setItem('otto_workspace', id), workspace);
   await openPage(page, 'canvas');
-  await page.locator('.scene-list .row', { hasText: 'Private pending editor' }).getByRole('button').first().click();
+  await page.locator('.scene-list .side-row', { hasText: 'Private pending editor' }).getByRole('button').first().click();
   await page.getByTitle('Edit the Mermaid source', { exact: true }).click();
   let writes = 0;
   // Path match: saves carry `?summary=true`, which a `**/…/<id>` glob misses —

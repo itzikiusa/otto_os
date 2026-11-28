@@ -29,7 +29,6 @@ import { keepAwake } from '../lib/keepAwake.svelte';
 import { triage } from './triage.svelte';
 import { lightMode, lightRouteAllowed } from '../lib/lightMode.svelte';
 import { viewport } from '../lib/stores/viewport.svelte';
-import { pageChrome } from '../lib/stores/pageChrome.svelte';
 import { composerTraceOn, toggleComposerTrace } from '../lib/composerTrace';
 
 /** What the sources need from the app root (its local state and helpers). */
@@ -73,10 +72,8 @@ export function installPaletteSources(deps: PaletteDeps): () => void {
           shortcut: '⌘1',
           run: () => {
             if (viewport.navDrawer) ui.navDrawerOpen = !ui.navDrawerOpen;
-            else if (viewport.isTablet) {
-              const folded = viewport.tabletNavFolded !== null ? viewport.tabletNavFolded : pageChrome.foldNav && !ui.railExpanded;
-              viewport.toggleTabletRail(folded);
-            } else ui.toggleRail();
+            else if (viewport.isTablet) viewport.toggleTabletRail(viewport.tabletNavFolded);
+            else ui.toggleRail();
           },
         },
         { id: 'core.toggle-right', title: `Toggle ${SIDE_PANEL}`, group: 'View', shortcut: '⌘J', run: () => ui.toggleRight() },

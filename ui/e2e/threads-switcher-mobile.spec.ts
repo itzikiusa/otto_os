@@ -45,8 +45,8 @@ test('phone: the command sheet leads with the waiting thread; a tap opens it', a
   const row = list.locator(`[data-cmd="thread:${waits}"]`);
   await expect(async () => {
     if (info.project.name === 'iphone-portrait') {
-      await page.getByRole('button', { name: 'More' }).last().tap();
-      await page.getByRole('button', { name: 'Commands' }).tap();
+      await page.getByTestId('bottomnav-menu').tap();
+      await page.locator('.drawer[aria-label="Navigator"]').getByRole('button', { name: /^Commands/ }).tap();
     } else await page.keyboard.press('Meta+k');
     await expect(row).toBeVisible({ timeout: 2_000 });
   }).toPass({ timeout: 20_000 });

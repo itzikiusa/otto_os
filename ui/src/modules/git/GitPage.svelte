@@ -6,7 +6,6 @@
   // via the git store). PR detail (#/git/:id/pr/:n) is still routed; a plain
   // #/git/:id/:tab deep-link opens that repo as a tab.
   import { untrack } from 'svelte';
-  import { onTabKey } from '../../lib/tabKeys';
   import type { Repo, RepoStatusResp } from '../../lib/api/types';
   import { api } from '../../lib/api/client';
   import type { MenuItem } from '../../lib/contextmenu.svelte';
@@ -14,6 +13,7 @@
   import { git } from '../../lib/stores/git.svelte';
   import GitTabs from './GitTabs.svelte';
   import { focusPath, parseGitRoute } from './gitRoute';
+  import { gitPhoneMenu } from './gitPhoneMenu.svelte';
   import { prWorkspace } from './prWorkspaceStore.svelte';
   import { gitBridge } from '../../lib/diff/gitBridge.svelte';
   import { registry } from '../../lib/commands.svelte';
@@ -21,10 +21,12 @@
   import LazyMount from '../../lib/components/LazyMount.svelte';
   import { lazyComponent } from '../../lib/lazy-component.svelte';
   import { viewport } from '../../lib/stores/viewport.svelte';
+  import { pageNav } from '../../lib/components/side/pageNav.svelte';
   import { ctxMenu } from '../../lib/contextmenu.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import PageHeader from '../../lib/components/PageHeader.svelte';
+  import Tabs, { type TabItem } from '../../lib/components/Tabs.svelte';
   import PageBody from '../../lib/components/PageBody.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
 
@@ -36,14 +38,14 @@
   const activeStatus = $derived(activeRepo ? (git.statusById[activeRepo.id] ?? null) : null);
   let repoView = $state<{ moreMenuItems: () => MenuItem[]; selectTab: (id: string) => void; viewState: () => { tab: string; resolving: boolean; conflictFiles: number } } | undefined>();
   let toolbar = $state<{ menuItems: () => MenuItem[] } | undefined>();
-  // The ONE view switch, in the header (RepoView owns the views).
-  // Icons when the header is too tight for the words, then one menu button
-  // (GitToolbar's last fit steps).
-  const VIEWS = [
-    { id: 'graph', label: 'History', icon: 'clock' },
-    { id: 'prs', label: 'Pull requests', icon: 'pr' },
-    { id: 'review', label: 'Review', icon: 'eye' },
-  ] as const;
+  // The ONE view switch (RepoView owns the views): the page's sections as the
+  // shared underline tabs, one row under the header (design.md §7.14); while
+  // conflicts are resolved, a "Resolve conflicts" tab is the current one.
+  const VIEWS: TabItem[] = [
+    { id: 'graph', label: 'History' },
+    { id: 'prs', label: 'Pull requests' },
+    { id: 'review', label: 'Review' },
+  ];
   // Header toolbar's stash browser lives here: in PageHeader's actions row the overflow measurer hid it.
   const StashBrowser = lazyComponent(() => import('./StashBrowser.svelte'));
   // The repository view and Focus load with their first use (perf G6): the
@@ -125,7 +127,7 @@
       const n = Number(router.parts[3]);
       untrack(() => {
         git.openRepoTab(r.repo!, 'prs');
-        if (Number.isInteger(n) && n > 0) prWorkspace.open(r.repo!, n);
+        if (Number.isInteger(n) && n > 0) prWorkspace.reveal(r.repo!, n);
         router.replace('git');
       });
       return;
@@ -164,6 +166,10 @@
   });
   const notFound = $derived(missingRepo !== null && route.repo === missingRepo);
 
+  // Phone, a pull request / file / graph pushed from its list: the header
+  // says "‹ Pull requests · #482 title" (the ListDetail's title) and the
+  // repository switcher moves under ⋯, as on the list page.
+  const pushed = $derived(viewport.navDrawer && !!pageNav.back);
   /** Phone: the title's repo switcher — Focus, the open repos, any other, add. */
   function phoneRepoMenu(e: MouseEvent): void {
     const open = git.openRepoIds.map((id) => git.allRepos.find((r) => r.id === id)).filter((r) => !!r);
@@ -178,6 +184,27 @@
     ], rest.length > 8 ? { filter: true, filterPlaceholder: 'Open a repository…', maxVisible: 12 } : undefined);
   }
 
+  // A phone list page draws the list pane's header in this one row: the
+  // repository switcher (the title) moves under its ⋯ (gitPhoneMenu); the
+  // view switch keeps its row under the header.
+  $effect(() =>
+    gitPhoneMenu.set(() => {
+      const open = git.openRepoIds.map((id) => git.allRepos.find((r) => r.id === id)).filter((r) => !!r);
+      return [
+        {
+          label: 'Repository',
+          icon: 'branch',
+          children: [
+            { label: 'Focus', icon: 'zap', checked: focusView, action: () => setFocus(true) },
+            ...open.map((r) => ({ label: r.name, icon: 'branch' as const, checked: !focusView && r.id === git.activeRepoId, action: () => openRepo(r.id) })),
+            { separator: true },
+            { label: 'Add or clone a repository…', icon: 'plus', action: () => { addMode = 'register'; addOpen = true; } },
+          ],
+        },
+      ];
+    }),
+  );
+
   function openRepo(repoId: string): void {
     git.openRepoTab(repoId);
     // Drop any lingering deep-link route so the tab UI fully owns navigation.
@@ -185,32 +212,6 @@
   }
 
 </script>
-
-{#snippet viewSwitch(name: string, mode: 'words' | 'icons' | 'menu' = 'words')}
-  {#if repoView}
-    {@const v = repoView.viewState()}
-    {@const compact = mode !== 'words'}
-    {#if mode === 'menu' && !v.resolving}
-      {@const cur = VIEWS.find((t) => t.id === v.tab) ?? VIEWS[0]}
-      <button class="btn small ghost git-views-menu" aria-haspopup="menu" aria-label="{name} view: {cur.label}" title="View: {cur.label}" data-keep
-        onclick={(e) => ctxMenu.show(e, VIEWS.map((t) => ({ label: t.label, icon: t.icon, checked: t.id === v.tab, action: () => repoView?.selectTab(t.id) })))}>
-        <Icon name={cur.icon} size={12} /><Icon name="chevronDown" size={12} />
-      </button>
-    {:else}
-    <div class="rv-tabs segmented git-views" class:compact role="tablist" aria-label="{name} views" data-keep>
-      {#each VIEWS as t (t.id)}
-        {@const on = v.tab === t.id && !v.resolving}
-        <button class="rv-tab" role="tab" aria-selected={on} tabindex={on ? 0 : -1} class:active={on} title={compact ? t.label : undefined} onclick={() => repoView?.selectTab(t.id)} onkeydown={onTabKey}>
-          {#if compact}<Icon name={t.icon} size={12} /><span class="sr-only">{t.label}</span>{:else}{t.label}{/if}
-        </button>
-      {/each}
-      {#if v.resolving}
-        <button class="rv-tab active git-views-conflict" role="tab" aria-selected="true" tabindex="0" onkeydown={onTabKey}>Resolve conflicts{#if v.conflictFiles > 0}&nbsp;· {v.conflictFiles}{/if}</button>
-      {/if}
-    </div>
-    {/if}
-  {/if}
-{/snippet}
 
   <div class="gitpage">
     <!-- Unified toolbar: the open-repo tabs sit inline in the page header
@@ -221,10 +222,13 @@
       crumbs={focusView ? [{ label: 'Git', onclick: () => setFocus(false) }] : []}
       class="git-header"
       tabsMin={TABS_MIN}
-      more={activeRepo && !focusView && !notFound ? () => [...(toolbar?.menuItems() ?? []), ...(toolbar ? [{ separator: true }] : []), ...(repoView?.moreMenuItems() ?? [])] : undefined}
+      more={activeRepo && !focusView && !notFound ? () => [...(toolbar?.menuItems() ?? []), ...(toolbar ? [{ separator: true }] : []), ...(repoView?.moreMenuItems() ?? []), ...(pushed ? gitPhoneMenu.items() : [])] : undefined}
     >
       {#snippet titleContent()}
-        {#if viewport.isPhone}
+        {#if pushed}
+          <!-- Phone, an item pushed from a list: the repository switcher is under ⋯. -->
+          {activeRepo?.name ?? 'Git'}
+        {:else if viewport.isPhone}
           <!-- Phone: the repo is the title (a switcher), so the header stays one row. -->
           <button type="button" class="git-phone-repo" aria-haspopup="menu" data-testid="git-phone-repo" onclick={phoneRepoMenu}>
             <span class="git-phone-repo-name">{focusView ? 'Focus' : (activeRepo?.name ?? 'Git')}</span><Icon name="chevronDown" size={14} />
@@ -236,8 +240,6 @@
       {#snippet tabs()}
         {#if !viewport.isPhone}
           <GitTabs embedded focus={focusView} ontogglefocus={() => setFocus(!focusView)} onswitch={phoneRepoMenu} onopen={openRepo} onadd={(mode) => { addMode = mode; addOpen = true; }} />
-        {:else if activeRepo && !focusView && repoView}
-          {@render viewSwitch(activeRepo.name)}
         {/if}
       {/snippet}
       {#snippet actions()}
@@ -257,15 +259,19 @@
               onstatus={(s) => git.setStatus(repoId, s)}
               onrefresh={() => gitBridge.refreshGraph(repoId)}
               onbrowsestashes={() => (stashesRepo = repoId)}
-            >
-              {#snippet children(views: 'words' | 'icons' | 'menu')}
-                {#if repoView && !viewport.isPhone}{@render viewSwitch(activeRepo.name, views)}{/if}
-              {/snippet}
-            </GitToolbar>
+            />
           {/if}
         {/if}
       {/snippet}
     </PageHeader>
+
+    {#if activeRepo && !focusView && !notFound && repoView}
+      {@const v = repoView?.viewState() ?? { tab: 'graph', resolving: false, conflictFiles: 0 }}
+      <div class="rv-tabs git-views chrome-material">
+        <Tabs label="{activeRepo.name} views" tabs={v.resolving ? [...VIEWS, { id: 'resolve', label: 'Resolve conflicts', count: v.conflictFiles || undefined }] : VIEWS}
+          value={v.resolving ? 'resolve' : v.tab} onchange={(id) => id !== 'resolve' && repoView?.selectTab(id)} />
+      </div>
+    {/if}
 
     <!-- Phone: the everyday verbs are a row of their own under the header (History). -->
     {#if viewport.isPhone && activeRepo && !focusView && !notFound && activeStatus && repoView && GitToolbarLazy.component && repoView.viewState().tab === 'graph' && !repoView.viewState().resolving}
@@ -356,34 +362,13 @@
     height: 100%;
     min-height: 0;
   }
-  /* The header's view switch (History · Pull requests · Review). */
+  /* The page's sections row (History · Pull requests · Review). */
   .git-views {
     flex-shrink: 0;
   }
-  .git-views > .rv-tab {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    height: 24px;
-    white-space: nowrap;
-  }
-  .git-views.compact > .rv-tab {
-    padding-inline: 6px;
-  }
-  /* Touch: the view switch and the header's ⋯ are finger-sized (44 px). */
+  /* Touch: the header's ⋯ is finger-sized (44 px). */
   @media (pointer: coarse) {
-    .git-views > .rv-tab { height: 44px; }
     .gitpage :global(.ph-more) { min-inline-size: 44px; min-block-size: 44px; }
-  }
-  .git-views-menu {
-    display: inline-flex;
-    align-items: center;
-    gap: 2px;
-    flex: none;
-    padding-inline: 4px;
-  }
-  .git-views > .git-views-conflict {
-    color: var(--warning);
   }
   .git-phone-repo {
     display: inline-flex;

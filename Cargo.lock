@@ -404,6 +404,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "asynchronous-codec"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a860072022177f903e59730004fb5dc13db9275b79bb2aef7ba8ce831956c233"
+dependencies = [
+ "bytes",
+ "futures-sink",
+ "futures-util",
+ "memchr",
+ "pin-project-lite",
+]
+
+[[package]]
 name = "atoi"
 version = "2.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3055,6 +3068,41 @@ dependencies = [
 ]
 
 [[package]]
+name = "jupyter-protocol"
+version = "2.0.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "896dbb9ee6cb25ad5d412730bbac221835a91ecb48eb613ce975db8655bbf209"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "chrono",
+ "futures",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+ "uuid",
+]
+
+[[package]]
+name = "jupyter-zmq-client"
+version = "3.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6fb9fa2584acd956d0044dcb1c85d94e8c9147a5b59d3f1074c842eb14d6a609"
+dependencies = [
+ "bytes",
+ "data-encoding",
+ "dirs",
+ "jupyter-protocol",
+ "ring",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+ "tokio",
+ "uuid",
+ "zeromq",
+]
+
+[[package]]
 name = "keyring"
 version = "4.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3993,7 +4041,7 @@ dependencies = [
 
 [[package]]
 name = "otto-agent-protocol"
-version = "0.7.0-rc.5"
+version = "0.7.0-rc.6"
 dependencies = [
  "agent-client-protocol",
  "async-trait",
@@ -4025,7 +4073,7 @@ dependencies = [
 
 [[package]]
 name = "otto-agent-run"
-version = "0.7.0-rc.5"
+version = "0.7.0-rc.6"
 dependencies = [
  "async-trait",
  "chrono",
@@ -4047,7 +4095,7 @@ dependencies = [
 
 [[package]]
 name = "otto-apiclient"
-version = "0.7.0-rc.5"
+version = "0.7.0-rc.6"
 dependencies = [
  "async-trait",
  "base64 0.23.1",
@@ -4084,7 +4132,7 @@ dependencies = [
 
 [[package]]
 name = "otto-assistant"
-version = "0.7.0-rc.5"
+version = "0.7.0-rc.6"
 dependencies = [
  "chrono",
  "chrono-tz",
@@ -4111,7 +4159,7 @@ dependencies = [
 
 [[package]]
 name = "otto-automation"
-version = "0.7.0-rc.5"
+version = "0.7.0-rc.6"
 dependencies = [
  "chrono",
  "chrono-tz",
@@ -4136,7 +4184,7 @@ dependencies = [
 
 [[package]]
 name = "otto-aws"
-version = "0.7.0-rc.5"
+version = "0.7.0-rc.6"
 dependencies = [
  "axum",
  "bytes",
@@ -4165,7 +4213,7 @@ dependencies = [
 
 [[package]]
 name = "otto-brokers"
-version = "0.7.0-rc.5"
+version = "0.7.0-rc.6"
 dependencies = [
  "anyhow",
  "apache-avro",
@@ -4200,7 +4248,7 @@ dependencies = [
 
 [[package]]
 name = "otto-browser"
-version = "0.7.0-rc.5"
+version = "0.7.0-rc.6"
 dependencies = [
  "async-trait",
  "base64 0.23.1",
@@ -4227,7 +4275,7 @@ dependencies = [
 
 [[package]]
 name = "otto-canvas"
-version = "0.7.0-rc.5"
+version = "0.7.0-rc.6"
 dependencies = [
  "axum",
  "otto-agent-run",
@@ -4244,7 +4292,7 @@ dependencies = [
 
 [[package]]
 name = "otto-channels"
-version = "0.7.0-rc.5"
+version = "0.7.0-rc.6"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4270,7 +4318,7 @@ dependencies = [
 
 [[package]]
 name = "otto-connections"
-version = "0.7.0-rc.5"
+version = "0.7.0-rc.6"
 dependencies = [
  "axum",
  "chrono",
@@ -4294,7 +4342,7 @@ dependencies = [
 
 [[package]]
 name = "otto-containers"
-version = "0.7.0-rc.5"
+version = "0.7.0-rc.6"
 dependencies = [
  "axum",
  "bytes",
@@ -4321,7 +4369,7 @@ dependencies = [
 
 [[package]]
 name = "otto-context"
-version = "0.7.0-rc.5"
+version = "0.7.0-rc.6"
 dependencies = [
  "axum",
  "chrono",
@@ -4345,7 +4393,7 @@ dependencies = [
 
 [[package]]
 name = "otto-core"
-version = "0.7.0-rc.5"
+version = "0.7.0-rc.6"
 dependencies = [
  "chrono",
  "chrono-tz",
@@ -4362,7 +4410,7 @@ dependencies = [
 
 [[package]]
 name = "otto-dbviewer"
-version = "0.7.0-rc.5"
+version = "0.7.0-rc.6"
 dependencies = [
  "async-trait",
  "axum",
@@ -4401,7 +4449,7 @@ dependencies = [
 
 [[package]]
 name = "otto-design"
-version = "0.7.0-rc.5"
+version = "0.7.0-rc.6"
 dependencies = [
  "axum",
  "base64 0.23.1",
@@ -4423,7 +4471,7 @@ dependencies = [
 
 [[package]]
 name = "otto-design-assist"
-version = "0.7.0-rc.5"
+version = "0.7.0-rc.6"
 dependencies = [
  "axum",
  "chrono",
@@ -4445,7 +4493,7 @@ dependencies = [
 
 [[package]]
 name = "otto-git"
-version = "0.7.0-rc.5"
+version = "0.7.0-rc.6"
 dependencies = [
  "async-trait",
  "axum",
@@ -4475,14 +4523,14 @@ dependencies = [
 
 [[package]]
 name = "otto-git-cmd"
-version = "0.7.0-rc.5"
+version = "0.7.0-rc.6"
 dependencies = [
  "tokio",
 ]
 
 [[package]]
 name = "otto-ide"
-version = "0.7.0-rc.5"
+version = "0.7.0-rc.6"
 dependencies = [
  "axum",
  "bytes",
@@ -4493,6 +4541,8 @@ dependencies = [
  "hex",
  "http-body-util",
  "ignore",
+ "jupyter-protocol",
+ "jupyter-zmq-client",
  "notify",
  "otto-core",
  "otto-git-cmd",
@@ -4512,16 +4562,19 @@ dependencies = [
  "sha2 0.11.1",
  "shell-words",
  "sqlx",
+ "tar",
  "tempfile",
  "tokio",
  "tower",
  "tracing",
  "uuid",
+ "zeromq",
+ "zstd",
 ]
 
 [[package]]
 name = "otto-improve"
-version = "0.7.0-rc.5"
+version = "0.7.0-rc.6"
 dependencies = [
  "axum",
  "chrono",
@@ -4542,7 +4595,7 @@ dependencies = [
 
 [[package]]
 name = "otto-insights"
-version = "0.7.0-rc.5"
+version = "0.7.0-rc.6"
 dependencies = [
  "axum",
  "chrono",
@@ -4563,7 +4616,7 @@ dependencies = [
 
 [[package]]
 name = "otto-issues"
-version = "0.7.0-rc.5"
+version = "0.7.0-rc.6"
 dependencies = [
  "async-trait",
  "axum",
@@ -4582,7 +4635,7 @@ dependencies = [
 
 [[package]]
 name = "otto-k8s"
-version = "0.7.0-rc.5"
+version = "0.7.0-rc.6"
 dependencies = [
  "axum",
  "base64 0.23.1",
@@ -4613,7 +4666,7 @@ dependencies = [
 
 [[package]]
 name = "otto-keychain"
-version = "0.7.0-rc.5"
+version = "0.7.0-rc.6"
 dependencies = [
  "hex",
  "keyring",
@@ -4628,7 +4681,7 @@ dependencies = [
 
 [[package]]
 name = "otto-mcp"
-version = "0.7.0-rc.5"
+version = "0.7.0-rc.6"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4656,7 +4709,7 @@ dependencies = [
 
 [[package]]
 name = "otto-media"
-version = "0.7.0-rc.5"
+version = "0.7.0-rc.6"
 dependencies = [
  "async-trait",
  "axum",
@@ -4687,7 +4740,7 @@ dependencies = [
 
 [[package]]
 name = "otto-memory"
-version = "0.7.0-rc.5"
+version = "0.7.0-rc.6"
 dependencies = [
  "axum",
  "chrono",
@@ -4706,7 +4759,7 @@ dependencies = [
 
 [[package]]
 name = "otto-netguard"
-version = "0.7.0-rc.5"
+version = "0.7.0-rc.6"
 dependencies = [
  "reqwest",
  "tokio",
@@ -4714,7 +4767,7 @@ dependencies = [
 
 [[package]]
 name = "otto-orchestrator"
-version = "0.7.0-rc.5"
+version = "0.7.0-rc.6"
 dependencies = [
  "chrono",
  "otto-core",
@@ -4730,7 +4783,7 @@ dependencies = [
 
 [[package]]
 name = "otto-phone"
-version = "0.7.0-rc.5"
+version = "0.7.0-rc.6"
 dependencies = [
  "axum",
  "chrono",
@@ -4748,7 +4801,7 @@ dependencies = [
 
 [[package]]
 name = "otto-product"
-version = "0.7.0-rc.5"
+version = "0.7.0-rc.6"
 dependencies = [
  "async-trait",
  "axum",
@@ -4779,7 +4832,7 @@ dependencies = [
 
 [[package]]
 name = "otto-pty"
-version = "0.7.0-rc.5"
+version = "0.7.0-rc.6"
 dependencies = [
  "bytes",
  "libc",
@@ -4794,7 +4847,7 @@ dependencies = [
 
 [[package]]
 name = "otto-rbac"
-version = "0.7.0-rc.5"
+version = "0.7.0-rc.6"
 dependencies = [
  "argon2",
  "chrono",
@@ -4812,7 +4865,7 @@ dependencies = [
 
 [[package]]
 name = "otto-review"
-version = "0.7.0-rc.5"
+version = "0.7.0-rc.6"
 dependencies = [
  "async-trait",
  "chrono",
@@ -4833,7 +4886,7 @@ dependencies = [
 
 [[package]]
 name = "otto-rooms"
-version = "0.7.0-rc.5"
+version = "0.7.0-rc.6"
 dependencies = [
  "base64 0.23.1",
  "bytes",
@@ -4859,14 +4912,14 @@ dependencies = [
 
 [[package]]
 name = "otto-sandbox"
-version = "0.7.0-rc.5"
+version = "0.7.0-rc.6"
 dependencies = [
  "tempfile",
 ]
 
 [[package]]
 name = "otto-security"
-version = "0.7.0-rc.5"
+version = "0.7.0-rc.6"
 dependencies = [
  "chrono",
  "chrono-tz",
@@ -4896,7 +4949,7 @@ dependencies = [
 
 [[package]]
 name = "otto-server"
-version = "0.7.0-rc.5"
+version = "0.7.0-rc.6"
 dependencies = [
  "async-trait",
  "axum",
@@ -4980,7 +5033,7 @@ dependencies = [
 
 [[package]]
 name = "otto-sessions"
-version = "0.7.0-rc.5"
+version = "0.7.0-rc.6"
 dependencies = [
  "axum",
  "base64 0.23.1",
@@ -5011,7 +5064,7 @@ dependencies = [
 
 [[package]]
 name = "otto-simulators"
-version = "0.7.0-rc.5"
+version = "0.7.0-rc.6"
 dependencies = [
  "async-trait",
  "axum",
@@ -5033,7 +5086,7 @@ dependencies = [
 
 [[package]]
 name = "otto-skills"
-version = "0.7.0-rc.5"
+version = "0.7.0-rc.6"
 dependencies = [
  "axum",
  "include_dir",
@@ -5047,7 +5100,7 @@ dependencies = [
 
 [[package]]
 name = "otto-ssh"
-version = "0.7.0-rc.5"
+version = "0.7.0-rc.6"
 dependencies = [
  "otto-core",
  "otto-telemetry",
@@ -5059,7 +5112,7 @@ dependencies = [
 
 [[package]]
 name = "otto-state"
-version = "0.7.0-rc.5"
+version = "0.7.0-rc.6"
 dependencies = [
  "base64 0.23.1",
  "chrono",
@@ -5081,7 +5134,7 @@ dependencies = [
 
 [[package]]
 name = "otto-telemetry"
-version = "0.7.0-rc.5"
+version = "0.7.0-rc.6"
 dependencies = [
  "anyhow",
  "serde",
@@ -5092,7 +5145,7 @@ dependencies = [
 
 [[package]]
 name = "otto-telemetry-collector"
-version = "0.7.0-rc.5"
+version = "0.7.0-rc.6"
 dependencies = [
  "anyhow",
  "chrono",
@@ -5111,7 +5164,7 @@ dependencies = [
 
 [[package]]
 name = "otto-transcript"
-version = "0.7.0-rc.5"
+version = "0.7.0-rc.6"
 dependencies = [
  "base64 0.23.1",
  "chrono",
@@ -5128,7 +5181,7 @@ dependencies = [
 
 [[package]]
 name = "otto-usage"
-version = "0.7.0-rc.5"
+version = "0.7.0-rc.6"
 dependencies = [
  "chrono",
  "dirs",
@@ -5151,7 +5204,7 @@ dependencies = [
 
 [[package]]
 name = "otto-vault"
-version = "0.7.0-rc.5"
+version = "0.7.0-rc.6"
 dependencies = [
  "axum",
  "chrono",
@@ -5176,7 +5229,7 @@ dependencies = [
 
 [[package]]
 name = "otto-workflows"
-version = "0.7.0-rc.5"
+version = "0.7.0-rc.6"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -5204,7 +5257,7 @@ dependencies = [
 
 [[package]]
 name = "ottod"
-version = "0.7.0-rc.5"
+version = "0.7.0-rc.6"
 dependencies = [
  "axum",
  "axum-server",
@@ -6348,12 +6401,28 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "04d056b875a9d2e6cb9a61d127afee9ac5999b9f87bcb32079d1318e505be714"
 
 [[package]]
+name = "saa"
+version = "5.6.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "50e6b0aa893a6b8f9706cf731a65c4400dd6e7362e3849579398d41b8cf32c32"
+
+[[package]]
 name = "same-file"
 version = "1.0.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "93fc1dc3aaa9bfed95e02e6eadabb4baf7e3078b0bd1b4d7b6b0b68378900502"
 dependencies = [
  "winapi-util",
+]
+
+[[package]]
+name = "scc"
+version = "3.9.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e861fed1e7de8e481d9a1c05bb8f8a08eceb8d172dca86ddfbfb28f0376fe43f"
+dependencies = [
+ "saa",
+ "sdd",
 ]
 
 [[package]]
@@ -6408,6 +6477,12 @@ dependencies = [
  "precomputed-hash",
  "selectors",
 ]
+
+[[package]]
+name = "sdd"
+version = "4.10.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "10aff4a76629f4e3dddd3afc9a649b1a757e0bffdf0b45093e7dd676a15c1d5f"
 
 [[package]]
 name = "secret-service"
@@ -6681,6 +6756,12 @@ dependencies = [
  "cpufeatures 0.3.1",
  "digest 0.11.3",
 ]
+
+[[package]]
+name = "sha1_smol"
+version = "1.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bbfa15b3dddfee50a0fff136974b3e1bde555604ba463834a7eb7deb6417705d"
 
 [[package]]
 name = "sha2"
@@ -8041,6 +8122,7 @@ dependencies = [
  "getrandom 0.4.3",
  "js-sys",
  "serde_core",
+ "sha1_smol",
  "wasm-bindgen",
 ]
 
@@ -8775,6 +8857,31 @@ name = "zeroize"
 version = "1.9.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e13084392c5e4bc371903e2935a5eaeed24905a7511356b883835e18a78f6879"
+
+[[package]]
+name = "zeromq"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "55b31ad37d1aad854ddc8c4f16b637259ce95f757f6c32f05447279c68ed9e2a"
+dependencies = [
+ "async-io",
+ "async-trait",
+ "asynchronous-codec",
+ "bytes",
+ "crossbeam-queue",
+ "futures",
+ "futures-channel",
+ "log",
+ "parking_lot",
+ "rand 0.10.3",
+ "regex",
+ "scc",
+ "socket2",
+ "thiserror 2.0.21",
+ "tokio",
+ "tokio-util",
+ "uuid",
+]
 
 [[package]]
 name = "zerotrie"

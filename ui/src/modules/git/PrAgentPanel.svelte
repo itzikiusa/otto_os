@@ -1,7 +1,7 @@
 <script lang="ts">
-  // The pull request's agent thread, inside the PR workspace: under the PR
-  // list and Files on a desktop (folded until first used, resizable,
-  // maximisable over the workspace), a full-height sheet on a phone. One
+  // The pull request's agent thread, inside the PR workspace's Detail pane
+  // (the Agent view: inline beside the PR, widened from its ⋯ or the thread's
+  // own maximise; a full-width sheet on a phone). One
   // Threads thread per PR (pr-agent-thread.ts): opening a PR looks its thread
   // up (an open one first) and shows it; with none, the embed is the Threads
   // start composer — the person picks the agent, model, effort and access,
@@ -14,7 +14,6 @@
   import { onDestroy, tick, untrack } from 'svelte';
   import { api } from '../../lib/api/client';
   import type { FileDiff, PrDetail, RuntimeAccessMode, RuntimeSession } from '../../lib/api/types';
-  import Icon from '../../lib/components/Icon.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
@@ -30,6 +29,7 @@
     type RuntimeSessionPort,
   } from '../../lib/runtimeThreadPort';
   import { git } from '../../lib/stores/git.svelte';
+  import { viewport } from '../../lib/stores/viewport.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { toastError } from '../../lib/toastError';
   import { prDiffFileLoader } from '../../lib/diff/diff-load';
@@ -44,20 +44,16 @@
     number: number;
     /** The PR's title as the tab strip knows it ('' before it loads). */
     title: string;
-    /** dock = the left column; max = over the whole workspace; sheet = phone. */
-    layout: 'dock' | 'max' | 'sheet';
-    folded?: boolean;
-    ontogglefolded?: () => void;
+    /** Widen / narrow the pane (the thread's own maximise). */
     onmaximize?: () => void;
-    onrestore?: () => void;
     /** An ask arrived (any entry point): the host brings the panel forward. */
     onasked?: () => void;
-    /** Phone, sheet closed: only the thread's embed, hidden, so its state still
-     *  reaches the bridge (the opener's dot, the ⋯ hint). Takes no asks: the
-     *  sheet's own panel does, once the ask opens it. */
+    /** The pane shows something else: only the thread's embed, hidden, so its
+     *  state still reaches the bridge (the ✦ button's dot, the ⋯ hint). Takes
+     *  no asks: the pane's own panel does, once the ask opens it. */
     statusOnly?: boolean;
   }
-  let { repoId, number, title, layout, folded = false, ontogglefolded, onmaximize, onrestore, onasked, statusOnly = false }: Props = $props();
+  let { repoId, number, title, onmaximize, onasked, statusOnly = false }: Props = $props();
   let disposed = false;
   let fileDiffsAbort: AbortController | null = null;
   $effect(() => {
@@ -73,7 +69,7 @@
     fileDiffsAbort?.abort();
     fileDiffsAbort = null;
   });
-  const hidden = $derived((folded && layout === 'dock') || statusOnly);
+  const hidden = $derived(statusOnly);
 
   const ThreadView = lazyComponent(loadRuntimeThreadView);
   const originId = $derived(prAgentOriginId(repoId, number));
@@ -198,7 +194,7 @@
 
   async function run(ask: PrAgentSend): Promise<void> {
     // The panel takes the ask itself (it may beat the host's own look at the
-    // bridge): unfold it here, or the answer lands in a folded region.
+    // bridge): bring the pane forward, or the answer lands where nobody looks.
     onasked?.();
     const r = repoCtx;
     const h = handle;
@@ -221,13 +217,11 @@
     }
   }
 
-  // The thread's live state: a dot on the folded header and a hint on the
-  // PR's ⋯ entry. Shown, the embed reports it (`onstatus`). Folded (or the
-  // phone's closed sheet) nothing is mounted for it: the store's row, kept
-  // live by its event listener, says enough (prThreadStatus).
-  let live = $state<PrAgentStatus | null>(null);
+  // The thread's live state: the ✦ button's dot and a hint on the PR's ⋯
+  // entry. Shown, the embed reports it (`onstatus`). Status-only, nothing is
+  // mounted for it: the store's row, kept live by its event listener, says
+  // enough (prThreadStatus).
   function onstatus(st: PrAgentStatus): void {
-    live = st;
     prAgentBridge.setStatus(originId, st);
   }
   const quiet = $derived(hidden && !!thread && !detachedId);
@@ -245,7 +239,6 @@
     const key = originId;
     return () => prAgentBridge.setStatus(key, null);
   });
-  const dot = $derived(live === 'working' ? 'The agent is working' : live === 'needs-you' ? 'The agent needs you' : live === 'background' ? 'Background task running' : '');
 
   function detach(id: string): void {
     prAgentBridge.detach(originId, id);
@@ -321,7 +314,7 @@
   let kb = $state(0);
   $effect(() => {
     const vv = window.visualViewport;
-    if (layout !== 'sheet' || statusOnly || !vv) return;
+    if (!viewport.isPhone || statusOnly || !vv) return;
     const sync = (): void => { kb = Math.max(0, Math.round(window.innerHeight - vv.height - vv.offsetTop)); };
     sync();
     vv.addEventListener('resize', sync);
@@ -339,33 +332,12 @@
 
 <section
   bind:this={root}
-  class="pra pra-{layout}"
-  class:folded={folded && layout === 'dock'}
+  class="pra"
   style={kb ? `padding-block-end:${kb}px` : undefined}
   aria-label="Agent thread for pull request #{number}"
   data-testid={statusOnly ? 'pr-agent-status' : 'pr-agent-panel'}
 >
-  {#if layout !== 'sheet'}
-    <div class="pra-head">
-      {#if layout === 'max'}
-        <button class="btn small" onclick={onrestore} title="Back to the pull request" data-testid="pr-agent-restore">
-          <Icon name="chevronLeft" size={12} /> Back to the PR
-        </button>
-      {:else}
-        <button class="pra-title" aria-expanded={!folded} title={folded ? 'Show the agent thread' : 'Hide the agent thread'} onclick={ontogglefolded}>
-          <Icon name={folded ? 'chevronRight' : 'chevronDown'} size={12} />
-          <span>Agent</span>
-        </button>
-      {/if}
-      <span class="pra-pr" dir="auto" title={title ? `#${number} ${title}` : `#${number}`}>#{number}{title ? ` ${title}` : ''}</span>
-      {#if row?.status === 'closed'}<span class="pra-tag">History</span>{/if}
-      {#if sending}<span class="spinner" aria-hidden="true"></span>{/if}
-      {#if dot && (hidden || layout !== 'dock')}<span class="pra-dot" class:needs={live === 'needs-you'} class:calm={live === 'background'} role="img" aria-label={dot} title={dot}></span>{/if}
-    </div>
-  {/if}
-
-  <!-- Folded (or the phone's closed sheet): not rendered; the dot comes from
-       the thread's row (see `quiet`). -->
+  <!-- Status-only: not rendered; the dot comes from the thread's row (see `quiet`). -->
   {#if !hidden}
     <div class="pra-body">
       {#if sendError}
@@ -394,7 +366,7 @@
           {:else if ThreadView.component}
             <ThreadView.component {onstatus} sessionId={thread?.id ?? null} workspaceId={thread?.workspace_id ?? wsId ?? ''} compact
               {draft} {hostCommands} {contextOnFresh} onhandle={(h) => (handle = h)}
-              onmaximize={thread && layout === 'dock' ? onmaximize : undefined} ondetach={detach} />
+              onmaximize={thread ? onmaximize : undefined} ondetach={detach} />
           {:else}
             <LoadState what="the thread" loading empty rows={3} />
           {/if}
@@ -408,63 +380,11 @@
   .pra {
     display: flex;
     flex-direction: column;
+    flex: 1;
     min-height: 0;
     min-width: 0;
-    height: 100%;
     background: var(--bg);
   }
-  .pra-dock { border-block-start: 1px solid var(--separator); }
-  /* The phone sheet (DockedDrawer in a Drawer): its body is a plain block, so
-     give the panel's wrapper the drawer's height — the start composer then
-     sits at the bottom of the sheet, like a conversation's. */
-  :global(.drawer-body > .dd-body:has(> .pra-sheet)) { height: 100%; }
-  .pra.folded { height: auto; }
-  .pra-head {
-    flex: none;
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    padding-block: 6px;
-    padding-inline: 6px 8px;
-    min-width: 0;
-  }
-  .pra-max .pra-head { padding-inline: 8px; border-block-end: 1px solid var(--separator); }
-  .pra-title {
-    display: inline-flex;
-    align-items: center;
-    gap: 4px;
-    flex: none;
-    background: none;
-    border: none;
-    color: var(--text);
-    font-size: var(--fs-s);
-    font-weight: 600;
-    padding: 2px 4px;
-    border-radius: var(--radius-s);
-    cursor: pointer;
-  }
-  .pra-title:hover { background: var(--hover); }
-  .pra-pr {
-    flex: 1;
-    min-width: 0;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    font-size: var(--fs-xs);
-    color: var(--text-dim);
-  }
-  .pra-tag { flex: none; font-size: var(--fs-xs); color: var(--text-dim); }
-  .pra-dot {
-    flex: none;
-    inline-size: 8px;
-    block-size: 8px;
-    border-radius: 50%;
-    background: var(--accent-solid);
-    animation: otto-pulse 1.6s ease-in-out infinite;
-  }
-  .pra-dot.needs { background: var(--warning); animation: none; }
-  .pra-dot.calm { background: var(--text-dim); animation: none; }
-  @media (prefers-reduced-motion: reduce) { .pra-dot { animation: none; } }
   .pra-body { flex: 1; min-height: 0; display: flex; flex-direction: column; overflow-y: auto; }
   .pra-thread { flex: 1; min-height: 0; display: flex; flex-direction: column; }
   .pra-note { flex: none; margin: 0; padding: 6px 12px; font-size: var(--fs-xs); color: var(--text-dim); }

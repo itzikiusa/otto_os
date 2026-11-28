@@ -1,15 +1,14 @@
 <script lang="ts">
-  // Right-side detail drawer for the AWS service views (EC2, RDS) — the same
-  // look as the Kubernetes ResourceDrawer: header (state pill + name + id,
-  // close), tab strip, scrollable body. The chrome (desktop column / phone
-  // sheet, ✕, Esc, modal registration, focus) is the shared DockedDrawer;
-  // this adds the kind/name/id/status header and the tab strip (←/→ move).
+  // The Detail pane of the AWS service views (EC2, RDS): the shared DetailPane
+  // (inline column beside the table while it keeps 480 px, else a right sheet;
+  // resizable, Esc, focus return) with the detail tabs AS its header, and the
+  // kind / name / id / state on the first line of the body.
   import type { BadgeTone } from '../../lib/status';
   import { sentenceCase } from '../../lib/labels';
   import Badge from '../../lib/components/Badge.svelte';
+  import Tabs from '../../lib/components/Tabs.svelte';
+  import DetailPane from '../../lib/components/side/DetailPane.svelte';
   import type { Snippet } from 'svelte';
-  import { onTabKey } from '../../lib/tabKeys';
-  import DockedDrawer from '../../lib/components/DockedDrawer.svelte';
 
   interface Props {
     /** Small uppercase kind label ("instance", "db instance"). */
@@ -28,53 +27,36 @@
   }
   let { kind, name, id = '', status = '', statusTone = 'neutral', tabs, tab, ontab, onclose, children }: Props =
     $props();
-
 </script>
 
-<DockedDrawer open title="{kind} details" {onclose} testid="aws-drawer">
-  {#snippet head()}
-    <div class="dr-title">
-      <span class="dr-kind">{kind}</span>
-      <span class="dr-name" title={name}>{name}</span>
-      {#if id && id !== name}<span class="dr-id mono" title={id}>{id}</span>{/if}
-      {#if status}<Badge tone={statusTone} label={sentenceCase(status)} testid="aws-drawer-status" />{/if}
-    </div>
+<DetailPane open module="aws" pane={kind.replace(/\s+/g, '-')} title="{kind} details" {onclose} testid="aws-drawer">
+  {#snippet views()}
+    <Tabs size="s" label="Detail tabs" idBase="aws-dr" {tabs} value={tab} onchange={ontab} />
   {/snippet}
-  <div class="dr-tabs">
-   <div class="segmented" role="tablist" aria-label="Detail tabs">
-    {#each tabs as t (t.id)}
-      <button
-        role="tab"
-        id="dr-tab-{t.id}"
-        aria-controls="dr-panel"
-        aria-selected={tab === t.id}
-        tabindex={tab === t.id ? 0 : -1}
-        class:active={tab === t.id}
-        onclick={() => ontab(t.id)}
-        onkeydown={onTabKey}
-      >{t.label}</button>
-    {/each}
-   </div>
+  <div class="dr-title">
+    <span class="dr-kind">{kind}</span>
+    <span class="dr-name" title={name}>{name}</span>
+    {#if id && id !== name}<span class="dr-id mono" title={id}>{id}</span>{/if}
+    {#if status}<Badge tone={statusTone} label={sentenceCase(status)} testid="aws-drawer-status" />{/if}
   </div>
-  <div class="dr-body" id="dr-panel" role="tabpanel" aria-labelledby="dr-tab-{tab}">
+  <div class="dr-body" id="aws-dr-panel-{tab}" role="tabpanel" aria-labelledby="aws-dr-tab-{tab}">
     {@render children()}
   </div>
-</DockedDrawer>
+</DetailPane>
 
 <style>
   .dr-title {
-    flex: 1;
-    min-width: 0;
     display: flex;
     align-items: center;
     gap: 8px;
     flex-wrap: wrap;
+    padding: 10px 16px 0;
     font-size: var(--fs-m);
   }
   .dr-kind {
     font-size: var(--fs-xs);
     text-transform: uppercase;
-    letter-spacing: .06em;
+    letter-spacing: 0.06em;
     color: var(--text-dim);
   }
   .dr-name {
@@ -92,16 +74,9 @@
     white-space: nowrap;
     max-width: 100%;
   }
-  /* The shared .segmented control, scrollable when the tabs outgrow the drawer. */
-  .dr-tabs {
-    padding: 8px 12px;
-    border-bottom: 1px solid var(--border);
-    overflow-x: auto;
-  }
   .dr-body {
     flex: 1;
     min-height: 0;
-    overflow: auto;
     display: flex;
     flex-direction: column;
   }

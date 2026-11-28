@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { apiCtx } from './seed';
 import { requireThreadMeta } from './daemonFeatures';
-import { expectFullyInViewport, expectNoHorizontalOverflow } from './helpers';
+import { expectFullyInViewport, expectNoHorizontalOverflow, showThreadList } from './helpers';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // The Threads sidebar as an inbox (docs/features/threads.md "The sidebar"),
@@ -189,9 +189,12 @@ test('Working and History stay pinned above the footer while the list scrolls', 
   // Not part of the scrolling list: they sit between it and the footer.
   expect(await fold.evaluate((el) => !!el.closest('.th-scroll'))).toBe(false);
   expect(await history.evaluate((el) => !!el.closest('.th-scroll'))).toBe(false);
-  const foot = (await side.locator('.th-foot').boundingBox())!;
+  // …and the pane's bottom: its footer when it has something to say, else its own edge.
+  const footEl = side.locator('.side-pane-foot');
+  const sideBox = (await side.boundingBox())!;
+  const bottom = (await footEl.isVisible()) ? (await footEl.boundingBox())!.y : sideBox.y + sideBox.height;
   const h = (await history.boundingBox())!;
-  expect(foot.y - (h.y + h.height)).toBeLessThan(60);
+  expect(bottom - (h.y + h.height)).toBeLessThan(60);
   // An open fold takes at most ~40 % of the sidebar and scrolls inside.
   const sb = (await side.boundingBox())!;
   const folds = (await side.locator('.th-folds').boundingBox())!;
@@ -301,10 +304,15 @@ test('the footer meter shows the focused agent’s tightest plan window and open
     await page.getByTestId('threads-sidebar').screenshot({ path: join(SHOTS, `after-meter-${scheme}.png`) });
   }
 
-  // A Claude thread: no Claude numbers here, so the plain Usage icon.
+  // A Claude thread: no Claude numbers here, so no meter — and no footer at
+  // all (it has nothing to say); Usage stays in the pane's ⋯.
   await row(page, 'done').locator('.tr-main').click();
   await expect(page.getByTestId('threads-usage-meter')).toHaveCount(0);
-  await expect(btn).toHaveAttribute('aria-label', 'Usage statistics');
+  await expect(btn).toHaveCount(0);
+  await expect(page.getByTestId('threads-sidebar').locator('.side-pane-foot')).toBeHidden();
+  await page.getByTestId('threads-sidebar').getByRole('button', { name: 'Threads actions' }).click();
+  await expect(page.getByRole('menuitem', { name: 'Usage…' })).toBeVisible();
+  await page.keyboard.press('Escape');
 
   // ≥ 80 % used is a warning (the next poll / a reload brings it).
   used = 85;
@@ -330,8 +338,8 @@ test('screenshots: the sidebar, light and dark, desktop and phone', async ({ pag
   const phone = await browser.newContext({ ...devices['iPhone 14'], storageState: info.project.use.storageState as string, baseURL: info.project.use.baseURL });
   const p = await phone.newPage();
   await open(p, ids.idle, true);
-  await p.getByTestId('threads-toggle-sidebar').click();
-  await expectFullyInViewport(p, p.getByTestId('threads-sidebar'), 'threads sidebar drawer');
+  await showThreadList(p);
+  await expectFullyInViewport(p, p.getByTestId('threads-sidebar'), 'threads list page');
   await expectNoHorizontalOverflow(p);
   for (const scheme of ['dark', 'light'] as const) {
     await p.emulateMedia({ colorScheme: scheme });

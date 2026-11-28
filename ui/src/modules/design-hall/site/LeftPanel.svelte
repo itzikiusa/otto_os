@@ -10,7 +10,8 @@
 </script>
 
 <script lang="ts">
-  // Site Studio left panel: Pages · Layers · Blocks.
+  // Site Studio's list pane body: Pages · Layers · Blocks (the views are the
+  // pane's header in SiteStudio).
   //   Pages  — the site's pages (home first), add / rename / delete.
   //   Layers — the current page's sections (drag to reorder, eye = hide
   //            everywhere, a glyph when hidden at a breakpoint); the selected
@@ -21,7 +22,6 @@
   //            to insert after the selection, or drag it onto the canvas.
   import Icon from '../../../lib/components/Icon.svelte';
   import LoadState from '../../../lib/components/LoadState.svelte';
-  import { onTabKey } from '../../../lib/tabKeys';
   import type { IconName } from '../../../lib/components/Icon.svelte';
   import { FAMILIES, itemDef, searchBlocks, sectionLabel, type SectionDef } from './engine/catalog';
   import { renderSection, str } from './engine/render';
@@ -156,19 +156,8 @@
 </script>
 
 <div class="panel">
-  <div class="tabs segmented" role="tablist" aria-label="Site panels">
-    <button role="tab" id="site-tab-pages" aria-controls="site-panel" aria-selected={tab === 'pages'} tabindex={tab === 'pages' ? 0 : -1} onkeydown={onTabKey} class:active={tab === 'pages'} onclick={() => (tab = 'pages')} data-testid="site-tab-pages">
-      <Icon name="file" size={12} /> Pages
-    </button>
-    <button role="tab" id="site-tab-layers" aria-controls="site-panel" aria-selected={tab === 'layers'} tabindex={tab === 'layers' ? 0 : -1} onkeydown={onTabKey} class:active={tab === 'layers'} onclick={() => (tab = 'layers')} data-testid="site-tab-layers">
-      <Icon name="layers" size={12} /> Layers
-    </button>
-    <button role="tab" id="site-tab-blocks" aria-controls="site-panel" aria-selected={tab === 'blocks'} tabindex={tab === 'blocks' ? 0 : -1} onkeydown={onTabKey} class:active={tab === 'blocks'} onclick={() => (tab = 'blocks')} data-testid="site-tab-blocks">
-      <Icon name="grid" size={12} /> Blocks
-    </button>
-  </div>
-
-  <div class="body" role="tabpanel" id="site-panel" aria-labelledby="site-tab-{tab}">
+  <!-- The Pages · Layers · Blocks views are the list pane's header (SiteStudio). -->
+  <div class="body" role="tabpanel" id="site-panel-{tab}" aria-labelledby="site-tab-{tab}">
     {#if tab === 'pages'}
       <ul class="list" aria-label="Pages">
         {#each doc.pages as p, i (p.id)}
@@ -321,20 +310,11 @@
     min-height: 0;
     height: 100%;
   }
-  .tabs {
-    margin: 10px 12px 0;
-    align-self: flex-start;
-  }
-  .tabs button {
-    display: inline-flex;
-    align-items: center;
-    gap: 4px;
-  }
   .body {
     flex: 1;
     min-height: 0;
     overflow-y: auto;
-    padding: 10px 8px 16px;
+    padding-block: 2px 16px;
   }
   .section-title {
     display: flex;
@@ -370,7 +350,6 @@
     background: var(--accent-soft);
   }
   .row.active .name {
-    color: var(--accent-text);
     font-weight: 600;
   }
   .row.muted .name {

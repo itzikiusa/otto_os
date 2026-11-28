@@ -160,8 +160,8 @@ test('Canvas late scene responses cannot replace the latest selection', async ({
   const requested=new Promise<void>(resolve=>{started=resolve;});
   // The editor reads scenes as `…/canvas/scenes/{id}?files=ref` — match the path, not the full URL.
   await page.context().route(url=>url.pathname.endsWith(`/canvas/scenes/${scenes[0].id}`),async route=>{const response=await route.fetch();started();await held;await route.fulfill({response});});
-  await page.locator('.scene-list .row',{hasText:scenes[0].title}).getByRole('button').first().click(); await requested;
-  await page.locator('.scene-list .row',{hasText:scenes[1].title}).getByRole('button').first().click();
+  await page.locator('.scene-list .side-row',{hasText:scenes[0].title}).getByRole('button').first().click(); await requested;
+  await page.locator('.scene-list .side-row',{hasText:scenes[1].title}).getByRole('button').first().click();
   await expect(page.locator('.board')).toContainText(scenes[1].title);
   release(); await page.waitForTimeout(500);
   await expect(page.locator('.board')).toContainText(scenes[1].title);

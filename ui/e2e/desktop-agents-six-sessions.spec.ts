@@ -49,7 +49,8 @@ test('six sessions: tile, tabs ⇄ tiled ⇄ free layout, reload, shortcuts', as
   // Tile all six from the inbox's select mode.
   await page.getByTestId('agents-select-toggle').click();
   for (const t of TITLES) await page.getByLabel(`Select ${t}`).check();
-  await page.getByTestId('agents-tile-selected').click();
+  await page.getByTestId('agents-select-more').click();
+  await page.getByRole('menuitem', { name: 'Tile' }).click();
   await expect(tiles(page)).toHaveCount(6, { timeout: 30_000 });
 
   // Tabs: a strip of six; ⌃3 jumps to the third tab (⌃1–⌃9, unchanged).

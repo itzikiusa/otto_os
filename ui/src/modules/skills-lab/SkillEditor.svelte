@@ -23,6 +23,9 @@
   import { sourceLabel } from './skillGroups';
   import { noteKeptCopies } from './bundledActions';
   import { guardUnsaved } from '../../lib/leaveGuard';
+  import ListDetail from '../../lib/components/side/ListDetail.svelte';
+  import ListPane from '../../lib/components/side/ListPane.svelte';
+  import SideRow from '../../lib/components/side/SideRow.svelte';
 
   interface Props {
     name: string;
@@ -49,6 +52,9 @@
 
   // svelte-ignore state_referenced_locally
   let currentFile = $state(initialFile);
+  /** Phone: the open file is pushed over the file list ("‹ Files"); the
+   *  editor opens on the first file, Back shows the list. */
+  let phoneOpen = $state(true);
   let content = $state('');
   let original = $state('');
   let binary = $state(false);
@@ -317,28 +323,21 @@
     </div>
   {/if}
   <div class="editor">
-    <nav class="files" aria-label="Files in {name}">
-      <div class="files-head">
-        <span class="section-title">Files</span>
-        {#if editable}
-          <button class="icon-btn" onclick={addFile} aria-label="New file" title="New file"><Icon name="plus" size={14} /></button>
-        {/if}
-      </div>
-      <ul>
-        {#each files as f (f.path)}
-          <li class="file-row">
-            <button class="file" class:active={currentFile === f.path} aria-current={currentFile === f.path ? 'true' : undefined} onclick={() => open(f.path)} title="{f.path} · {formatBytes(f.size)}">
-              <Icon name="file" size={12} />
-              <span class="file-name mono" dir="ltr">{f.path}</span>
-            </button>
-            {#if editable && f.path !== 'SKILL.md'}
-              <button class="icon-btn file-del" onclick={() => deleteFile(f.path)} aria-label="Delete {f.path}" title="Delete {f.path}"><Icon name="trash" size={12} /></button>
-            {/if}
-          </li>
-        {/each}
-      </ul>
-    </nav>
-
+    <ListDetail module="skills-eval" pane="skill-files" name="Files" open={phoneOpen} onback={() => (phoneOpen = false)}>
+      {#snippet list()}
+        <ListPane count={files.length} primary={editable ? { icon: 'plus', label: 'New file', onclick: addFile } : undefined} testid="skill-files">
+          {#each files as f (f.path)}
+            <SideRow
+              icon="file"
+              title={f.path}
+              tip="{f.path} · {formatBytes(f.size)}"
+              selected={currentFile === f.path}
+              menu={editable && f.path !== 'SKILL.md' ? () => [{ label: `Delete ${f.path}…`, icon: 'trash', danger: true, action: () => void deleteFile(f.path) }] : undefined}
+              onclick={() => { phoneOpen = true; void open(f.path); }}
+            />
+          {/each}
+        </ListPane>
+      {/snippet}
     <section class="pane">
       <div class="pane-head">
         <span class="mono path" dir="ltr" title={currentFile}>{currentFile}</span>
@@ -403,6 +402,7 @@
         </div>
       {/if}
     </section>
+    </ListDetail>
   </div>
 </div>
 
@@ -434,80 +434,14 @@
   .editor {
     flex: 1;
     min-height: 320px;
-    display: grid;
-    grid-template-columns: 220px minmax(0, 1fr);
+    display: flex;
     border: 1px solid var(--border);
     border-radius: var(--radius-m);
     overflow: hidden;
     background: var(--surface);
   }
-  .files {
-    border-inline-end: 1px solid var(--border);
-    overflow-y: auto;
-    min-height: 0;
-  }
-  .files-head {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    padding-block: 6px 2px; padding-inline: 10px 8px;
-  }
-  .files-head .section-title {
-    margin: 0;
-  }
-  .files ul {
-    list-style: none;
-    margin: 0;
-    padding: 2px 6px 8px;
-  }
-  .file-row {
-    display: flex;
-    align-items: center;
-  }
-  .file {
-    flex: 1;
-    min-width: 0;
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    height: 26px;
-    padding: 0 6px;
-    border: none;
-    border-radius: var(--radius-s);
-    background: transparent;
-    color: var(--text);
-    cursor: pointer;
-    text-align: start;
-    font: inherit;
-  }
-  .file :global(svg) {
-    flex: none;
-    color: var(--text-dim);
-  }
-  .file:hover {
-    background: var(--hover);
-  }
-  .file.active {
-    background: var(--accent-soft);
-  }
-  .file-name {
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-  .file-del {
-    opacity: 0;
-  }
-  .file-row:hover .file-del,
-  .file-del:focus-visible {
-    opacity: 1;
-  }
-  @media (hover: none) {
-    .file-del {
-      opacity: 1;
-    }
-  }
   .pane {
+    flex: 1;
     display: flex;
     flex-direction: column;
     min-width: 0;
@@ -578,19 +512,5 @@
   .msg {
     padding: 14px;
     margin: 0;
-  }
-  @container skilldetail (max-width: 640px) {
-    .editor {
-      grid-template-columns: 1fr;
-      grid-template-rows: auto 1fr;
-    }
-    .files {
-      border-inline-end: none;
-      border-bottom: 1px solid var(--border);
-      max-height: 160px;
-    }
-    .file-del {
-      opacity: 1;
-    }
   }
 </style>

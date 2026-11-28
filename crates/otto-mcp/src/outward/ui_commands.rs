@@ -305,6 +305,8 @@ const DENIED_ENV: &[&str] = &[
     // Read by the IDE engine (every_env_name_the_ide_reads_is_decided): Xcode /
     // Flutter toolchain roots, the cache owner and the shell's directory.
     "DEVELOPER_DIR",
+    // The macOS SDK (headers, libc++, linker stubs) a managed clang builds against.
+    "SDKROOT",
     "FLUTTER_ROOT",
     "UE_ROOT",
     "UNREAL_ENGINE_ROOT",
@@ -1261,6 +1263,7 @@ mod tests {
             "TMPDIR",
             "SSH_AUTH_SOCK",
             "DEVELOPER_DIR",
+            "SDKROOT",
             "FLUTTER_ROOT",
             "USER",
             "LOGNAME",

@@ -102,6 +102,8 @@
   });
 
   const loadError = $derived(session ? (activity.loadErrorBySession[session.id] ?? null) : null);
+  // First read only: a refresh keeps what is on screen.
+  const firstLoad = $derived(!!session && !!activity.loadingBySession[session.id] && tasks.length === 0 && trail.length === 0);
 
   let note = $state('');
   let adding = $state(false);
@@ -180,6 +182,9 @@
   />
 {:else}
   <div class="activity">
+    {#if firstLoad}
+      <div class="load-state"><LoadState what="this session’s activity" loading empty rows={6} /></div>
+    {:else}
     {#if loadError}
       <!-- The trail + tasks didn't load: say so (an empty board would read as
            "the agent has done nothing"), with Retry — inline when nothing is
@@ -295,16 +300,9 @@
       </div>
 
       <div class="filters">
-        <div class="tabs">
+        <div class="segmented" role="group" aria-label="Show activity from">
           {#each SOURCE_TABS as t (t.id)}
-            <button
-              class="tab"
-              class:on={sourceFilter === t.id}
-              aria-pressed={sourceFilter === t.id}
-              onclick={() => (sourceFilter = t.id)}
-            >
-              {t.label}
-            </button>
+            <button type="button" aria-pressed={sourceFilter === t.id} onclick={() => (sourceFilter = t.id)}>{t.label}</button>
           {/each}
         </div>
         <input dir="ltr" class="search" placeholder="Filter…" aria-label="Filter the trail" bind:value={query} spellcheck="false" />
@@ -374,6 +372,7 @@
         </ul>
       {/if}
     </section>
+    {/if}
   </div>
 {/if}
 
@@ -557,30 +556,9 @@
   /* Filters */
   .filters {
     display: flex;
+    flex-wrap: wrap;
     align-items: center;
     gap: 6px;
-  }
-  .tabs {
-    display: flex;
-    gap: 2px;
-  }
-  .tab {
-    height: 20px;
-    padding: 0 6px;
-    border: none;
-    border-radius: var(--radius-s);
-    background: transparent;
-    color: var(--text-dim);
-    font-size: var(--fs-xs);
-    cursor: pointer;
-  }
-  .tab:hover {
-    background: var(--hover);
-  }
-  .tab.on {
-    background: var(--surface-2);
-    color: var(--text);
-    font-weight: 600;
   }
   .search {
     flex: 1;

@@ -15,6 +15,7 @@
   } from '../ideStore.svelte';
   import { ideAgent } from '../store/ideAgentController.svelte';
   import IdeBreakpointsList from '../debug/IdeBreakpointsList.svelte';
+  import { ideLayout } from '../shell/ideLayout.svelte';
 
   export interface FlatSymbolNode {
     sym: IdeSymbolNode;
@@ -82,24 +83,24 @@
           <div class="sec-list">
             {#each flatSymbols as item, idx (`${item.sym.name}:${item.sym.line}:${idx}`)}
               {@const isCurrent = ide.cursorInfo.line >= item.sym.line && ide.cursorInfo.line <= Math.max(item.sym.line, item.sym.end_line)}
-              <div class="struct-line-wrap" class:active={isCurrent}>
+              <div class="struct-line-wrap side-row" class:active={isCurrent} class:selected={isCurrent} style:--side-depth={item.depth}>
                 <button
                   type="button"
-                  class="struct-row"
+                  class="struct-row side-row-main"
+                  data-side-row
                   aria-current={isCurrent ? 'true' : undefined}
                   dir="ltr"
-                  style="padding-inline-start: calc(10px + {item.depth * 12}px)"
-                  onclick={() => ide.activePath && ide.jumpTo(ide.activePath, item.sym.line, 1)}
+                  onclick={() => { if (!ide.activePath) return; ide.jumpTo(ide.activePath, item.sym.line, 1); ideLayout.pane = 'editor'; }}
                   oncontextmenu={(e) => openSymbolMenu(e, item.sym)}
                   use:rowMenu
                 >
                   <Badge variant="outline" tone={symbolTone(item.sym.kind)} label={shortSymbolKind(item.sym.kind)} />
-                  <span class="sec-name">{item.sym.name}</span>
+                  <span class="sec-name side-row-title">{item.sym.name}</span>
                   <span class="struct-line">:{item.sym.line}</span>
                 </button>
                 <button
                   type="button"
-                  class="sec-icon-btn struct-agent-btn"
+                  class="icon-btn struct-agent-btn reveal-on-hover"
                   aria-label="Add {item.sym.name} to Agent context"
                   title="Add to Agent context"
                   onclick={() => ide.activePath && ideAgent.attachSymbol(ide.activePath, item.sym, { openPanel: true })}
@@ -121,21 +122,12 @@
 {/if}
 
 <style>
-  .sec-panel { display: flex; flex-direction: column; flex: 1; min-block-size: 0; min-inline-size: 0; overflow: hidden; }
-  .sec-scroll { flex: 1; min-block-size: 0; overflow-y: auto; overflow-x: hidden; padding-block: 4px; }
-  .sec-list { display: flex; flex-direction: column; gap: 2px; }
-  .sec-name { flex: 1; min-inline-size: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .sec-icon-btn {
-    display: inline-flex; align-items: center; justify-content: center;
-    inline-size: 20px; block-size: 20px; border: 0; border-radius: var(--radius-s);
-    background: transparent; color: var(--text-dim); cursor: pointer; flex-shrink: 0;
-  }
-  .sec-icon-btn:hover { background: var(--hover); color: var(--text); }
-  .struct-agent-btn { opacity: 0; }
-  .struct-line-wrap:hover .struct-agent-btn, .struct-line-wrap:focus-within .struct-agent-btn { opacity: 1; }
-  .struct-line-wrap { display: flex; align-items: center; padding-inline-end: 4px; min-inline-size: 0; overflow: hidden; }
-  .struct-line-wrap:hover, .struct-line-wrap.active { background: var(--surface-2); }
-  .struct-row { display: flex; align-items: center; gap: 6px; flex: 1; min-inline-size: 0; padding-block: 4px; padding-inline-end: 4px; background: transparent; border: none; color: var(--text); font-size: var(--fs-xs); text-align: start; cursor: pointer; }
+  /* Rows are the shared side rows (app.css .side-row); the cursor's symbol is the selected one. */
+  .sec-panel { display: flex; flex-direction: column; block-size: 100%; min-block-size: 0; min-inline-size: 0; overflow: hidden; }
+  .sec-scroll { flex: 1; min-block-size: 0; overflow-y: auto; overflow-x: hidden; }
+  .sec-list { display: flex; flex-direction: column; }
+  .sec-name { flex: 1; }
+  .struct-row { gap: 6px; }
+  .struct-agent-btn { flex: none; margin-inline-end: 4px; }
   .struct-line { font-family: var(--font-mono); font-size: var(--fs-xs); color: var(--text-dim); flex-shrink: 0; }
-  @media (hover: none) { .struct-agent-btn { opacity: 1; } }
 </style>

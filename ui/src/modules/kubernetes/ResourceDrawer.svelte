@@ -6,7 +6,7 @@
 </script>
 
 <script lang="ts">
-  import DockedDrawer from '../../lib/components/DockedDrawer.svelte';
+  import DetailPane from '../../lib/components/side/DetailPane.svelte';
   import Badge from '../../lib/components/Badge.svelte';
   import { resourceAccess } from '../../lib/stores/resource-access.svelte';
   import { actionOperation } from './permissions';
@@ -25,7 +25,7 @@
   import LazyMount from '../../lib/components/LazyMount.svelte';
   import { lazyComponent } from '../../lib/lazy-component.svelte';
   import { copyText, copyWithToast } from '../../lib/clipboard';
-  import { ctxMenu, type MenuItem } from '../../lib/contextmenu.svelte';
+  import type { MenuItem } from '../../lib/contextmenu.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import { isAbortError } from '../../lib/api/client';
   import { k8sApi } from '../../lib/api/k8s';
@@ -38,9 +38,6 @@
   import { workloadKindFor } from './podHttp';
 
   interface Props {
-    modal?: boolean;
-    /** Desktop column width (the workspace's splitter owns it). */
-    width?: string;
     clusterId: string;
     kind: K8sResourceKind;
     ns: string;
@@ -66,7 +63,7 @@
     /** Open this workload’s row in the Monitor view (K-2). */
     onmonitor?: (ns: string, workload: string) => void;
   }
-  let { modal = false, width, clusterId, kind, ns, name, row, tab, canEdit, autoExec = false, onautoexec, ontab, onclose, onaction, onopenpod, reloadNonce = 0, onmonitor }: Props = $props();
+  let { clusterId, kind, ns, name, row, tab, canEdit, autoExec = false, onautoexec, ontab, onclose, onaction, onopenpod, reloadNonce = 0, onmonitor }: Props = $props();
 
   $effect(() => {
     void resourceAccess.load('k8s_cluster', clusterId);
@@ -266,7 +263,7 @@
   const context = $derived(clusterContext(cluster));
   const defaultContainer = $derived(containers.find((c) => !c.init)?.name ?? containers[0]?.name ?? '');
 
-  function copyKubectlMenu(e: MouseEvent): void {
+  function kubectlItems(): MenuItem[] {
     const getYaml = kubectlGetCmd({ kind, name, ns, context, output: 'yaml' });
     const describe = kubectlDescribeCmd({ kind, name, ns, context });
     const items: MenuItem[] = [
@@ -309,7 +306,7 @@
         },
       );
     }
-    ctxMenu.showAt(e.currentTarget as HTMLElement, items, { align: 'end' });
+    return items;
   }
 
   const actions = $derived(row ? actionsFor(kind, row).filter(a => a.id.startsWith('argocd_') ? resourceAccess.can('k8s_cluster', clusterId, actionOperation(a.id), 'kubernetes', 'edit') : canOperation(actionOperation(a.id))) : []);
@@ -336,23 +333,22 @@
 
 </script>
 
-<!-- The chrome (desktop column / phone sheet, ✕, Esc, modal registration,
-     focus) is the shared DockedDrawer; the host workspace owns the width. -->
-<DockedDrawer open title="{def.singular} details" {onclose} {modal} {width} testid="k8s-drawer">
-  {#snippet head()}
-    <div class="dr-headrow">
-      <div class="dr-title">
-        <span class="dr-kind">{def.singular}</span>
-        <span class="dr-name mono" title={name}>{name}</span>
-        {#if ns}<span class="dr-ns mono">{ns}</span>{/if}
-        {#if row}<Badge tone={statusTone} label={row.status} dot live={statusTone === 'info'} />{/if}
-      </div>
-      <button class="icon-btn" onclick={copyKubectlMenu} aria-label="Copy as kubectl" title="Copy as kubectl" aria-haspopup="menu" data-testid="k8s-drawer-copy-kubectl"><Icon name="terminal" size={14} /></button>
-      <button class="icon-btn" onclick={() => void refresh()} disabled={refreshing} aria-label="Refresh details" title="Refresh details" data-testid="k8s-drawer-refresh"><Icon name="refresh" size={14} /></button>
-    </div>
+<!-- The shared Detail pane (inline beside the table while it keeps 480 px,
+     else a right sheet; resizable, Esc, focus return): the tabs are its
+     header, Refresh its one action, "Copy as kubectl" its ⋯. -->
+<DetailPane open module="kubernetes" pane="resource" title="{def.singular} details" {onclose} menu={kubectlItems} legacy={{ w: 'otto_k8s_drawer_w' }} testid="k8s-drawer">
+  {#snippet views()}
+    <Tabs size="s" label="Detail tabs" idBase="k8s" tabs={TABS} value={tab} onchange={ontab} />
   {/snippet}
-
-  <Tabs label="Detail tabs" idBase="k8s" tabs={TABS} value={tab} onchange={ontab} />
+  {#snippet action()}
+    <button class="icon-btn" onclick={() => void refresh()} disabled={refreshing} aria-label="Refresh details" title="Refresh details" data-testid="k8s-drawer-refresh"><Icon name="refresh" size={14} /></button>
+  {/snippet}
+  <div class="dr-title">
+    <span class="dr-kind">{def.singular}</span>
+    <span class="dr-name mono" title={name}>{name}</span>
+    {#if ns}<span class="dr-ns mono">{ns}</span>{/if}
+    {#if row}<Badge tone={statusTone} label={row.status} dot live={statusTone === 'info'} />{/if}
+  </div>
 
   <div class="dr-body" role="tabpanel" id="k8s-panel-{tab}" aria-labelledby="k8s-tab-{tab}">
     {#if tab === 'overview'}
@@ -476,18 +472,12 @@
       {/if}
     {/if}
   </div>
-</DockedDrawer>
+</DetailPane>
 
 <style>
-  .dr-headrow {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-  }
   .dr-title {
-    flex: 1;
-    min-width: 0;
     display: flex;
+    padding: 10px 14px 0;
     align-items: center;
     gap: 8px;
     flex-wrap: wrap;

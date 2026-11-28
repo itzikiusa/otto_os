@@ -189,19 +189,11 @@ async function isPhoneLayout(page: Page): Promise<boolean> {
   return (await page.evaluate(() => window.innerWidth)) <= 640;
 }
 
-/** Select the seeded cluster in the sidebar. On the phone layout the list
- *  auto-collapses after selection, so re-expand it first if needed. */
+/** Select the seeded cluster in the cluster list (on a phone the list is the
+ *  page and the cluster is pushed over it). */
 async function selectCluster(page: Page): Promise<void> {
   await page.goto('/#/brokers');
   await expect(page.locator('.brokers-page')).toBeVisible({ timeout: 30_000 });
-  // The cluster list may be collapsed (phone) — open it via the section
-  // toggle, deciding on its aria-expanded STATE. An instant
-  // `isVisible('.cluster-list')` read false before the list rendered and the
-  // click then COLLAPSED the list that was open by default (S12-304).
-  const toggle = page.locator('.sec-toggle').first();
-  await expect(toggle).toHaveAttribute('aria-expanded', /^(true|false)$/, { timeout: 15_000 });
-  if ((await toggle.getAttribute('aria-expanded')) === 'false') await toggle.click();
-  await expect(toggle).toHaveAttribute('aria-expanded', 'true');
   const row = page.locator('.cluster .cn', { hasText: clusterName }).first();
   await expect(row).toBeVisible({ timeout: 15_000 });
   await row.click();
@@ -210,14 +202,8 @@ async function selectCluster(page: Page): Promise<void> {
   });
 }
 
-/** On the phone layout the content section can be collapsed; ensure it's open so
- *  tabs/body are interactable. */
+/** The cluster's view tabs are on screen (the cluster is open). */
 async function ensureContentOpen(page: Page): Promise<void> {
-  const tabsVisible = await page.locator('.tabs').isVisible().catch(() => false);
-  if (!tabsVisible) {
-    const toggle = page.locator('.content-toggle').first();
-    if (await toggle.isVisible().catch(() => false)) await toggle.click();
-  }
   await expect(page.locator('.tabs')).toBeVisible({ timeout: 10_000 });
 }
 

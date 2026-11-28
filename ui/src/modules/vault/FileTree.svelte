@@ -1,8 +1,15 @@
 <script lang="ts">
   import { rowMenu } from '../../lib/rowMenu';
-  // Vault file explorer — lazy directory tree over the store's TreeNode roots,
-  // virtualized (big vaults stay cheap), with ctx-menu file ops and
-  // drag-to-folder moves.
+  // The Vault's Files view — a ListPane (design.md §3) holding a lazy
+  // directory tree over the store's TreeNode roots, virtualized (big vaults
+  // stay cheap), with ctx-menu file ops and drag-to-folder moves. Rows draw
+  // their own markup (virtual list, drag, inline rename, checkbox) on the
+  // shared row look (app.css .side-row); the tree keeps its own WAI-ARIA keys.
+  // Multi-select: the pane header becomes the selection bar (count · Clear ·
+  // Review + fix); the group instruction and its agent sit under the tree.
+  import type { Snippet } from 'svelte';
+  import ListPane from '../../lib/components/side/ListPane.svelte';
+  import type { IconName } from '../../lib/components/Icon.svelte';
   import VirtualList from '../../lib/components/VirtualList.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
@@ -15,9 +22,17 @@
 
   let {
     onNewNote,
+    onpick,
+    views,
+    primary,
   }: {
     /** Open the new-note dialog seeded with a folder. */
     onNewNote: (dir: string) => void;
+    /** A note / file row was opened (a phone pushes it). */
+    onpick: () => void;
+    /** The pane's Files | Search | Tags views (VaultPage). */
+    views: Snippet;
+    primary: { icon: IconName; label: string; onclick: () => void };
   } = $props();
 
   // Re-derive the flat list from tree state (open/loaded live on the nodes).
@@ -74,8 +89,10 @@
     clearSelection();
   }
 
-  /** Mode-aware selection — only the pane actually shown highlights its row. */
+  /** Mode-aware selection — only the pane actually shown highlights its row;
+   *  none while multi-selecting (checked rows carry the fill then). */
   function isActive(n: TreeNode): boolean {
+    if (selected.size > 0) return false;
     return vault.centerMode === 'note'
       ? vault.notePath === n.entry.path
       : vault.centerMode === 'file' && vault.filePath === n.entry.path;
@@ -92,6 +109,7 @@
       toggleSelect(n.entry.path);
       return;
     }
+    onpick();
     if (n.entry.kind === 'note') void vault.open(n.entry.path);
     else void vault.openFile(n.entry.path);
   }
@@ -288,26 +306,33 @@
   }
 </script>
 
+{#snippet selHead()}
+  <span class="sel-count">{selected.size} selected</span>
+  <button type="button" class="btn small ghost" onclick={clearSelection}>Clear</button>
+  <button
+    type="button"
+    class="btn small"
+    title="Review + fix ALL {selected.size} selected notes as one coherent set (starts the agent immediately)"
+    onclick={groupReviewFix}
+  >
+    Review + fix
+  </button>
+{/snippet}
+
+<ListPane
+  {views}
+  {primary}
+  menu={() => [
+    { label: 'Collapse all', icon: 'minimize', action: () => vault.collapseAll() },
+    { label: 'Rescan vault', icon: 'refresh', action: () => void vault.rescan() },
+  ]}
+  selection={selected.size > 0 ? selHead : undefined}
+  loading={vault.treeLoading && flat.length === 0}
+  error={flat.length === 0 ? vault.treeError || null : null}
+  onretry={() => void vault.loadRoot()}
+  testid="vault-files"
+>
 <div class="tree" role="tree" aria-label="Vault files" aria-multiselectable="true" bind:this={treeEl}>
-  {#if (vault.treeLoading || vault.treeError) && flat.length === 0}
-    <LoadState
-      what="files"
-      variant="compact"
-      loading={vault.treeLoading}
-      error={vault.treeError}
-      empty
-      onretry={() => void vault.loadRoot()}
-    />
-  {:else if flat.length === 0}
-    <div class="empty">
-      No notes yet.
-      {#if vault.centerMode !== 'empty'}
-        <button class="btn ghost" onclick={() => onNewNote('')}>New note</button>
-      {:else}
-        <button class="btn ghost only-phone" onclick={() => onNewNote('')}>New note</button>
-      {/if}
-    </div>
-  {:else}
     {#if vault.treeError}
       <LoadState
         what="files"
@@ -320,7 +345,7 @@
          (the name leads the row's text, so match n maps onto the DOM). -->
     <VirtualList
       items={flat}
-      estimateHeight={26}
+      estimateHeight={30}
       class="tree-list"
       pinnedIndex={tabIndex}
       scrollIndex={tabIndex}
@@ -329,14 +354,13 @@
     >
       {#snippet row(n: TreeNode)}
         <div use:rowMenu
-          class="row {n.entry.kind}"
-          class:active={isActive(n)}
+          class="row side-row side-row-main {n.entry.kind}"
+          class:selected={isActive(n) || selected.has(n.entry.path)}
           class:reserved={n.entry.reserved}
           class:drag-over={dragOver === n.entry.path}
-          style="padding-inline-start: {8 + n.depth * 14}px"
+          style:--side-depth={n.depth}
           role="treeitem"
           data-path={n.entry.path}
-          class:checked={selected.has(n.entry.path)}
           aria-selected={n.entry.kind === 'dir' ? undefined : selected.has(n.entry.path)}
           aria-current={isActive(n) ? 'page' : undefined}
           aria-level={n.depth + 1}
@@ -407,21 +431,9 @@
         </div>
       {/snippet}
     </VirtualList>
-  {/if}
 
   {#if selected.size > 0}
     <div class="sel-bar">
-      <div class="sel-row">
-        <span class="sel-count">{selected.size} selected</span>
-        <button
-          class="btn small"
-          title="Review + fix ALL {selected.size} selected notes as one coherent set (starts the agent immediately)"
-          onclick={groupReviewFix}
-        >
-          Review + fix
-        </button>
-        <button class="btn small ghost" onclick={clearSelection}>Clear</button>
-      </div>
       <div class="sel-row">
         <select
           class="sel-select"
@@ -464,50 +476,28 @@
     </div>
   {/if}
 </div>
+</ListPane>
 
 <style>
+  /* The pane body is the frame; the virtual list scrolls inside it. */
   .tree {
     display: flex;
     flex-direction: column;
     min-height: 0;
-    flex: 1;
-    --ft-row-h: 26px;
-    --ft-row-py: 0px;
+    block-size: 100%;
   }
   .tree :global(.tree-list) {
     flex: 1;
     min-height: 0;
     overflow-y: auto;
   }
-  .empty {
-    display: flex;
-    flex-direction: column;
-    align-items: flex-start;
-    gap: 8px;
-    padding: 16px 12px;
-    color: var(--text-dim);
-    font-size: var(--fs-s);
-  }
+  /* The row look is the shared .side-row (app.css); the tree adds drag, the
+     checkbox and inline rename. */
   .row {
-    display: flex;
-    align-items: center;
-    gap: 4px;
-    min-height: var(--ft-row-h);
-    padding-block: var(--ft-row-py);
-    padding-inline-end: 8px;
-    font-size: var(--fs-s);
-    color: var(--text);
-    cursor: pointer;
-    border-radius: var(--radius-s);
-    user-select: none;
     position: relative;
+    gap: 4px;
+    user-select: none;
     white-space: nowrap;
-  }
-  .row:hover {
-    background: var(--hover);
-  }
-  .row.active {
-    background: var(--accent-soft);
   }
   /* Reserved OKF files (index.md…): dim + italic, never faded below the
      readable text contrast. */
@@ -528,9 +518,6 @@
   }
   .chev.open {
     transform: rotate(90deg);
-  }
-  .pad {
-    width: 12px;
   }
   /* Selection checkbox lives in the .pad slot: invisible until hover or an
      active selection, so rows never shift. */
@@ -556,9 +543,6 @@
       opacity: 1;
     }
   }
-  .row.checked {
-    background: var(--accent-soft);
-  }
   .sel-bar {
     display: flex;
     flex-direction: column;
@@ -573,9 +557,9 @@
     gap: 6px;
   }
   .sel-count {
-    font-size: var(--fs-xs);
-    color: var(--text-dim);
-    margin-inline-end: auto;
+    margin-inline: 8px auto;
+    font-size: var(--fs-m);
+    font-weight: 600;
   }
   .sel-input {
     flex: 1;
@@ -629,19 +613,5 @@
     font-size: var(--fs-s);
     padding: 2px 6px;
     z-index: 2;
-  }
-  .only-phone {
-    display: none;
-  }
-  @media (pointer: coarse), (max-width: 640px) {
-    .tree {
-      --ft-row-h: var(--hit-min);
-      --ft-row-py: 4px;
-    }
-  }
-  @media (max-width: 640px) {
-    .only-phone {
-      display: inline-flex;
-    }
   }
 </style>

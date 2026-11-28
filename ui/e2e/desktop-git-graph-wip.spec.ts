@@ -62,14 +62,14 @@ async function openRepo(
   }
   await expect(page.locator('.rv-tabs')).toBeVisible();
   // Every repository opens on History.
-  await expect(page.locator('.rv-tab[aria-selected="true"]')).toHaveText('History');
+  await expect(page.locator('.rv-tabs [role="tab"][aria-selected="true"]')).toHaveText('History');
 }
 
 test('WIP row → stage → commit, all on the graph', async ({ page }) => {
   await openRepo(page);
 
   // The view switch: History · Pull requests · Review — no Changes view.
-  const tabs = page.locator('.rv-tab');
+  const tabs = page.locator('.rv-tabs [role="tab"]');
   await expect(tabs.filter({ hasText: 'History' })).toBeVisible();
   await expect(tabs.filter({ hasText: 'Changes' })).toHaveCount(0);
   await expect(tabs.filter({ hasText: 'Graph' })).toHaveCount(0);

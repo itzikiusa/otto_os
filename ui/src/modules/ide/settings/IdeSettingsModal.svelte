@@ -1,12 +1,14 @@
 <script lang="ts">
   // IntelliJ IDEA / GoLand Two-Pane Sectioned Settings & Project Structure Modal (`⌘,`).
   import { untrack } from 'svelte';
-  import Badge from '../../../lib/components/Badge.svelte';
   import Icon from '../../../lib/components/Icon.svelte';
   import Modal from '../../../lib/components/Modal.svelte';
   import PaneDivider from '../../../lib/components/PaneDivider.svelte';
+  import SideRow from '../../../lib/components/side/SideRow.svelte';
+  import { listNav } from '../../../lib/components/side/listNav';
   import { loadPaneWidth } from '../../../lib/paneResizer';
   import { auth } from '../../../lib/stores/auth.svelte';
+  import { viewport } from '../../../lib/stores/viewport.svelte';
   import { ide } from '../ideStore.svelte';
   import IdeBuildAndToolsSection from './IdeBuildAndToolsSection.svelte';
   import IdeEditorAppearanceSection from './IdeEditorAppearanceSection.svelte';
@@ -22,10 +24,9 @@
 
   const NAV_W_KEY = 'otto.ide.settingsNavW';
   let navW = $state(loadPaneWidth(NAV_W_KEY, 250, 190, 380));
-  // Narrow (a phone): categories and the page are one screen each — list →
-  // page with a back button — instead of a 250 px list beside a 100 px page.
-  let modalW = $state(0);
-  const narrow = $derived(modalW > 0 && modalW < 600);
+  // A phone (the one phone signal): categories and the page are one screen
+  // each — list → page with a back button — instead of a 250 px list beside a 100 px page.
+  const narrow = $derived(viewport.isPhone);
   let showList = $state(false);
   let searchQuery = $state('');
   let expandedGroups = $state<Record<string, boolean>>({
@@ -147,51 +148,8 @@
     }
   }
 
-  function toggleExpand(groupId: string, e: MouseEvent): void {
-    e.stopPropagation();
+  function toggleExpand(groupId: string): void {
     expandedGroups = { ...expandedGroups, [groupId]: !expandedGroups[groupId] };
-  }
-
-  function visibleNavOrder(): string[] {
-    const out: string[] = [];
-    const searching = searchQuery.trim().length > 0;
-    for (const top of visibleTree) {
-      out.push(top.id);
-      if ((searching || expandedGroups[top.id]) && top.children?.length) {
-        for (const c of top.children) out.push(c.id);
-      }
-    }
-    return out;
-  }
-
-  function onTreeKeydown(e: KeyboardEvent): void {
-    const order = visibleNavOrder();
-    const idx = order.indexOf(activeId);
-    if (e.key === 'ArrowDown') {
-      e.preventDefault();
-      const next = order[Math.min(order.length - 1, idx + 1)];
-      if (next) selectSection(next);
-    } else if (e.key === 'ArrowUp') {
-      e.preventDefault();
-      const prev = order[Math.max(0, idx - 1)];
-      if (prev) selectSection(prev);
-    } else if (e.key === 'ArrowRight') {
-      const top = SETTINGS_TREE.find((t) => t.id === activeId);
-      if (top?.children?.length) {
-        e.preventDefault();
-        if (!expandedGroups[top.id]) expandedGroups = { ...expandedGroups, [top.id]: true };
-        else selectSection(top.children[0].id);
-      }
-    } else if (e.key === 'ArrowLeft') {
-      const hit = findSettingsNode(activeId);
-      if (hit?.node.children?.length && expandedGroups[hit.node.id]) {
-        e.preventDefault();
-        expandedGroups = { ...expandedGroups, [hit.node.id]: false };
-      } else if (hit?.parent) {
-        e.preventDefault();
-        selectSection(hit.parent.id);
-      }
-    }
   }
 
   async function handleApply(): Promise<void> {
@@ -225,7 +183,7 @@
   onclose={() => ideSettings.cancel()}
   dismissable={!applying}
 >
-  <div class="st-modal" class:narrow class:list={narrow && showList} data-testid="ide-settings-modal" bind:clientWidth={modalW}>
+  <div class="st-modal" class:narrow class:list={narrow && showList} data-testid="ide-settings-modal">
     <aside class="st-left" style:inline-size={narrow ? undefined : `${navW}px`} aria-label="Settings categories">
       <div class="st-search-box">
         <Icon name="search" size={13} />
@@ -241,63 +199,27 @@
         />
       </div>
 
-      <div
-        class="st-tree"
-        role="tree"
-        tabindex="0"
-        aria-label="Settings sections"
-        onkeydown={onTreeKeydown}
-        data-testid="ide-settings-tree"
-      >
+      <!-- The categories are a tree of the shared rows (one look and keyboard walk with every list). -->
+      <div class="st-tree" role="tree" aria-label="Settings sections" use:listNav data-testid="ide-settings-tree">
         {#each visibleTree as group (group.id)}
           {@const hasKids = Boolean(group.children?.length)}
           {@const open = searchQuery.trim().length > 0 || Boolean(expandedGroups[group.id])}
-          <div class="st-tree-group" role="treeitem" aria-expanded={hasKids ? open : undefined} aria-selected={activeId === group.id}>
-            <div class="st-tree-row" class:is-active={activeId === group.id}>
-              {#if hasKids}
-                <button
-                  type="button"
-                  class="st-chev-btn"
-                  aria-label={open ? `Collapse ${group.label}` : `Expand ${group.label}`}
-                  title={open ? 'Collapse' : 'Expand'}
-                  onclick={(e) => toggleExpand(group.id, e)}
-                >
-                  <Icon name={open ? 'chevronDown' : 'chevronRight'} size={12} noflip />
-                </button>
-              {:else}
-                <span class="st-chev-spacer" aria-hidden="true"></span>
-              {/if}
-              <button
-                type="button"
-                class="st-node-btn is-parent"
-                onclick={() => selectSection(group.id)}
-                data-testid={`ide-settings-nav-${group.id}`}
-              >
-                <span>{group.label}</span>
-                {#if group.id === 'plugins' && ide.plugins.length > 0}
-                  <Badge tone="accent" variant="outline" label={String(ide.plugins.length)} />
-                {/if}
-              </button>
-            </div>
-
-            {#if hasKids && open}
-              <div class="st-children" role="group">
-                {#each group.children ?? [] as leaf (leaf.id)}
-                  <button
-                    type="button"
-                    class="st-node-btn is-leaf"
-                    class:is-active={activeId === leaf.id}
-                    role="treeitem"
-                    aria-selected={activeId === leaf.id}
-                    onclick={() => selectSection(leaf.id)}
-                    data-testid={`ide-settings-nav-${leaf.id}`}
-                  >
-                    <span>{leaf.label}</span>
-                  </button>
-                {/each}
-              </div>
-            {/if}
-          </div>
+          <SideRow
+            tree
+            title={group.label}
+            expanded={hasKids ? open : undefined}
+            ontoggle={() => toggleExpand(group.id)}
+            selected={activeId === group.id}
+            onclick={() => selectSection(group.id)}
+            testid={`ide-settings-nav-${group.id}`}
+          >
+            {#snippet trailing()}{#if group.id === 'plugins' && ide.plugins.length > 0}{ide.plugins.length}{/if}{/snippet}
+          </SideRow>
+          {#if hasKids && open}
+            {#each group.children ?? [] as leaf (leaf.id)}
+              <SideRow tree depth={1} title={leaf.label} selected={activeId === leaf.id} onclick={() => selectSection(leaf.id)} testid={`ide-settings-nav-${leaf.id}`} />
+            {/each}
+          {/if}
         {/each}
       </div>
     </aside>
@@ -433,30 +355,14 @@
   .st-nav-arrows.hidden-narrow { display: none; }
   .st-list-btn { min-block-size: 36px; flex-shrink: 0; }
   /* The -16px modal margin tucks the column's top under the header: pad it back so the search box isn't clipped. */
-  .st-left { flex-shrink: 0; display: flex; flex-direction: column; background: var(--surface-2); min-inline-size: 0; min-block-size: 0; padding-block-start: 16px; }
+  .st-left { flex-shrink: 0; display: flex; flex-direction: column; background: var(--bg-sidebar); border-inline-end: 1px solid var(--separator); min-inline-size: 0; min-block-size: 0; padding-block-start: 16px; }
   .st-search-box {
     display: flex; align-items: center; gap: 6px; margin: 10px 10px 6px; padding: 6px 8px;
     border: 1px solid var(--control-border); border-radius: var(--radius-s); background: var(--surface); color: var(--text-dim);
   }
   .st-search-box:focus-within { border-color: var(--accent); }
   .st-search-in { flex: 1; min-inline-size: 0; border: 0; background: transparent; color: var(--text); font-size: var(--fs-xs); outline: none; }
-  .st-tree { flex: 1; min-block-size: 0; overflow-y: auto; padding: 4px 8px 10px; display: flex; flex-direction: column; gap: 2px; outline: none; }
-  .st-tree:focus-visible { outline: 2px solid var(--accent-text); outline-offset: -2px; border-radius: var(--radius-s); }
-  .st-tree-row { display: flex; align-items: center; border-radius: var(--radius-s); }
-  .st-tree-row:hover { background: var(--hover); }
-  .st-tree-row.is-active { background: var(--accent-soft); }
-  .st-chev-btn { display: inline-flex; align-items: center; justify-content: center; inline-size: 20px; block-size: 24px; border: 0; background: transparent; color: var(--text-dim); cursor: pointer; padding: 0; flex-shrink: 0; }
-  .st-chev-spacer { inline-size: 20px; flex-shrink: 0; }
-  .st-node-btn {
-    flex: 1; min-inline-size: 0; display: flex; align-items: center; justify-content: space-between; gap: 6px;
-    padding-block: 4px; padding-inline: 4px 8px; border: 0; border-radius: var(--radius-s);
-    background: transparent; color: var(--text); font-size: var(--fs-xs); text-align: start; cursor: pointer;
-  }
-  .st-node-btn.is-parent { font-weight: 600; }
-  .st-children { display: flex; flex-direction: column; gap: 2px; padding-inline-start: 20px; margin-block-start: 2px; }
-  .st-node-btn.is-leaf { padding-inline: 8px; font-weight: 400; color: var(--text-dim); }
-  .st-node-btn.is-leaf:hover { background: var(--hover); color: var(--text); }
-  .st-node-btn.is-leaf.is-active, .st-tree-row.is-active .st-node-btn { background: var(--accent-soft); color: var(--accent-text); font-weight: 600; }
+  .st-tree { flex: 1; min-block-size: 0; overflow-y: auto; padding: 4px 8px 10px; }
   .st-right { flex: 1; min-inline-size: 0; min-block-size: 0; display: flex; flex-direction: column; background: var(--bg); }
   .st-right-hdr {
     display: flex; align-items: center; gap: 10px; padding: 8px 16px;

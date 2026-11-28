@@ -1,6 +1,6 @@
 <script lang="ts">
   // Lazy-loaded Launch target selector popover for `IdeRunToolbar.svelte`.
-  import { tick } from 'svelte';
+  import { tick, untrack } from 'svelte';
   import { placeAnchored, type AnchorPlacement } from '../../../lib/anchorPlace';
   import Badge from '../../../lib/components/Badge.svelte';
   import Icon from '../../../lib/components/Icon.svelte';
@@ -8,6 +8,8 @@
   import {
     CURRENT_FILE_CONFIG_ID, currentFileRunnable, orderDetectedForLanguage, saveLaunchMemory,
   } from '../store/ideLaunchTarget';
+  import { UNITY_ATTACH_RUNNER, unityTargetLabel } from '../debug/ideUnityAttach';
+  import { refreshUnityEditors, unityAttach } from '../debug/ideUnityState.svelte';
 
   interface Props {
     triggerEl: HTMLButtonElement | undefined;
@@ -97,6 +99,12 @@
     };
   });
 
+  // "Attach to Unity Editor · … · running": one cheap daemon file read per open.
+  $effect(() => {
+    const unity = untrack(() => ide.runConfigs.find((c) => c.runner === UNITY_ATTACH_RUNNER));
+    if (unity) void refreshUnityEditors(untrack(() => ide.targetPayload), unity.cwd);
+  });
+
   function selectTarget(id: string): void {
     ide.selectedConfigId = id;
     if (id !== GUTTER_TARGET_ID) saveLaunchMemory(ide.target, { selected: id });
@@ -175,7 +183,7 @@
       {#each detectedConfigs as cfg (cfg.id)}
         {@const active = selectedConfig?.id === cfg.id}
         <button type="button" class="run-item" class:is-active={active} aria-current={active ? 'true' : undefined} onclick={() => selectTarget(cfg.id)}>
-          <span class="run-item-name" dir="ltr">{cfg.name}</span>
+          <span class="run-item-name" dir="ltr">{cfg.runner === UNITY_ATTACH_RUNNER ? unityTargetLabel(cfg.name, unityAttach.editors) : cfg.name}</span>
           <Badge tone="info" variant="outline" label="auto" />
         </button>
       {/each}

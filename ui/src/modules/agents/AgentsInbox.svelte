@@ -2,13 +2,15 @@
   // The Agents inbox (patterns.md §10 — the Threads concept, where the owner
   // works): terminal sessions and structured threads in one inbox, grouped by
   // workspace by default in All workspaces. Closed sessions stay in History.
-  // Top: search · select · show/sort menu, then the workspace switcher.
-  // Foot: New session · the usage meter. It replaced the session tree that
+  // A ListPane (design.md §3): "Sessions N · New session · ⋯"; one search row
+  // (filter · Select · Show / sort), the workspace switcher row, the folds;
+  // the usage meter is the footer. Rows are InboxRow (↑ ↓ through listNav). It replaced the session tree that
   // hung under "Agents" in the app sidebar; everything that tree did is here
   // (scope by workspace, multi-select → Tile / Archive / Delete, drag to
   // reorder in Manual, the row menu, rename, delete with undo).
   import { onMount } from 'svelte';
   import Icon from '../../lib/components/Icon.svelte';
+  import ListPane from '../../lib/components/side/ListPane.svelte';
   import InboxFold from '../../lib/components/InboxFold.svelte';
   import LazyMount from '../../lib/components/LazyMount.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
@@ -56,14 +58,6 @@
   type InboxLive = typeof import('../threads/threadInbox.svelte').inboxLive; // ui-guards: allow — one store
   // The Threads footer's meter (the focused session's agent): after first paint.
   const UsageMeter = lazyComponent(() => import('../threads/ThreadUsageMeter.svelte')); // ui-guards: allow — the Threads footer meter, one implementation
-
-  interface Props {
-    /** A row was opened (the phone list pushes the session). */
-    onopen?: () => void;
-    /** Hide the inbox column (desktop). */
-    onhide?: () => void;
-  }
-  let { onopen, onhide }: Props = $props();
 
   let query = $state('');
   let historyOpen = $state(false);
@@ -303,7 +297,6 @@
     else if (s.workspace_id !== ws.currentId && s.workspace_id !== SCRATCH_WORKSPACE_ID) void ws.openInWorkspace(s.workspace_id, s.id);
     else if (e.metaKey || e.ctrlKey) ws.openInSplit(s.id);
     else ws.navigateToSession(s.id);
-    onopen?.();
   }
   async function rename(s: Session): Promise<void> {
     if (isThread(s) || !ws.canEditSession(s)) return;
@@ -396,6 +389,31 @@
     items.push({ label: 'Removed workspaces…', icon: 'archive', pinned: true, action: () => (removedOpen = true) });
     ctxMenu.showAt(e.currentTarget as HTMLElement, items, ws.workspaces.length >= 5 ? { filter: true, filterPlaceholder: 'Switch workspace…', maxVisible: 12 } : undefined);
   }
+  let searchEl = $state<HTMLInputElement | null>(null);
+  function clearSearch(): void {
+    query = '';
+    searchEl?.focus();
+  }
+  function clearFilters(): void {
+    ws.needsYouFilter = false;
+    clearSearch();
+  }
+  // ⋯ after "Hide Sessions ⌘B" (the pane adds it).
+  function paneMenu(): MenuItem[] {
+    return [
+      { label: 'New session (no workspace)…', icon: 'home', action: newScratchSession },
+      { label: 'Usage', icon: 'chart', action: () => router.go('usage') },
+      { label: 'Add workspace…', icon: 'folder', action: () => (ui.newWorkspaceOpen = true) },
+      { label: 'Removed workspaces…', icon: 'archive', action: () => (removedOpen = true) },
+    ];
+  }
+  // The selection bar's ⋯: Tile and Delete (Archive is its one button).
+  function selectionMenu(e: MouseEvent): void {
+    ctxMenu.showAt(e.currentTarget as HTMLElement, [
+      { label: 'Tile', icon: 'grid', disabled: liveSel.length < 2, action: tileSelected },
+      { label: 'Delete…', icon: 'trash', danger: true, disabled: selIds.length === 0, action: () => void deleteSelected() },
+    ], { align: 'end' });
+  }
   function toggleHistory(): void {
     historyOpen = !historyOpen;
     if (historyOpen && !ws.archivedLoaded) void loadArchived(false);
@@ -436,126 +454,127 @@
   />
 {/snippet}
 
-<aside class="ai" class:touch={viewport.isPhone} aria-label="Sessions" data-testid="agents-inbox">
-  <div class="ai-top">
-    <label class="ai-search">
-      <Icon name="search" size={14} />
-      <input type="search" dir="auto" bind:value={query} placeholder="Search" aria-label="Search sessions, branches, workspaces" data-testid="agents-search" />
+{#snippet selectionBar()}
+  <div class="ai-tools" data-testid="agents-select-tools">
+    <label class="ai-count">
+      <input type="checkbox" aria-label="Select all sessions" checked={selIds.length > 0 && selIds.length === selectable.length} indeterminate={selIds.length > 0 && selIds.length < selectable.length} onchange={() => (sel = selIds.length === selectable.length ? new Set() : new Set(selectable.map((s) => s.id)))} />
+      <span class="ellipsis" title={selIds.length > 0 ? `${selIds.length} selected` : 'Select all'}>{selIds.length > 0 ? selIds.length : 'All'}</span>
     </label>
-    {#if selectMode || selectable.length > 0}
-      <button type="button" class="icon-btn" class:on={selectMode} aria-pressed={selectMode} aria-label="Select sessions" title={selectMode ? 'Done selecting' : 'Select sessions to tile, archive or delete'} data-testid="agents-select-toggle" onclick={() => setSelectMode(!selectMode)}>
-        <Icon name={selectMode ? 'check' : 'square'} size={14} />
+    <button type="button" class="btn small ghost" disabled={liveSel.length === 0} data-testid="agents-archive-selected" onclick={() => void archiveSelected()}>Archive</button>
+    <button type="button" class="icon-btn" aria-haspopup="menu" aria-label="More for the selected sessions" title="More" data-testid="agents-select-more" onclick={selectionMenu}><Icon name="more" size={14} /></button>
+    <button type="button" class="btn small ghost" data-testid="agents-select-done" onclick={() => setSelectMode(false)}>Done</button>
+  </div>
+{/snippet}
+
+<ListPane
+  name="Sessions"
+  count={ptyRows.length + threadRows.length}
+  primary={{ icon: 'plus', label: 'New session (⌘T)', onclick: () => (ui.newSessionOpen = true), testid: 'agents-inbox-new' }}
+  menu={paneMenu}
+  selection={selectMode ? selectionBar : undefined}
+  loading={ws.sessionsLoading && ws.sessions.length === 0}
+  rows=".tr-main"
+  testid="agents-inbox"
+>
+  {#snippet searchRow()}
+    <div class="side-search ai-search">
+      <Icon name="search" size={14} />
+      <input bind:this={searchEl} type="search" dir="auto" bind:value={query} placeholder="Filter sessions…" aria-label="Search sessions, branches, workspaces" data-testid="agents-search" />
+      {#if query}
+        <button type="button" class="icon-btn ai-tool" aria-label="Clear search" title="Clear search" onclick={clearSearch}><Icon name="x" size={12} /></button>
+      {/if}
+      {#if selectMode || selectable.length > 0}
+        <button type="button" class="icon-btn ai-tool" class:on={selectMode} aria-pressed={selectMode} aria-label="Select sessions" title={selectMode ? 'Done selecting' : 'Select sessions to tile, archive or delete'} data-testid="agents-select-toggle" onclick={() => setSelectMode(!selectMode)}>
+          <Icon name={selectMode ? 'check' : 'square'} size={14} />
+        </button>
+      {/if}
+      <button type="button" class="icon-btn ai-tool" class:on={ws.allWorkspaces || sessionOrder.mode !== 'recent' || ws.needsYouFilter} aria-haspopup="menu" aria-label="Show and sort sessions" title="Showing {ws.allWorkspaces ? 'all workspaces' : 'this workspace'} · {sortLabel}" data-testid="agents-sort-toggle" onclick={sortMenu}>
+        <Icon name="filter" size={14} />
+      </button>
+    </div>
+  {/snippet}
+  {#snippet filterRow()}
+    {#if ws.current}
+      <button type="button" class="ai-ws" use:longPress aria-haspopup="menu" title="{ws.current.name}\n{ws.current.root_path}\nClick to switch workspace" aria-label="Current workspace: {ws.current.name}. Switch workspace" data-testid="agents-current-ws" onclick={wsSwitcher} oncontextmenu={(e) => { e.preventDefault(); if (ws.current) ctxMenu.show(e, workspaceMenuItems(ws.current, () => (removedOpen = true))); }}>
+        <Icon name="folder" size={13} />
+        <span class="ellipsis">{ws.allWorkspaces ? `All workspaces · ${ws.current.name}` : ws.current.name}</span>
+        <Icon name="chevronDown" size={12} />
       </button>
     {/if}
-    <button type="button" class="icon-btn" class:on={ws.allWorkspaces || sessionOrder.mode !== 'recent' || ws.needsYouFilter} aria-haspopup="menu" aria-label="Show and sort sessions" title="Showing {ws.allWorkspaces ? 'all workspaces' : 'this workspace'} · {sortLabel}" data-testid="agents-sort-toggle" onclick={sortMenu}>
-      <Icon name="filter" size={14} />
-    </button>
-    {#if onhide}
-      <button type="button" class="icon-btn" aria-label="Hide the session list" title="Hide the session list" data-testid="agents-inbox-hide" onclick={onhide}>
-        <Icon name="sidebar" size={14} />
-      </button>
-    {/if}
-  </div>
-  {#if ws.current}
-    <button type="button" class="ai-ws" use:longPress aria-haspopup="menu" title="{ws.current.name}\n{ws.current.root_path}\nClick to switch workspace" aria-label="Current workspace: {ws.current.name}. Switch workspace" data-testid="agents-current-ws" onclick={wsSwitcher} oncontextmenu={(e) => { e.preventDefault(); if (ws.current) ctxMenu.show(e, workspaceMenuItems(ws.current, () => (removedOpen = true))); }}>
-      <Icon name="folder" size={13} />
-      <span class="ellipsis">{ws.allWorkspaces ? `All workspaces · ${ws.current.name}` : ws.current.name}</span>
-      <Icon name="chevronDown" size={12} />
-    </button>
-  {/if}
-  {#if selectMode}
-    <div class="ai-tools" data-testid="agents-select-tools">
-      <label class="ai-count">
-        <input type="checkbox" aria-label="Select all sessions" checked={selIds.length > 0 && selIds.length === selectable.length} indeterminate={selIds.length > 0 && selIds.length < selectable.length} onchange={() => (sel = selIds.length === selectable.length ? new Set() : new Set(selectable.map((s) => s.id)))} />
-        <span class="ellipsis" title={selIds.length > 0 ? `${selIds.length} selected` : 'Select all'}>{selIds.length > 0 ? selIds.length : 'All'}</span>
-      </label>
-      <button type="button" class="btn small ghost" disabled={liveSel.length < 2} data-testid="agents-tile-selected" onclick={tileSelected}>Tile</button>
-      <button type="button" class="btn small ghost" disabled={liveSel.length === 0} data-testid="agents-archive-selected" onclick={() => void archiveSelected()}>Archive</button>
-      <button type="button" class="btn small ghost danger ai-del" disabled={selIds.length === 0} data-testid="agents-delete-selected" onclick={() => void deleteSelected()}>Delete</button>
-    </div>
-  {/if}
-
-  <div class="ai-body">
-    <div class="ai-scroll" class:grouped>
-      <div class="ai-list" data-testid="agents-list">
-        {#each inbox as group (group.kind + ':' + group.key)}
-          {#if group.kind === 'workspace'}
-            {@const name = wsName(group.key)}
-            {@const expanded = !isCollapsed(group)}
-            <InboxFold
-              label={name}
-              count={group.sessions.length}
-              {expanded}
-              sticky
-              testid={`agents-workspace-${group.key}`}
-              ontoggle={isFiltering() ? undefined : () => toggleWorkspace(group.key)}
-            >
-              {#snippet leading()}<ProjectBadge {name} />{/snippet}
-              {#if expanded}
-                {#each group.sessions as s (s.id)}{@render row(s, false)}{/each}
-              {/if}
-            </InboxFold>
-          {:else if group.kind === 'status'}
-            <InboxFold label={SESSION_LIST_STATUS_LABELS[group.key]} count={group.sessions.length} sticky>
-              {#each group.sessions as s (s.id)}{@render row(s)}{/each}
-            </InboxFold>
-          {:else}
-            {#each group.sessions as s (s.id)}{@render row(s)}{/each}
-          {/if}
-        {:else}
-          {#if ws.sessionsLoading && ws.sessions.length === 0}
-            <Skeleton rows={3} height={56} label="sessions" />
-          {:else if query.trim() || ws.needsYouFilter}
-            <p class="ai-empty">No sessions match</p>
-          {:else if viewport.isPhone}
-            <!-- The desktop canvas says it (with its New session); the foot has the button. -->
-            <p class="ai-empty">No sessions yet</p>
-          {/if}
-        {/each}
-      </div>
-      {#if telegram.length > 0}
-        <InboxFold label="Telegram" count={telegram.length} expanded={telegramOpen} ontoggle={() => (telegramOpen = !telegramOpen)}>
-          {#if telegramOpen}{#each telegram as s (s.id)}{@render row(s)}{/each}{/if}
-        </InboxFold>
-      {/if}
-      {#if slack.length > 0}
-        <InboxFold label="Slack" count={slack.length} expanded={slackOpen} ontoggle={() => (slackOpen = !slackOpen)}>
-          {#if slackOpen}{#each slack as s (s.id)}{@render row(s)}{/each}{/if}
-        </InboxFold>
-      {/if}
-      {#if ws.hasArchived || historyRows.length > 0}
-        <InboxFold label="History" ariaLabel="Archived sessions" count={ws.archivedLoaded ? historyRows.length : undefined} expanded={historyOpen} testid="archived-toggle" ontoggle={toggleHistory}>
-          {#if historyOpen}
-            <div class="ai-list" data-testid="agents-history-list">
-              {#each historyRows as s (s.id)}
-                {@render row(s)}
-              {/each}
-              {#if archivedError}
-                <LoadState what="archived sessions" variant="compact" error={archivedError} empty onretry={() => void loadArchived(ws.archivedLoaded)} />
-              {:else if ws.archivedLoading}
-                <Skeleton rows={2} height={48} label="archived sessions" />
-              {:else if ws.archivedLoaded && historyRows.length === 0}
-                <p class="ai-empty">Sessions you archive appear here.</p>
-              {:else if ws.archivedHasMore}
-                <button type="button" class="btn small ghost ai-more" data-testid="archived-load-more" onclick={() => void loadArchived(true)}>Load more</button>
-              {/if}
-            </div>
-          {/if}
-        </InboxFold>
-      {/if}
-    </div>
-  </div>
-
-  <footer class="ai-foot">
-    <!-- On an empty desktop the canvas carries New session (once). -->
-    {#if viewport.isPhone || inbox.length > 0 || query.trim() || ws.needsYouFilter}<button type="button" class="btn small ghost ai-new" data-testid="agents-inbox-new" aria-keyshortcuts="Meta+T" title="New session (⌘T)" onclick={() => (ui.newSessionOpen = true)}>
-      <Icon name="plus" size={14} /> New session
-    </button>{/if}
+  {/snippet}
+  {#snippet footer()}
     {#if meterReady}
-      <LazyMount lazy={UsageMeter} what="usage" variant="compact" quiet props={{ provider: ws.getSession(ws.activeSessionId)?.provider ?? null, onopen: () => router.go('usage') }} />
+      <LazyMount lazy={UsageMeter} what="usage" variant="compact" quiet props={{ provider: ws.getSession(ws.activeSessionId)?.provider ?? null, onopen: () => router.go('usage'), quiet: true }} />
     {/if}
-  </footer>
-</aside>
+  {/snippet}
+
+  <div class="ai-lists" class:grouped>
+    <div class="ai-list" data-testid="agents-list">
+      {#each inbox as group (group.kind + ':' + group.key)}
+        {#if group.kind === 'workspace'}
+          {@const name = wsName(group.key)}
+          {@const expanded = !isCollapsed(group)}
+          <InboxFold
+            label={name}
+            count={group.sessions.length}
+            {expanded}
+            sticky
+            testid={`agents-workspace-${group.key}`}
+            ontoggle={isFiltering() ? undefined : () => toggleWorkspace(group.key)}
+          >
+            {#snippet leading()}<ProjectBadge {name} />{/snippet}
+            {#if expanded}
+              {#each group.sessions as s (s.id)}{@render row(s, false)}{/each}
+            {/if}
+          </InboxFold>
+        {:else if group.kind === 'status'}
+          <InboxFold label={SESSION_LIST_STATUS_LABELS[group.key]} count={group.sessions.length} sticky>
+            {#each group.sessions as s (s.id)}{@render row(s)}{/each}
+          </InboxFold>
+        {:else}
+          {#each group.sessions as s (s.id)}{@render row(s)}{/each}
+        {/if}
+      {:else}
+        {#if isFiltering()}
+          <div class="ai-empty">
+            <p>No sessions match</p>
+            <button type="button" class="btn small ghost" onclick={clearFilters}>Clear filter</button>
+          </div>
+        {/if}
+      {/each}
+    </div>
+    {#if telegram.length > 0}
+      <InboxFold label="Telegram" count={telegram.length} expanded={telegramOpen} ontoggle={() => (telegramOpen = !telegramOpen)}>
+        {#if telegramOpen}{#each telegram as s (s.id)}{@render row(s)}{/each}{/if}
+      </InboxFold>
+    {/if}
+    {#if slack.length > 0}
+      <InboxFold label="Slack" count={slack.length} expanded={slackOpen} ontoggle={() => (slackOpen = !slackOpen)}>
+        {#if slackOpen}{#each slack as s (s.id)}{@render row(s)}{/each}{/if}
+      </InboxFold>
+    {/if}
+    {#if ws.hasArchived || historyRows.length > 0}
+      <InboxFold label="History" ariaLabel="Archived sessions" count={ws.archivedLoaded ? historyRows.length : undefined} expanded={historyOpen} testid="archived-toggle" ontoggle={toggleHistory}>
+        {#if historyOpen}
+          <div class="ai-list" data-testid="agents-history-list">
+            {#each historyRows as s (s.id)}
+              {@render row(s)}
+            {/each}
+            {#if archivedError}
+              <LoadState what="archived sessions" variant="compact" error={archivedError} empty onretry={() => void loadArchived(ws.archivedLoaded)} />
+            {:else if ws.archivedLoading}
+              <Skeleton rows={2} height={48} label="archived sessions" />
+            {:else if ws.archivedLoaded && historyRows.length === 0}
+              <p class="ai-empty">Sessions you archive appear here.</p>
+            {:else if ws.archivedHasMore}
+              <button type="button" class="btn small ghost ai-more" data-testid="archived-load-more" onclick={() => void loadArchived(true)}>Load more</button>
+            {/if}
+          </div>
+        {/if}
+      </InboxFold>
+    {/if}
+  </div>
+</ListPane>
 
 {#if removedOpen}<LazyMount lazy={RemovedWorkspacesChunk} what="removed workspaces" quiet onerror={() => (removedOpen = false)} props={{ onclose: () => (removedOpen = false) }} />{/if}
 {#if shareId}
@@ -564,47 +583,9 @@
 {/if}
 
 <style>
-  .ai {
-    display: flex;
-    flex-direction: column;
-    block-size: 100%;
-    min-width: 0;
-    background: var(--bg-sidebar);
-    border-inline-end: 1px solid var(--border);
-  }
-  .ai-top {
-    display: flex;
-    align-items: center;
-    gap: 2px;
-    padding-block: var(--sp-5) var(--sp-2);
-    padding-inline: var(--sp-6) var(--sp-4);
-    flex-shrink: 0;
-  }
-  .ai-search {
-    flex: 1;
-    min-width: 0;
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    color: var(--text-dim);
-  }
-  .ai-search input {
-    flex: 1;
-    min-width: 0;
-    block-size: 28px;
-    border: 0;
-    padding: 0;
-    background: transparent;
-    color: var(--text);
-    font: inherit;
-    font-size: var(--fs-l);
-    outline: none;
-  }
-  .ai-search:focus-within {
-    color: var(--text);
-  }
-  .ai-search input:focus-visible {
-    box-shadow: 0 2px 0 -1px var(--accent-text);
+  /* The pane's one search row (as Threads'): the field, Select and Show / sort at its end. */
+  .ai-tool {
+    flex: none;
   }
   .on {
     color: var(--accent-text);
@@ -613,7 +594,7 @@
     display: flex;
     align-items: center;
     gap: var(--sp-3);
-    margin-inline: var(--sp-4);
+    inline-size: 100%;
     padding: var(--sp-2) var(--sp-3);
     min-block-size: 28px;
     border: 0;
@@ -624,18 +605,18 @@
     font-size: var(--fs-s);
     text-align: start;
     cursor: pointer;
-    flex-shrink: 0;
   }
   .ai-ws:hover {
     background: var(--hover);
     color: var(--text);
   }
+  /* The selection bar replaces the pane header (count · one action · ⋯ · Done). */
   .ai-tools {
+    flex: 1;
+    min-width: 0;
     display: flex;
     align-items: center;
     gap: var(--sp-2);
-    padding: var(--sp-2) var(--sp-5);
-    flex-shrink: 0;
   }
   .ai-count {
     display: flex;
@@ -643,47 +624,22 @@
     gap: var(--sp-2);
     min-width: 0;
     flex: 1;
+    padding-inline-start: 8px;
     font-size: var(--fs-s);
     color: var(--text-dim);
     white-space: nowrap;
   }
-  /* Just the count beside the box (its title says "N selected"), said once —
-     Delete has no "(N)" — and never under Tile. */
+  /* Just the count beside the box (its title says "N selected"). */
   .ai-count span {
     min-width: 0;
   }
   .ai-tools :global(.btn) {
     flex: none;
   }
-  /* The destructive one stands apart from Tile / Archive. */
-  .ai-del {
-    margin-inline-start: var(--sp-3);
-  }
-  .ai-body {
-    flex: 1;
-    min-height: 0;
-    display: flex;
-    flex-direction: column;
-  }
-  .ai-scroll {
-    flex: 1;
-    min-height: 0;
-    overflow-y: auto;
-    padding: var(--sp-2) var(--sp-4) var(--sp-4);
+  .ai-lists {
     display: flex;
     flex-direction: column;
     gap: var(--sp-4);
-  }
-  /* Leave room for the sticky header when the browser scrolls a focused row into view. */
-  .ai-scroll.grouped {
-    margin-block-start: var(--sp-2);
-    padding-block-start: 0;
-    scroll-padding-block-start: var(--sp-9);
-  }
-  @media (max-width: 640px), (hover: none), (pointer: coarse) {
-    .ai-scroll.grouped {
-      scroll-padding-block-start: 44px;
-    }
   }
   .ai-list {
     display: flex;
@@ -701,32 +657,20 @@
     align-items: center;
     gap: 6px;
   }
+  .ai-empty p {
+    margin: 0;
+  }
   .ai-more {
     margin: 6px 8px;
   }
-  /* Phone: 44 px targets for the list's own controls. */
-  .ai.touch .ai-top :global(.icon-btn),
-  .ai.touch .ai-ws,
-  .ai.touch .ai-foot :global(.icon-btn),
-  .ai.touch .ai-new {
-    min-inline-size: 44px;
-    min-block-size: 44px;
-  }
-  .ai-foot {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: var(--sp-3);
-    padding: var(--sp-3) var(--sp-4);
-    border-block-start: 1px solid var(--separator);
-    flex-shrink: 0;
-  }
-  @media (hover: none), (pointer: coarse) {
-    .ai-top :global(.icon-btn),
-    .ai-ws,
-    .ai-new {
-      min-block-size: var(--hit-min);
-      min-inline-size: var(--hit-min);
+  /* Touch: finger-sized Select / Show-sort / Clear (44 px, design review H8). */
+  @media (pointer: coarse) {
+    .ai-tool {
+      inline-size: 44px;
+      block-size: 44px;
+    }
+    .ai-ws {
+      min-block-size: 44px;
     }
   }
 </style>

@@ -45,28 +45,28 @@ test('the Database pane beside Agents keeps the window on Agents when its last t
   await expect(page).toHaveURL(/#\/agents/);
 });
 
-test('Tables and History: the open pane is the only way; hidden, the header opens it on that tab', async ({ page }) => {
+test('Tables · Saved · History are the pane header; ⋯ hides it and Show <view> brings it back on that view', async ({ page }) => {
   await openWorkbench(page);
   const header = page.getByTestId('page-header');
   const side = page.getByRole('tablist', { name: 'Sidebar view' });
-  // The pane is open: its tabs are the controls, the header has no duplicates.
+  // The pane is open: its views are its header, the page header has no duplicates.
   await expect(side.getByRole('tab', { name: 'Tables', exact: true })).toBeVisible();
-  await expect(header.getByRole('button', { name: 'Tables', exact: true })).toHaveCount(0);
-  await expect(header.getByRole('button', { name: 'History', exact: true })).toHaveCount(0);
-  // Hide it from the ⋯; now the header offers both, one click each.
-  await header.getByRole('button', { name: 'More actions' }).click();
-  await page.getByRole('menuitem', { name: /^Hide tables/ }).click();
+  await expect(header.getByTestId('show-list-pane')).toHaveCount(0);
+  await side.getByRole('tab', { name: 'History', exact: true }).click();
+  // Hide it from the pane's ⋯; the page header offers "Show History".
+  await page.getByTestId('db-side-more').click();
+  await page.getByRole('menuitem', { name: /^Hide History/ }).click();
   await expect(side).toBeHidden();
-  await header.getByRole('button', { name: 'History', exact: true }).click();
+  await header.getByRole('button', { name: 'Show History', exact: true }).click();
   await expect(side.getByRole('tab', { name: 'History', exact: true })).toHaveAttribute('aria-selected', 'true');
-  await expect(header.getByRole('button', { name: 'Tables', exact: true })).toHaveCount(0);
+  await expect(header.getByTestId('show-list-pane')).toHaveCount(0);
 });
 
 test('375 px: the header ⋯ opens a menu that fits the window and scrolls to its last row', async ({ page }) => {
   await page.setViewportSize({ width: 375, height: 667 });
   await openWorkbench(page);
   const header = page.getByTestId('page-header');
-  await expect(header.getByRole('button', { name: 'Tables', exact: true })).toBeVisible();
+  await expect(header.getByRole('button', { name: 'Back to Tables', exact: true })).toBeVisible();
   const more = header.getByRole('button', { name: 'More actions' });
   await expectFullyInViewport(page, more, 'the header ⋯');
   await more.click();

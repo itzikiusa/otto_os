@@ -5,8 +5,9 @@
   // per-folder counts or as sorted paths. Picking a file opens ONLY that
   // file's diff (graph-commit-diff.svelte); "View all files" switches back to
   // every diff stacked, and then this component is just the toolbar. Rows
-  // reuse the WIP panel's model (wip/wipTree.ts) and are windowed, so a
-  // 1,500-file commit mounts what a 15-file one does.
+  // reuse the WIP panel's model (wip/wipTree.ts) and the shared row look
+  // (app.css .side-row), and are windowed, so a 1,500-file commit mounts
+  // what a 15-file one does.
   import type { Attachment } from 'svelte/attachments';
   import type { FileChange, FileDiff } from '../../../lib/api/types';
   import { ListWindow } from '../../../lib/listWindow.svelte';
@@ -122,18 +123,18 @@
           {#if r.node.type === 'folder'}
             {@const n = r.node}
             {@const shut = collapsed(n)}
-            <button class="cf-row cf-folder" style:--depth={r.depth} data-folder onclick={() => toggle(n)} aria-expanded={!shut} title="{n.path}/ ({plural(n.files.length, 'file')})">
+            <button class="side-row side-row-main cf-row cf-folder" style:--side-depth={r.depth} data-folder onclick={() => toggle(n)} aria-expanded={!shut} title="{n.path}/ ({plural(n.files.length, 'file')})">
               <Icon name={shut ? 'chevronRight' : 'chevronDown'} size={12} />
-              <span class="cf-name" dir="ltr">{n.name}</span>
+              <span class="side-row-title cf-name" dir="ltr">{n.name}</span>
               <span class="cf-n">{fmt(n.files.length)}</span>
             </button>
           {:else}
             {@const c = r.node.change}
             {@const st = stats.get(c.path)}
             <button
-              class="cf-row"
+              class="side-row side-row-main cf-row"
               class:selected={selected === c.path}
-              style:--depth={r.depth}
+              style:--side-depth={r.depth}
               data-path={c.path}
               aria-current={selected === c.path ? 'true' : undefined}
               onclick={() => onselect(c.path)}
@@ -141,7 +142,7 @@
             >
               <span class="cf-kind k-{c.kind}" aria-hidden="true">{KIND_LETTER[c.kind]}</span>
               <span class="sr-only">{KIND_WORD[c.kind]}</span>
-              <span class="cf-name" dir="ltr">{r.node.name}</span>
+              <span class="side-row-title cf-name" dir="ltr">{r.node.name}</span>
               {#if view === 'path' && r.node.dir}<span class="cf-dir" dir="ltr">{r.node.dir}</span>{:else}<span class="cf-grow"></span>{/if}
               {#if st && st.add + st.del > 0}
                 <span class="cf-stat">{#if st.add}<span class="cf-add">+{fmt(st.add)}</span>{/if}{#if st.del}<span class="cf-del">−{fmt(st.del)}</span>{/if}</span>
@@ -223,31 +224,10 @@
       max-height: none;
     }
   }
+  /* The shared .side-row look; a button row fills the list's width. */
   .cf-row {
-    display: flex;
-    align-items: center;
-    gap: 6px;
     width: 100%;
-    height: 28px;
-    padding-block: 0;
-    padding-inline: calc(8px + var(--depth, 0) * 14px) 8px;
-    border: none;
-    border-radius: var(--radius-s);
-    background: transparent;
-    color: var(--text);
-    font: inherit;
-    text-align: start;
-    cursor: pointer;
-  }
-  .cf-row:hover {
-    background: var(--hover);
-  }
-  .cf-row.selected {
-    background: var(--accent-soft);
-  }
-  .cf-row:focus-visible {
-    outline: 2px solid var(--accent-line-strong);
-    outline-offset: -2px;
+    gap: 6px;
   }
   .cf-folder :global(svg) {
     flex-shrink: 0;
@@ -255,11 +235,6 @@
   }
   .cf-name {
     flex: 0 1 auto;
-    min-width: 0;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    font-size: var(--fs-m);
     unicode-bidi: isolate;
   }
   .cf-folder .cf-name {
@@ -317,10 +292,5 @@
   .k-renamed {
     background: var(--info-soft);
     color: var(--info);
-  }
-  @media (max-width: 1024px) {
-    .cf-row {
-      height: 36px;
-    }
   }
 </style>

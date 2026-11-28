@@ -9,7 +9,6 @@
   import PageHeader from '../../lib/components/PageHeader.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
-  import { viewport } from '../../lib/stores/viewport.svelte';
   import { initialSelection, rememberSelection } from '../../lib/lastSelection';
   import { api } from '../../lib/api/client';
   import { brokers } from '../../lib/stores/brokers.svelte';
@@ -26,9 +25,9 @@
   import SchemaTab from './SchemaTab.svelte';
   import ReplayPanel from './ReplayPanel.svelte';
   import LagAlertsPanel from './LagAlertsPanel.svelte';
-  import PaneDivider from '../../lib/components/PaneDivider.svelte';
   import PageBody from '../../lib/components/PageBody.svelte';
-  import { LIST_PANE, loadPaneWidth } from '../../lib/paneResizer';
+  import ListDetail from '../../lib/components/side/ListDetail.svelte';
+  import ListPane from '../../lib/components/side/ListPane.svelte';
   import { router } from '../../lib/router.svelte';
   import { registry } from '../../lib/commands.svelte';
   import { untrack } from 'svelte';
@@ -46,25 +45,24 @@
     tab = 'replay';
   }
 
-  // Mobile (≤640px): the cluster list and the cluster content stack vertically
-  // and each is a collapsible, independently-scrollable section. These toggles
-  // only affect the phone layout (the headers/carets are hidden on desktop).
-  let clustersOpen = $state(true);
-  let contentOpen = $state(true);
-  // Auto-collapse cluster list on phone when a cluster is open; register ⌘K verbs.
-  $effect(() => { clustersOpen = !brokers.selectedId; });
+  // Phone: the cluster list is the page; a picked cluster is pushed over it
+  // ("‹ Clusters" in the page header goes back, the cluster stays marked).
+  let phoneOpen = $state(false);
+  function pick(id: string): void {
+    brokers.select(id);
+    phoneOpen = true;
+  }
+  // ⌘K verbs.
   $effect(() =>
     registry.register('brokers', [
       { id: 'brokers.add', title: 'Add a Kafka cluster…', group: 'Message Brokers', keywords: 'kafka broker new', run: openAdd },
       { id: 'brokers.refresh', title: 'Refresh Kafka clusters', group: 'Message Brokers', keywords: 'kafka reload', run: () => { if (ws.currentId) void brokers.load(ws.currentId); } },
       ...brokers.clusters.map((c) => ({
         id: `brokers.open.${c.id}`, title: `Open cluster ${c.name}`, group: 'Message Brokers', detail: c.environment, keywords: 'kafka broker topics groups',
-        run: () => brokers.select(c.id),
+        run: () => pick(c.id),
       })),
     ]),
   );
-  let sideW = $state(loadPaneWidth('brokers.sideW', LIST_PANE.default, LIST_PANE.min, LIST_PANE.max));
-  let listHidden = $state(false);
 
   $effect(() => {
     const id = ws.currentId;
@@ -93,7 +91,7 @@
     const [mod, id] = router.parts;
     if (mod !== 'brokers' || !id || !brokers.clusters.some((c) => c.id === id)) return;
     untrack(() => {
-      if (id !== brokers.selectedId) brokers.select(id);
+      if (id !== brokers.selectedId) pick(id);
     });
   });
   let routedId: string | null = null;
@@ -109,12 +107,12 @@
 
   // Never show an empty "pick a cluster" pane when clusters exist: open the
   // last-selected cluster (or the first) on load, and again whenever the last
-  // open tab is closed. Not on a phone — selecting collapses the cluster list
-  // there, which is the first screen.
+  // open tab is closed. On a phone it is only marked: the list is the page
+  // until a cluster is tapped.
   let autoPickedFor = $state<string | null>(null);
   $effect(() => {
     const wsId = ws.currentId;
-    if (!wsId || viewport.isPhone || brokers.selectedId) return;
+    if (!wsId || brokers.selectedId) return;
     if (brokers.loading || brokers.clusters.length === 0) return;
     const first = autoPickedFor !== wsId;
     autoPickedFor = wsId;
@@ -221,7 +219,7 @@
       const c = brokers.clusters.find((x) => x.id === id);
       if (!c) return;
       ctxMenu.show(e, [
-        { label: 'Open in tab', action: () => brokers.select(c.id) },
+        { label: 'Open in tab', action: () => pick(c.id) },
         { label: 'Test', action: () => void testConn(c) },
         { label: 'Edit…', action: () => openEdit(c) },
         { label: 'Remove…', icon: 'trash', danger: true, action: () => void removeCluster(c) },
@@ -335,37 +333,14 @@
   }
 </script>
 
-<div class="brokers-root">
+<div class="brokers-root brokers-page">
 <PageHeader
   class="cluster-head"
   title={selected?.name ?? 'Message Brokers'}
   subtitle={selected?.bootstrap_servers} more={() => (selected && topicOpen ? [{ label: 'Test connection', action: () => void testConn(selected) }, { label: 'Edit…', action: () => openEdit(selected) }, { label: 'Remove…', icon: 'trash', danger: true, action: () => void removeCluster(selected) }] : [])}
 >
   {#snippet leading()}
-    {#if !viewport.isPhone && !isEmpty}
-      <button
-        class="icon-btn"
-        onclick={() => (listHidden = !listHidden)}
-        aria-label={listHidden ? 'Show cluster list' : 'Hide cluster list'}
-        title={listHidden ? 'Show cluster list' : 'Hide cluster list'}
-        aria-expanded={!listHidden}
-        aria-controls="brokers-cluster-list"
-      >
-        <Icon name="sidebar" size={16} />
-      </button>
-    {/if}
-    {#if selected}
-      <button
-        class="content-toggle"
-        onclick={() => (contentOpen = !contentOpen)}
-        aria-expanded={contentOpen}
-        aria-label={contentOpen ? 'Collapse details' : 'Expand details'}
-        title={contentOpen ? 'Collapse details' : 'Expand details'}
-      >
-        <Icon name={contentOpen ? 'chevronDown' : 'chevronRight'} size={14} />
-      </button>
-      <span class="dot" style="background: {selected.color || 'var(--accent)'}"></span>
-    {/if}
+    {#if selected}<span class="dot" style="background: {selected.color || 'var(--accent)'}"></span>{/if}
   {/snippet}
   {#snippet badge()}
     {#if selected}
@@ -382,132 +357,112 @@
       <button class="btn small" onclick={() => openEdit(selected)}>Edit</button>
       <button class="btn small" data-keep onclick={() => testConn(selected)} disabled={testing}>{testing ? 'Testing…' : 'Test'}</button>
     {/if}
-    {#if !isEmpty}
-      <button class="btn small primary" onclick={openAdd} aria-label="New cluster" title="Add Kafka cluster"><Icon name="plus" size={12} />{#if !viewport.isPhone} New cluster{/if}</button>
-    {/if}
   {/snippet}
 </PageHeader>
 <PageBody fill padded={false}>
-<div class="brokers-page">
-  {#if !isEmpty && (viewport.isPhone || !listHidden)}
-  <aside id="brokers-cluster-list" class="clusters" class:collapsed={!clustersOpen} style="--clusters-w:{sideW}px">
-    <div class="aside-head">
-      <button
-        class="sec-toggle"
-        onclick={() => (clustersOpen = !clustersOpen)}
-        aria-expanded={clustersOpen}
-        title={clustersOpen ? 'Collapse clusters' : 'Expand clusters'}
-      >
-        <Icon name={clustersOpen ? 'chevronDown' : 'chevronRight'} size={13} />
-        <span class="title">Clusters</span>
-        {#if brokers.clusters.length > 0}<span class="hcount">{brokers.clusters.length}</span>{/if}
-      </button>
-      <div class="head-btns">
-        <button class="icon-btn" onclick={() => newSection(null)} aria-label="New section" title="New section">
-          <Icon name="folder" size={13} />
-        </button>
-        <button class="icon-btn" onclick={openAdd} aria-label="Add cluster" title="Add cluster"><Icon name="plus" size={13} /></button>
-      </div>
-    </div>
-    <div class="cluster-list">
-      <!-- A failed load is an error with Retry, never "No clusters yet"; the first
-           load is a skeleton. A failed refresh keeps the list + a stale bar. -->
-      <LoadState
-        what="clusters"
-        variant="compact"
-        loading={brokers.loading}
-        error={brokers.loadError}
-        empty={brokers.clusters.length === 0 && brokers.sections.length === 0}
-        rows={3}
+  <ListDetail
+    module="brokers"
+    name="Clusters"
+    open={phoneOpen && !!selected}
+    onback={() => (phoneOpen = false)}
+    empty={isEmpty}
+    legacy={{ w: 'brokers.sideW' }}
+  >
+    {#snippet list()}
+      <ListPane
+        count={brokers.clusters.length}
+        primary={{ icon: 'plus', label: 'Add cluster', onclick: openAdd, testid: 'brokers-add-cluster' }}
+        menu={() => [
+          { label: 'New section…', icon: 'folder', action: () => void newSection(null) },
+          { label: 'Refresh', icon: 'refresh', action: () => ws.currentId && void brokers.load(ws.currentId) },
+        ]}
+        loading={brokers.loading && brokers.clusters.length === 0 && brokers.sections.length === 0}
+        error={brokers.clusters.length === 0 && brokers.sections.length === 0 ? brokers.loadError : null}
         onretry={() => ws.currentId && void brokers.load(ws.currentId)}
+        testid="brokers-cluster-list"
       >
-        {#each tree as node (node.sec.id)}
-          {@render sectionNode(node, 0)}
-        {/each}
+        <div class="cluster-list" role="tree" aria-label="Clusters">
+          {#each tree as node (node.sec.id)}
+            {@render sectionNode(node, 0)}
+          {/each}
 
-        <!-- Ungrouped doubles as the top-level / no-section drop target. With no
-             sections at all it is just noise, so it only shows once a section
-             exists (or while something is being dragged). -->
-        {#if brokers.sections.length > 0 || draggedClusterId || draggedSectionId}
-        <div
-          role="group"
-          aria-label="Ungrouped"
-          class="sec-head plain"
-          class:drop={draggedClusterId || draggedSectionId}
-          ondragover={(e) => {
-            if (draggedClusterId || draggedSectionId) e.preventDefault();
-          }}
-          ondrop={(e) => {
-            e.preventDefault();
-            onRootDrop();
-          }}
-          title="Clusters with no section (drop here to remove from a section / make a section top-level)"
-        >
-          <span class="caret-spacer"></span>
-          <span class="sec-name grow">Ungrouped</span>
-          {#if ungrouped.length > 0}<span class="count">{ungrouped.length}</span>{/if}
-        </div>
-        {/if}
-        {#each ungrouped as c (c.id)}
-          {@render clusterRow(c, brokers.sections.length > 0 ? 1 : 0)}
-        {/each}
-
-      </LoadState>
-    </div>
-  </aside>
-
-  <PaneDivider bind:width={sideW} storageKey="brokers.sideW" label="Resize cluster list" />
-  {/if}
-
-  <main class="cluster-main" class:collapsed={!contentOpen}>
-    {#if brokers.openClusters.length > 0}
-      <div class="tabstrip">
-        <Tabs
-          label="Open clusters"
-          tabs={openClusterTabs}
-          value={brokers.selectedId ?? ''}
-          onchange={(id) => brokers.select(id)}
-          idBase="brokers-open"
-        >
-          {#snippet trailing()}
-            {#if selected}
-              <button
-                class="icon-btn"
-                aria-label="Close {selected.name}"
-                title="Close {selected.name}"
-                onclick={() => brokers.close(selected.id)}
-              >
-                <Icon name="x" size={12} />
-              </button>
-            {/if}
-          {/snippet}
-        </Tabs>
-      </div>
-    {/if}
-    {#if selected}
-      <div class="tabs">
-        <Tabs label="Kafka cluster views" tabs={CLUSTER_VIEWS} value={tab} onchange={(id) => (tab = id)} idBase="brokers-view" />
-      </div>
-
-      <div class="tab-body" role="tabpanel" id="brokers-view-panel-{tab}" aria-labelledby="brokers-view-tab-{tab}">
-        {#key selected.id}
-          {#if tab === 'overview'}
-            <OverviewTab clusterId={selected.id} />
-          {:else if tab === 'topics'}
-            <TopicsTab cluster={selected} onreplayfrom={openReplayFrom} ontopic={(open) => (topicOpen = open)} />
-          {:else if tab === 'groups'}
-            <GroupsTab cluster={selected} />
-          {:else if tab === 'schema'}
-            <SchemaTab cluster={selected} />
-          {:else if tab === 'replay'}
-            <ReplayPanel cluster={selected} prefill={replayPrefill} />
-          {:else if tab === 'alerts'}
-            <LagAlertsPanel cluster={selected} />
+          <!-- Ungrouped doubles as the top-level / no-section drop target. With no
+               sections at all it is just noise, so it only shows once a section
+               exists (or while something is being dragged). -->
+          {#if brokers.sections.length > 0 || draggedClusterId || draggedSectionId}
+            <div
+              role="group"
+              aria-label="Ungrouped"
+              class="side-section-head ungrouped"
+              class:drop={draggedClusterId || draggedSectionId}
+              ondragover={(e) => {
+                if (draggedClusterId || draggedSectionId) e.preventDefault();
+              }}
+              ondrop={(e) => {
+                e.preventDefault();
+                onRootDrop();
+              }}
+              title="Clusters with no section (drop here to remove from a section / make a section top-level)"
+            >
+              <span class="ssh-title">Ungrouped</span>
+              {#if ungrouped.length > 0}<span class="ssh-count">{ungrouped.length}</span>{/if}
+            </div>
           {/if}
-        {/key}
-      </div>
-    {:else}
-      {#if isEmpty}
+          {#each ungrouped as c (c.id)}
+            {@render clusterRow(c, 0)}
+          {/each}
+        </div>
+      </ListPane>
+    {/snippet}
+
+    <main class="cluster-main">
+      {#if brokers.openClusters.length > 0}
+        <div class="tabstrip">
+          <Tabs
+            label="Open clusters"
+            tabs={openClusterTabs}
+            value={brokers.selectedId ?? ''}
+            onchange={(id) => brokers.select(id)}
+            idBase="brokers-open"
+          >
+            {#snippet trailing()}
+              {#if selected}
+                <button
+                  class="icon-btn"
+                  aria-label="Close {selected.name}"
+                  title="Close {selected.name}"
+                  onclick={() => brokers.close(selected.id)}
+                >
+                  <Icon name="x" size={12} />
+                </button>
+              {/if}
+            {/snippet}
+          </Tabs>
+        </div>
+      {/if}
+      {#if selected}
+        <div class="tabs">
+          <Tabs label="Kafka cluster views" tabs={CLUSTER_VIEWS} value={tab} onchange={(id) => (tab = id)} idBase="brokers-view" />
+        </div>
+
+        <div class="tab-body" role="tabpanel" id="brokers-view-panel-{tab}" aria-labelledby="brokers-view-tab-{tab}">
+          {#key selected.id}
+            {#if tab === 'overview'}
+              <OverviewTab clusterId={selected.id} />
+            {:else if tab === 'topics'}
+              <TopicsTab cluster={selected} onreplayfrom={openReplayFrom} ontopic={(open) => (topicOpen = open)} />
+            {:else if tab === 'groups'}
+              <GroupsTab cluster={selected} />
+            {:else if tab === 'schema'}
+              <SchemaTab cluster={selected} />
+            {:else if tab === 'replay'}
+              <ReplayPanel cluster={selected} prefill={replayPrefill} />
+            {:else if tab === 'alerts'}
+              <LagAlertsPanel cluster={selected} />
+            {/if}
+          {/key}
+        </div>
+      {:else if isEmpty}
         <EmptyState
           variant="page"
           icon="box"
@@ -519,26 +474,22 @@
         />
       {/if}
       <!-- No "pick a cluster" pane: with clusters present one is always open
-           (see the auto-pick above); on a phone the list above IS the page. -->
-    {/if}
-  </main>
-</div>
+           (see the auto-pick above); on a phone the list IS the page. -->
+    </main>
+  </ListDetail>
 </PageBody>
 </div>
 
 {#snippet sectionNode(node: TreeNode, depth: number)}
   {@const isOpen = !collapsed[node.sec.id]}
-  <!-- The whole header toggles (the caret button stays the keyboard/AT
-       control); clicks on its own buttons don't. -->
-  <!-- The caret button is the keyboard/AT toggle; a click anywhere on the head is a mouse shortcut, so the head itself is presentational. -->
-  <div use:rowMenu
+  {@const toggle = () => (collapsed[node.sec.id] = !collapsed[node.sec.id])}
+  <!-- A folder row of the tree: it folds, drags into another section and takes
+       clusters dropped on it; ⋯ / right-click / long-press hold its menu. -->
+  <div
     role="presentation"
-    class="sec-head"
-    onclick={(e) => {
-      if (!(e.target as Element).closest('button')) collapsed[node.sec.id] = !collapsed[node.sec.id];
-    }}
+    class="side-row sec-head"
     class:drop={(draggedSectionId && draggedSectionId !== node.sec.id) || draggedClusterId}
-    style="padding-inline-start: {depth * 14 + 6}px"
+    style:--side-depth={depth}
     draggable="true"
     ondragstart={(e) => {
       draggedSectionId = node.sec.id;
@@ -546,28 +497,36 @@
     }}
     ondragend={() => (draggedSectionId = null)}
     ondragover={(e) => {
-      if (draggedClusterId || (draggedSectionId && draggedSectionId !== node.sec.id))
-        e.preventDefault();
+      if (draggedClusterId || (draggedSectionId && draggedSectionId !== node.sec.id)) e.preventDefault();
     }}
     ondrop={(e) => {
       e.preventDefault();
       e.stopPropagation();
       onSectionDrop(node.sec.id);
     }}
-    oncontextmenu={(e) => openMenu(e, 'section', node.sec.id)}
   >
-    <button
-      class="caret"
-      onclick={() => (collapsed[node.sec.id] = !collapsed[node.sec.id])}
-      title={isOpen ? 'Collapse' : 'Expand'}
-      aria-label={isOpen ? `Collapse ${node.sec.name}` : `Expand ${node.sec.name}`}
-      aria-expanded={isOpen}
-    >
+    <button type="button" class="side-twisty" tabindex="-1" data-side-toggle aria-label="{isOpen ? 'Collapse' : 'Expand'} {node.sec.name}" title={isOpen ? 'Collapse' : 'Expand'} onclick={toggle}>
       <Icon name={isOpen ? 'chevronDown' : 'chevronRight'} size={12} />
     </button>
-    <Icon name="folder" size={13} />
-    <span class="sec-name grow">{node.sec.name}</span>
-    {#if node.items.length > 0}<span class="count">{node.items.length}</span>{/if}
+    <button
+      type="button"
+      class="side-row-main"
+      data-side-row
+      role="treeitem"
+      aria-level={depth + 1}
+      aria-expanded={isOpen}
+      aria-selected="false"
+      onclick={toggle}
+      oncontextmenu={(e) => openMenu(e, 'section', node.sec.id)}
+      use:rowMenu
+    >
+      <Icon name="folder" size={14} />
+      <span class="side-row-text"><span class="side-row-title sec-name" dir="auto">{node.sec.name}</span></span>
+      {#if node.items.length > 0}<span class="side-row-trailing">{node.items.length}</span>{/if}
+    </button>
+    <button type="button" class="icon-btn side-row-more" tabindex="-1" aria-label="Actions for {node.sec.name}" title="More" onclick={(e) => openMenu(e, 'section', node.sec.id)}>
+      <Icon name="more" size={14} />
+    </button>
   </div>
   {#if isOpen}
     {#each node.children as child (child.sec.id)}
@@ -580,28 +539,38 @@
 {/snippet}
 
 {#snippet clusterRow(c: BrokerCluster, depth: number)}
-  <!-- The row drags; its name button opens the cluster and ⋯ holds the same
-       menu as right-click (no button nested inside a button). -->
-  <div use:rowMenu
-    role="group"
-    aria-label={c.name}
-    class="cluster"
-    class:sel={brokers.selectedId === c.id}
-    style="padding-inline-start: {depth * 14 + 6}px"
+  {@const sel = brokers.selectedId === c.id}
+  <!-- The row drags into a section; it opens the cluster, and ⋯ / right-click /
+       long-press hold its menu. -->
+  <div
+    role="presentation"
+    class="side-row cluster"
+    class:selected={sel}
+    style:--side-depth={depth}
     draggable="true"
     ondragstart={(e) => {
       draggedClusterId = c.id;
       e.stopPropagation();
     }}
     ondragend={() => (draggedClusterId = null)}
-    oncontextmenu={(e) => openMenu(e, 'cluster', c.id)}
   >
-    <button class="cluster-open" onclick={() => brokers.select(c.id)} aria-current={brokers.selectedId === c.id ? 'true' : undefined} title={c.name}>
+    <button
+      type="button"
+      class="side-row-main"
+      data-side-row
+      role="treeitem"
+      aria-level={depth + 1}
+      aria-selected={sel}
+      title={c.name}
+      onclick={() => pick(c.id)}
+      oncontextmenu={(e) => openMenu(e, 'cluster', c.id)}
+      use:rowMenu
+    >
       <span class="dot" style="background: {c.color || 'var(--accent)'}"></span>
-      <span class="cn">{c.name}</span>
+      <span class="side-row-text"><span class="side-row-title cn" dir="auto">{c.name}</span></span>
+      <span class="side-row-trailing"><EnvBadge env={c.environment} /></span>
     </button>
-    <EnvBadge env={c.environment} />
-    <button class="icon-btn cluster-more" aria-label={`Actions for ${c.name}`} title="Actions" onclick={(e) => openMenu(e, 'cluster', c.id)}>
+    <button type="button" class="icon-btn side-row-more" tabindex="-1" aria-label="Actions for {c.name}" title="More" onclick={(e) => openMenu(e, 'cluster', c.id)}>
       <Icon name="more" size={14} />
     </button>
   </div>
@@ -619,157 +588,19 @@
     height: 100%;
     min-height: 0;
   }
-  .brokers-page {
-    flex: 1;
-    display: flex;
-    min-height: 0;
-  }
-  .clusters {
-    /* Default width; drag-resizable via the PaneDivider (persisted). The
-       phone media query below overrides back to a full-width band. */
-    width: var(--clusters-w, 280px);
-    border-inline-end: 1px solid var(--border);
-    display: flex;
-    flex-direction: column;
-    min-height: 0;
-    flex: none;
-  }
-  .aside-head {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    padding: 12px 12px 8px;
-  }
-  .aside-head .title {
-    font-size: var(--fs-s);
-    text-transform: uppercase;
-    letter-spacing: .06em;
-    color: var(--text-dim);
-  }
-  .head-btns {
-    display: flex;
-    gap: 4px;
-  }
-  .cluster-list {
-    flex: 1;
-    overflow: auto;
-    padding-bottom: 8px;
-    min-height: 0;
-  }
-  /* Section headers (folders) */
-  .sec-head {
-    display: flex;
-    align-items: center;
-    gap: 4px;
-    padding-block: 6px; padding-inline: 6px 8px;
-    cursor: pointer;
-    color: var(--text-dim);
-    border-inline-start: 2px solid transparent;
-    user-select: none;
-  }
-  .sec-head:hover {
-    background: var(--hover);
-  }
-  .sec-head.drop {
+  /* A drop target while a cluster or section is dragged. */
+  .sec-head.drop,
+  .ungrouped.drop {
     background: var(--accent-soft);
-    border-inline-start-color: var(--accent);
   }
-  .sec-head.plain {
-    cursor: default;
-    font-size: var(--fs-xs);
-    text-transform: uppercase;
-    letter-spacing: .06em;
-    opacity: 0.8;
-    margin-top: 4px;
-  }
-  .sec-name {
-    font-size: var(--fs-s);
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-  .grow {
-    flex: 1;
-    min-width: 0;
-  }
-  .caret {
-    border: none;
-    background: transparent;
-    color: var(--text-dim);
-    cursor: pointer;
-    display: flex;
-    align-items: center;
-    padding: 0;
-    width: 14px;
-    flex: none;
-  }
-  .caret-spacer {
-    width: 14px;
-    flex: none;
-  }
-  .count {
-    font-size: var(--fs-xs);
-    color: var(--text-dim);
-    background: color-mix(in srgb, var(--text-dim) 14%, transparent);
-    border-radius: var(--radius-m);
-    padding: 0 6px;
-    flex: none;
-  }
-  .cluster {
-    width: 100%;
-    padding-block: 4px;
-    padding-inline-end: 6px;
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    border-inline-start: 2px solid transparent;
-  }
-  .cluster-open {
-    flex: 1;
-    min-width: 0;
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    padding: 4px 6px;
-    border: none;
-    background: transparent;
-    color: var(--text);
-    font: inherit;
-    text-align: start;
-    cursor: pointer;
-  }
-  .cluster-more {
-    flex-shrink: 0;
-    opacity: 0;
-  }
-  .cluster:hover .cluster-more,
-  .cluster:focus-within .cluster-more {
-    opacity: 1;
-  }
-  @media (hover: none) {
-    .cluster-more {
-      opacity: 1;
-    }
-  }
-  .cluster:hover {
-    background: var(--hover);
-  }
-  .cluster.sel {
-    background: var(--accent-soft);
-    border-inline-start-color: var(--accent);
+  .ungrouped {
+    margin-block-start: 8px;
   }
   .dot {
     width: 8px;
     height: 8px;
     border-radius: 50%;
     flex: none;
-  }
-  .cn {
-    flex: 1;
-    font-size: var(--fs-m);
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
   }
   .cluster-main {
     flex: 1;
@@ -794,130 +625,5 @@
     min-height: 0;
     overflow-x: hidden;
     overflow-y: auto;
-  }
-  .small {
-    font-size: var(--fs-xs);
-  }
-
-  /* Collapse toggles. On desktop the cluster-list toggle is a plain inert label
-     (no caret / count chrome) and the content toggle is hidden entirely, so the
-     desktop layout looks exactly as before. They light up only on phones. */
-  .sec-toggle {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    border: none;
-    background: transparent;
-    color: var(--text-dim);
-    padding: 0;
-    cursor: default;
-    min-width: 0;
-  }
-  .sec-toggle > :global(svg),
-  .sec-toggle .hcount {
-    display: none;
-  }
-  .content-toggle {
-    display: none;
-    border: none;
-    background: transparent;
-    color: var(--text-dim);
-    padding: 2px;
-    cursor: pointer;
-    align-items: center;
-    flex: none;
-  }
-
-  @media (max-width: 640px) {
-    /* Stack the cluster list above the content; each is its own collapsible,
-       independently-scrollable section, and text gets bumped for readability.
-       The page keeps its bounded height (the host clips), so each section
-       scrolls inside itself rather than the whole page scrolling. */
-    .brokers-page {
-      flex-direction: column;
-    }
-    .clusters {
-      width: 100%;
-      border-inline-end: none;
-      border-bottom: 1px solid var(--border);
-      flex: none;
-      min-height: 0;
-    }
-    .aside-head {
-      padding: 12px 14px;
-    }
-    .sec-toggle {
-      flex: 1;
-      cursor: pointer;
-      padding: 6px 0;
-    }
-    .sec-toggle > :global(svg) {
-      display: inline-flex;
-      flex: none;
-    }
-    .sec-toggle .title {
-      font-size: var(--fs-l);
-    }
-    .sec-toggle .hcount {
-      display: inline-block;
-      font-size: var(--fs-xs);
-      color: var(--text-dim);
-      background: color-mix(in srgb, var(--text-dim) 14%, transparent);
-      border-radius: var(--radius-m);
-      padding: 1px 8px;
-    }
-    .head-btns .icon-btn {
-      width: 36px;
-      height: 36px;
-    }
-    /* Expanded: scroll within a capped height. Collapsed: hidden. */
-    .cluster-list {
-      max-height: 45vh;
-      overflow-y: auto;
-      flex: none;
-    }
-    .clusters.collapsed .cluster-list {
-      display: none;
-    }
-    /* Bigger sidebar text + roomier tap targets. */
-    .cluster {
-      padding-block: 6px;
-    }
-    .cn {
-      font-size: var(--fs-l);
-    }
-    .sec-name {
-      font-size: var(--fs-l);
-    }
-    .sec-head {
-      padding-block: 8px; padding-inline: 8px 10px;
-    }
-    .count {
-      font-size: var(--fs-xs);
-    }
-    .sec-head.plain {
-      font-size: var(--fs-s);
-    }
-
-    /* Content section. */
-    .cluster-main {
-      flex: 1;
-      min-height: 0;
-    }
-    /* The page header carries the phone-only content toggle. */
-    .content-toggle {
-      display: inline-flex;
-    }
-    /* Collapsed content: keep only the header (with its caret). */
-    .cluster-main.collapsed .tabstrip,
-    .cluster-main.collapsed .tabs,
-    .cluster-main.collapsed .tab-body {
-      display: none;
-    }
-    /* The active tab's content is its own scroll region. */
-    .tab-body {
-      overflow-y: auto;
-      -webkit-overflow-scrolling: touch;
-    }
   }
 </style>

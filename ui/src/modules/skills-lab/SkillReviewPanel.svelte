@@ -16,7 +16,8 @@
   import { liveQuery } from '../../lib/live';
   import { toasts } from '../../lib/toast.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
-  import { viewport } from '../../lib/stores/viewport.svelte';
+  import ListDetail from '../../lib/components/side/ListDetail.svelte';
+  import ListPane from '../../lib/components/side/ListPane.svelte';
   import { skillsLabState } from '../../lib/stores/skillsLabState.svelte';
   import { untrack } from 'svelte';
   import SkillReviewAgents from './SkillReviewAgents.svelte';
@@ -34,16 +35,14 @@
 
   interface Props {
     wsId: string;
-    listCollapsed?: boolean;
     /** Optional skill to pre-select in the New Review form (from the Skills tab). */
     initialTarget?: { name: string; source: string } | null;
     onconsumed?: () => void;
     /** Open this existing review (a skill's Usage → Reviews card). */
     initialReview?: string | null;
     onreviewconsumed?: () => void;
-    onphonedetail?: (open: boolean) => void;
   }
-  let { wsId, listCollapsed = false, initialTarget = null, onconsumed, initialReview = null, onreviewconsumed, onphonedetail }: Props = $props();
+  let { wsId, initialTarget = null, onconsumed, initialReview = null, onreviewconsumed }: Props = $props();
 
   // `source` is "library" | "bundled" | a provider name (claude/codex/agy) — all
   // valid `skill_source` values the review engine resolves.
@@ -72,16 +71,8 @@
   }
   let fInstructions = $state(initialReviewState.fInstructions);
   const starting = $derived(skillsLabState.startingReview);
-  let phoneListOpen = $state(false);
-  const showPhoneList = $derived(
-    viewport.isPhone && (phoneListOpen || ((listLoading || !!listError) && reviews.length === 0)),
-  );
-  $effect(() => {
-    onphonedetail?.(viewport.isPhone && !showPhoneList && reviews.length > 0);
-  });
-  export function back(): void {
-    phoneListOpen = true;
-  }
+  /** Phone: the open review (or the New form) is pushed over the list. */
+  let phoneOpen = $state(false);
 
   // Apply-fixes form.
   let fixProvider = $state(defaultAgentProvider());
@@ -176,7 +167,7 @@
     if (quiet) refreshPending = generation;
     else {
       selectionPending = generation;
-      phoneListOpen = false;
+      phoneOpen = true;
     }
     const workspace = wsId;
     try {
@@ -210,7 +201,7 @@
     });
     if (!rev || disposed || workspace !== wsId || generation !== detailGeneration) return;
     selected = rev;
-    phoneListOpen = false;
+    phoneOpen = true;
     await loadList();
   }
 
@@ -297,7 +288,7 @@
     detailGeneration++;
     selected = null;
     fSkill = '';
-    phoneListOpen = false;
+    phoneOpen = true;
   }
 
   // --- live refresh -----------------------------------------------------------
@@ -377,7 +368,7 @@
       detailGeneration++;
       consumedTarget = `${initialTarget.source}:${initialTarget.name}`;
       selected = null;
-      phoneListOpen = false;
+      phoneOpen = true;
       // Ensure the option exists even before the skill list loads.
       const key = `${initialTarget.source}:${initialTarget.name}`;
       if (!skillOpts.some((o) => `${o.source}:${o.name}` === key)) {
@@ -422,41 +413,40 @@
   $effect(() => { if (selectedError) announce(selectedError, { assertive: true }); });
 </script>
 
-<div class="review-wrap">
-<div class="lab-review" class:list-hidden={listCollapsed && !viewport.isPhone} data-testid="skill-review">
-  <aside class="lr-side" class:hide-phone={viewport.isPhone && !showPhoneList} id="reviews-list">
-    <!-- Same list head as the Evaluator’s runs. Not .primary: the form’s
-         "Start review" is the view’s primary. -->
-    <div class="lr-side-head">
-      <span class="lr-side-title">Reviews</span>
-      <button class="btn small" onclick={newReview} aria-pressed={!selected} title="New review" data-testid="new-skill-review"><Icon name="plus" size={12} /> New</button>
-    </div>
-    {#if (listError || listLoading) && reviews.length === 0}
-      <LoadState what="reviews" variant="compact" loading={listLoading} error={listError} empty={true} onretry={loadList} />
-    {:else if reviews.length === 0}
-      <p class="lr-empty">No skill reviews yet. Start one with the form.</p>
-    {:else}
-      <ul class="lr-list">
-        {#each reviews as r (r.id)}
-          <li>
-            <button class="lr-item" class:active={selected?.id === r.id} aria-current={selected?.id === r.id ? 'true' : undefined} onclick={() => openReview(r.id)}>
+<div class="review-wrap" data-testid="skill-review">
+<ListDetail module="skills-eval" pane="reviews" name="Reviews" open={phoneOpen} onback={() => (phoneOpen = false)} empty={!listLoading && !listError && reviews.length === 0}>
+  {#snippet list()}
+    <!-- The pane's + opens the New review form (the form's "Start review"
+         is the view's primary). -->
+    <ListPane
+      count={reviews.length}
+      primary={{ icon: 'plus', label: 'New review', onclick: newReview, testid: 'new-skill-review' }}
+      loading={listLoading && reviews.length === 0}
+      error={reviews.length === 0 ? listError : null}
+      onretry={loadList}
+      testid="reviews-list"
+    >
+      {#each reviews as r (r.id)}
+        <div class="side-row two-line" class:selected={selected?.id === r.id}>
+          <button type="button" class="side-row-main lr-item" class:active={selected?.id === r.id} data-side-row aria-current={selected?.id === r.id ? 'true' : undefined} onclick={() => openReview(r.id)}>
+            <span class="side-row-text">
               <span class="lr-item-top">
-                <span class="lr-item-name" title={r.skill_name}>{r.skill_name}</span>
+                <span class="side-row-title lr-item-name" title={r.skill_name}>{r.skill_name}</span>
                 <span class="rp-status-pill" data-status={r.status}><StatusBadge status={runStatus(r.status)} variant="text" /></span>
               </span>
-              <span class="lr-item-meta">
+              <span class="side-row-meta lr-item-meta">
                 <span>{sourceLabel(r.skill_source)}{r.static_report ? ` · ${r.static_report.verdict}` : ''}</span>
                 <span class="grow"></span>
                 <span title={new Date(r.created_at).toLocaleString()}>{rel(r.created_at)}</span>
               </span>
-            </button>
-          </li>
-        {/each}
-      </ul>
-    {/if}
-  </aside>
+            </span>
+          </button>
+        </div>
+      {/each}
+    </ListPane>
+  {/snippet}
 
-  <main class="lr-main" class:hide-phone={viewport.isPhone && showPhoneList}>
+  <main class="lr-main">
     {#if !selected}
       <!-- New review form -->
       <div class="lr-form card">
@@ -663,34 +653,18 @@
       </div>
     {/if}
   </main>
-</div>
+</ListDetail>
 </div>
 
 <style>
   .review-wrap { display: flex; flex-direction: column; height: 100%; min-height: 0; }
-  .lab-review.list-hidden { grid-template-columns: minmax(0, 1fr); }
-  .list-hidden .lr-side { display: none; }
-  /* Same shell as Skills: a surface list pane with a hairline, content beside it. */
-  .lab-review { display: grid; grid-template-columns: 280px minmax(0, 1fr); flex: 1; min-height: 0; }
-  .lr-side { display: flex; flex-direction: column; gap: 4px; overflow-y: auto; padding: 0 8px 12px; background: var(--surface); border-inline-end: 1px solid var(--border); }
-  .lr-side-head { display: flex; align-items: center; gap: 8px; padding: 12px 4px 8px; }
-  .lr-side-title { flex: 1; font-size: var(--fs-xs); font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: var(--text-dim); }
-  .lr-empty { color: var(--text-dim); font-size: var(--fs-s); padding: 8px; }
   .lr-error :global(svg) { color: var(--danger); vertical-align: -1px; }
-  .lr-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
-  .lr-list li { display: flex; }
-  .lr-item {
-    flex: 1; min-width: 0; text-align: start; background: transparent; border: 1px solid transparent;
-    border-radius: var(--radius-m); padding: 6px 8px; cursor: pointer; color: var(--text); display: flex; flex-direction: column; gap: 4px;
-  }
-  .lr-item:hover { background: var(--hover); }
-  .lr-item.active { border-color: var(--accent-soft-strong); background: var(--accent-soft); }
   .lr-item-top { display: flex; align-items: center; gap: 6px; min-width: 0; }
-  .lr-item-name { flex: 1; min-width: 0; font-size: var(--fs-m); font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .lr-item-meta { display: flex; align-items: center; gap: 6px; font-size: var(--fs-xs); color: var(--text-dim); min-width: 0; }
+  .lr-item-name { flex: 1; }
+  .lr-item-meta { display: flex; align-items: center; gap: 6px; min-width: 0; }
   .lr-item-meta > span:first-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .lr-src { font-size: var(--fs-xs); }
-  .lr-main { min-width: 0; overflow-y: auto; min-height: 0; padding: 16px 20px; }
+  .lr-main { flex: 1; min-width: 0; overflow-y: auto; min-height: 0; padding: 16px 20px; }
   .lr-form { padding: 16px; max-width: 620px; display: flex; flex-direction: column; gap: 12px; }
   .lr-form h3 { margin: 0; font-size: var(--fs-l); font-weight: 600; }
   .lr-actions { display: flex; align-items: center; gap: 8px; padding-top: 4px; }
@@ -750,12 +724,7 @@
   .rp-loc { font-size: var(--fs-xs); color: var(--text-dim); overflow-wrap: anywhere; }
   .mono { font-family: var(--font-mono); }
 
-  /* Phone: push navigation between the reviews list and the open review / form. */
   @media (max-width: 640px) {
-    .lab-review { display: flex; flex-direction: column; }
-    .hide-phone { display: none; }
-    .lr-side { width: 100%; flex: 1; border-inline-end: none; }
-    .lr-main { flex: 1; padding: 12px 14px; }
-    .lr-item { min-height: var(--hit-min); }
+    .lr-main { padding: 12px 14px; }
   }
 </style>

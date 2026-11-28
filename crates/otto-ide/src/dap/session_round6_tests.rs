@@ -183,6 +183,7 @@ fn mock_conn(client_io: tokio::io::DuplexStream) -> Arc<ActiveConnection> {
         supports_terminate: false,
         supports_set_variable: false,
         exception_filters: Vec::new(),
+        attached: false,
     })
 }
 

@@ -197,12 +197,13 @@ test('S3 pagination preserves rows and CSV and binary previews', async ({ page }
   await page.getByRole('button', { name: 'Load more', exact: true }).click();
   await expect.poll(() => secondPage).toBe(true);
   await expect(page.getByRole('row').filter({ hasText: 'report.csv' })).toHaveCount(1);
-  await page.getByRole('row').filter({ hasText: 'report.csv' }).dblclick();
+  // One click opens the preview (a sheet beside the accounts pane at 1280).
+  await page.getByRole('row').filter({ hasText: 'report.csv' }).click();
   await expect(page.getByRole('cell', { name: 'checkout', exact: true })).toBeVisible();
-  await page.getByRole('button', { name: 'Close preview' }).click();
-  await page.getByRole('row').filter({ hasText: 'archive.bin' }).dblclick();
+  await page.getByRole('button', { name: 'Close Object preview' }).click();
+  await page.getByRole('row').filter({ hasText: 'archive.bin' }).click();
   // Binary objects get no inline render — the note names the type and offers Download.
-  const preview = page.getByRole('complementary', { name: 'Object preview' });
+  const preview = page.getByTestId('aws-s3-preview');
   await expect(preview.getByText('No preview for this type (application/octet-stream).', { exact: true })).toBeVisible();
   await expect(preview.locator('.pv-note').getByRole('button', { name: 'Download', exact: true })).toBeVisible();
 });

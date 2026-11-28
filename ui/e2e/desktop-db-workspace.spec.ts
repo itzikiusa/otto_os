@@ -5,8 +5,8 @@ import { expectFullyInViewport, openPage, pickDbMenuItem } from './helpers';
 // ─────────────────────────────────────────────────────────────────────────────
 // DB Explorer — query-workspace real estate + object search.
 //
-//   • ⌘B collapses the schema sidebar to its rail and restores it (the rail must
-//     never be zero-width, or the sidebar is unrecoverable),
+//   • ⌘B hides the tables pane and restores it ("Show Tables" in the page
+//     header while it is hidden, so it is never unrecoverable),
 //   • the editor keeps a per-tab height instead of one shared value,
 //   • the search scope picker exists and a scoped catalog lookup finds a table
 //     inside a schema that was never expanded — the exact case the old
@@ -41,7 +41,7 @@ test.beforeEach(async ({ page }) => {
       localStorage.setItem('otto_workspace', wsId);
       localStorage.setItem('otto_rail_expanded', '0');
       // Both are sticky preferences — start from a known state.
-      localStorage.setItem('db.sidebarCollapsed', '0');
+      localStorage.setItem('otto.pane.database.list.hidden', '0');
       localStorage.setItem('db.showCounts', '0');
     },
     { wsId: workspaceId },
@@ -54,28 +54,32 @@ async function openWorkbench(page: import('@playwright/test').Page): Promise<voi
   await expect(page.locator('.schema-tree')).toBeVisible({ timeout: 30_000 });
 }
 
-test('⌘B collapses the schema sidebar and the header toggle brings it back', async ({ page }) => {
+test('⌘B hides the tables pane and Show Tables in the header brings it back', async ({ page }) => {
   await openWorkbench(page);
-  const side = page.locator('aside.db-side');
+  const side = page.getByTestId('db-side');
   await expect(side).toBeVisible();
   const header = page.getByTestId('page-header');
-  const show = header.getByRole('button', { name: 'Tables', exact: true });
-  // Open, the pane's own tabs are the way in; the header's ⋯ hides it (⌘B).
+  const show = header.getByRole('button', { name: 'Show Tables', exact: true });
+  // Open, the pane's own views are the way in; its ⋯ hides it (⌘B).
   await expect(show).toHaveCount(0);
 
+  // ⌘B works with the query editor focused too (the shell's chord).
+  await page.locator('.qe-edit .cm-content').click();
   await page.keyboard.press('Meta+b');
   await expect(side).toBeHidden();
-  // The header's Tables button stays reachable, so a hidden sidebar can
-  // always be brought back.
-  await expectFullyInViewport(page, show, 'show-sidebar toggle');
+  // "Show Tables" stays reachable, so a hidden pane can always be brought back.
+  await expectFullyInViewport(page, show, 'show-tables toggle');
 
   // Restoring works from the header button as well as the chord.
   await show.click();
   await expect(page.locator('.schema-tree')).toBeVisible();
   await expect(show).toHaveCount(0);
-  // The header's ⋯ hides it too (Hide tables · ⌘B).
-  await pickDbMenuItem(page, /^Hide tables/);
+  // The pane's ⋯ hides it too (Hide Tables · ⌘B), and the choice survives a reload.
+  await page.getByTestId('db-side-more').click();
+  await page.getByRole('menuitem', { name: /^Hide Tables/ }).click();
   await expect(side).toBeHidden();
+  await page.reload();
+  await expect(show).toBeVisible({ timeout: 30_000 });
   await show.click();
   await expect(page.locator('.schema-tree')).toBeVisible();
 });

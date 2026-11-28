@@ -76,7 +76,7 @@ test('canceled automation navigation keeps the selected editor and request tab',
   const initial={kind:'automation',id:'a'};
   let switched=-1;
   const context=componentFunctions('../src/modules/api/ApiPage.svelte',['changeView','switchRequestTab'],{
-    view:initial,viewTransition:0,phonePane:'main',automationEditor:{approveLeave:async()=>allow},
+    view:initial,viewTransition:0,phoneOpen:true,automationEditor:{approveLeave:async()=>allow},
     apiClient:{tabs:[{tabId:'request'}],switchTab:(i:number)=>{switched=i;}},
   });
   await context.switchRequestTab(0);assert.equal(context.view,initial);assert.equal(switched,-1);

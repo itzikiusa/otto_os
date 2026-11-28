@@ -46,27 +46,19 @@ async function vaultPage(page: Page): Promise<void> {
   await page.locator('.tree').getByText('services', { exact: true }).click();
 }
 
-async function vaultMenu(page: Page): Promise<void> {
-  await page.locator('.vault-header').getByRole('button', { name: /^(More vault actions|More actions)$/ }).locator('visible=true').last().click();
-  const submenu = page.getByRole('menuitem', { name: 'More vault actions…', exact: true });
-  const details = page.getByRole('menuitemcheckbox', { name: /Note details/ });
-  await expect(submenu.or(details)).toBeVisible();
-  if (await submenu.isVisible()) await submenu.click();
-}
-
 test('phone Vault opens note details only on request and keeps them reachable', async ({ page }, info) => {
   await vaultPage(page);
   await page.locator('.tree').getByText('auth-api', { exact: true }).click();
   await expect(page.locator('.read').getByRole('heading', { name: 'Overview' })).toBeVisible();
-  await expect(page.getByRole('dialog', { name: 'Side panel', exact: true })).toBeHidden();
-  await vaultMenu(page);
-  await page.getByRole('menuitemcheckbox', { name: /Note details/ }).click();
-  const details = page.getByRole('dialog', { name: 'Side panel', exact: true });
+  // A phone's Detail pane is a full-width sheet, opened only by its toggle.
+  const details = page.getByRole('dialog', { name: 'Note details', exact: true });
+  await expect(details).toBeHidden();
+  await page.getByTestId('vault-details-toggle').tap();
   await expect(details).toBeVisible();
   await expect(details).toContainText('Backlinks');
   await expectFullyInViewport(page, details);
   await capture(page, info, 'vault-details');
-  await details.getByRole('button', { name: 'Close Side panel', exact: true }).click();
+  await details.getByRole('button', { name: 'Close Note details', exact: true }).tap();
   await expect(details).toBeHidden();
   await expectNoHorizontalOverflow(page);
   await capture(page, info, 'vault-note');
@@ -189,7 +181,7 @@ test('phone Product supports a populated story, draft editing and every workflow
   await page.reload();
   await expect(page.locator('#draft-title')).toHaveValue(editedTitle);
   if (page.viewportSize()!.width <= 640) {
-    await page.getByRole('button', { name: 'Back to stories', exact: true }).click();
+    await page.getByRole('button', { name: 'Back to Stories', exact: true }).click();
     await expect(page.locator('.story-list')).toBeVisible();
     await page.locator('.story-row', { hasText: editedTitle }).click();
     await expect(page.locator('#draft-title')).toBeVisible();

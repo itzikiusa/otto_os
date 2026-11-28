@@ -19,6 +19,8 @@ mod projects_deps;
 mod runtime_debug;
 #[path = "http/security.rs"]
 pub mod security;
+#[path = "http/security_active.rs"]
+mod security_active;
 #[path = "http/security_dast.rs"]
 mod security_dast;
 #[path = "http/spring_boot.rs"]
@@ -55,8 +57,8 @@ use self::intelligence::{
     lsp_rename, lsp_status, lsp_symbols,
 };
 use self::notebooks::{
-    notebook_execute, notebook_interrupt, notebook_kernels, notebook_restart, notebook_shutdown,
-    notebook_variables,
+    notebook_execute, notebook_input, notebook_interrupt, notebook_kernels, notebook_restart,
+    notebook_shutdown, notebook_stream, notebook_variables,
 };
 use self::projects_deps::{
     add_project_folders_bulk, build_tools_model, delete_project, deps_action, deps_inspect,
@@ -66,7 +68,7 @@ use self::runtime_debug::{
     create_python_venv, debug_command, debug_evaluate, debug_port, debug_set_variable,
     debug_variables, delete_run_config, get_debug_session, get_run, list_debug_sessions,
     list_run_configs, set_debug_breakpoints, start_debug_session, start_run, stop_run,
-    stream_debug_events, stream_run_events, upsert_run_config,
+    stream_debug_events, stream_run_events, unity_instances, upsert_run_config,
 };
 use self::spring_boot::{spring_actuator, spring_devtools_restart};
 use self::toolchains_env::{
@@ -222,6 +224,10 @@ pub fn api_router<S: IdeCtx>() -> Router<S> {
                 "/ide/projects/{id}/security/dast/run",
                 post(security_dast::start::<S>),
             )
+            .route(
+                "/ide/projects/{id}/security/dast/schedule",
+                put(security_active::allow::<S>).delete(security_active::revoke::<S>),
+            )
             .route("/ide/projects/scan-repos", post(scan_repos::<S>))
             .route(
                 "/ide/projects/folders",
@@ -267,6 +273,8 @@ pub fn api_router<S: IdeCtx>() -> Router<S> {
             .route("/ide/notebooks/restart", post(notebook_restart::<S>))
             .route("/ide/notebooks/variables", post(notebook_variables::<S>))
             .route("/ide/notebooks/shutdown", post(notebook_shutdown::<S>))
+            .route("/ide/notebooks/input", post(notebook_input::<S>))
+            .route("/ide/notebooks/stream", get(notebook_stream::<S>))
             // D. Full DAP Debugger Engine
             .route(
                 "/ide/debug/sessions",
@@ -295,6 +303,7 @@ pub fn api_router<S: IdeCtx>() -> Router<S> {
                 post(debug_set_variable::<S>),
             )
             .route("/ide/debug/sessions/{id}/port", get(debug_port::<S>))
+            .route("/ide/debug/unity/instances", post(unity_instances::<S>))
             // E. "Share with Friends" Host Routes
             .route(
                 "/ide/collab/rooms",
@@ -573,8 +582,33 @@ async fn detect_gutter<S: IdeCtx>(
                 .content
         }
     };
-    let items =
+    let mut items =
         crate::gutter::detect_gutter_items_with_plugins(&req.path, &content, &ctx.ide().plugins);
+    if items
+        .iter()
+        .any(|i| i.run_spec.runner == crate::types::IdeRunnerKind::Kotest)
+    {
+        let resolved = ctx.ide().targets.resolve(&ctx, &user, &req.target).await?;
+        let mut version = None;
+        for manifest in crate::gutter::kotest::kotest_manifests(&req.path) {
+            if let Ok(f) = ctx.ide().targets.read_file(&resolved, &manifest).await {
+                version = crate::gutter::kotest::kotest_version(&manifest, &f.content);
+                if version.is_some() {
+                    break;
+                }
+            }
+        }
+        let module = req
+            .path
+            .rfind("/src/")
+            .map_or(req.path.as_str(), |i| &req.path[..i]);
+        crate::gutter::kotest::gate_kotest_items(
+            &mut items,
+            version.as_deref(),
+            crate::environments::runner_cmd::runner_kotest::spec_only_module(module),
+            req.target.kind == crate::types::IdeTargetKind::Ssh,
+        );
+    }
     Ok(Json(IdeGutterResp { items }))
 }
 

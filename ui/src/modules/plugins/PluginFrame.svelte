@@ -17,6 +17,7 @@
   import { api, baseUrl, getToken } from '../../lib/api/client';
   import LoadState from '../../lib/components/LoadState.svelte';
   import { loadErrorText } from '../../lib/loadError';
+  import { reducedMotion } from '../../lib/motion';
   import { agentProviders } from '../../lib/providers';
   import { plugins } from '../../lib/stores/plugins.svelte';
   import PageHeader from '../../lib/components/PageHeader.svelte';
@@ -133,7 +134,7 @@
         themeName: ui.theme,
         scheme: ui.resolvedScheme,
         dir,
-        reducedMotion: typeof matchMedia === 'function' && matchMedia('(prefers-reduced-motion: reduce)').matches,
+        reducedMotion: reducedMotion(),
         ...extra,
       },
       origin,

@@ -67,7 +67,7 @@ for (const scheme of ['light', 'dark'] as const) {
     await openChat(page, title);
 
     // No conversation yet: the start state offers a chat; start one from the list.
-    await page.locator('.list-pane').getByRole('button', { name: 'New chat' }).click();
+    await page.getByRole('button', { name: 'New chat', exact: true }).locator('visible=true').first().click();
     await expect(page.locator('.chat-item.active')).toBeVisible({ timeout: 15_000 });
 
     // One composer with a compact agent picker; a starter chip prefills it.
@@ -88,7 +88,7 @@ for (const scheme of ['light', 'dark'] as const) {
     await expect(chat.locator('.applied-row')).toContainText('Added', { timeout: 12_000 });
 
     // Earlier chats: listed, collapsed by default, open read-only (no composer).
-    const toggle = page.getByRole('button', { name: /Earlier chats \(1\)/ });
+    const toggle = page.getByRole('button', { name: /Earlier chats/ });
     await expect(toggle).toHaveAttribute('aria-expanded', 'false');
     await toggle.click();
     await page.locator('.chat-item', { hasText: earlierTitle }).locator('.chat-btn').click();
@@ -115,7 +115,7 @@ test('merged Chat fits a phone without horizontal scroll', async ({ page }) => {
     localStorage.setItem('otto_rail_expanded', '0');
   }, ws);
   await openChat(page, title);
-  await page.locator('.list-pane').getByRole('button', { name: 'New chat' }).click();
+  await page.getByRole('button', { name: 'New chat', exact: true }).locator('visible=true').first().click();
   await expect(page.locator('.refine-chat .msg-input')).toBeVisible({ timeout: 15_000 });
   await expect(page.locator('.refine-chat .starter-chip').first()).toBeVisible();
   await expectNoHorizontalOverflow(page);

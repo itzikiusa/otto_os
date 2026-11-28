@@ -12,6 +12,7 @@ mod history;
 mod lsp_projects;
 mod runtime;
 mod toolchains_env;
+mod unity_attach;
 
 pub use deps_types::*;
 pub use fs_search::*;
@@ -19,6 +20,7 @@ pub use history::*;
 pub use lsp_projects::*;
 pub use runtime::*;
 pub use toolchains_env::*;
+pub use unity_attach::*;
 
 // ---------------------------------------------------------------------------
 // SSH connection spec & Target specification

@@ -4,7 +4,8 @@
   // its kind has — the read-only conversation, output, log, files; a review's
   // summary and summarizer; an approval's preview; the run's Result, Input
   // and (a goal run) Criteria. Its body loads on demand, at most once a second.
-  import { untrack } from 'svelte';
+  import { LIST_DETAIL, type ListDetailCtx } from '../../../lib/components/side/context';
+  import { getContext, untrack } from 'svelte';
   import Icon from '../../../lib/components/Icon.svelte';
   import JsonTree from '../../../lib/components/JsonTree.svelte';
   import LoadState from '../../../lib/components/LoadState.svelte';
@@ -60,13 +61,12 @@
     criteria?: readonly (Criterion | ScopedCriterion)[];
     /** The step whose failure the run's card beside the pane already shows. */
     cardNode?: string | null;
-    /** The pane's own Maximize (the run column folds behind "Run"). */
-    maximized?: boolean;
-    onmaximize?: () => void;
     /** Select a sub-thread row (or null to return to the parent step). */
     onselectchild?: (childId: string | null) => void;
   }
-  let { run, sync, workspaceId, runState, step, childId, stepNo = null, stepCount, now, tab: asked = null, criteria = [], cardNode = null, maximized = false, onmaximize, onselectchild }: Props = $props();
+  let { run, sync, workspaceId, runState, step, childId, stepNo = null, stepCount, now, tab: asked = null, criteria = [], cardNode = null, onselectchild }: Props = $props();
+  // Maximize hides the run column (the list pane); "Show Run" / ⌘B bring it back.
+  const listDetail = getContext<ListDetailCtx | undefined>(LIST_DETAIL);
 
   const EMPTY_SESSIONS: readonly string[] = [];
   const node = $derived(step?.node ?? null);
@@ -289,8 +289,8 @@
       {#if word?.word}<span class="word {word.tone}" title={child?.retried_reason || undefined}>{word.word}</span>{/if}
       <span class="grow"></span>
       {#if modelChip && !showingThread}<span class="chip" title="What ran">{modelChip}</span>{/if}
-      {#if onmaximize}
-        <button type="button" class="icon-btn" aria-label={maximized ? 'Show the run' : 'Maximize conversation'} title={maximized ? 'Show the run' : 'Maximize conversation'} onclick={onmaximize}><Icon name={maximized ? 'minimize' : 'maximize'} size={13} /></button>
+      {#if listDetail?.canHide}
+        <button type="button" class="icon-btn" aria-label="Maximize conversation" title="Maximize conversation (⌘B)" onclick={() => listDetail.hide()}><Icon name="maximize" size={13} /></button>
       {/if}
       {#if node && !child}
         <button type="button" class="icon-btn" aria-label="Step actions" title="Step actions" onclick={stepMenu}><Icon name="more" size={14} /></button>

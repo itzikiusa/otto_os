@@ -10,6 +10,7 @@ use tokio::sync::{Mutex, OnceCell, Semaphore};
 use tokio_util::sync::CancellationToken;
 
 use crate::engine::{Engine, EngineKind};
+pub use crate::store::JobOutput;
 use crate::{
     governor::cancelled, store, EngineRun, Finding, ProjectScans, ScanDetail, ScanSettings,
     ScanSummary,
@@ -61,7 +62,7 @@ impl SecurityScans {
     /// (`active == false`), and Nuclei is only invoked when `active == true`.
     /// For active runs, `verify_before_spawn` is re-invoked after binary and
     /// template preparation, immediately before starting the proxy and spawning
-    /// Nuclei.
+    /// Nuclei, with the exact resolved addresses the proxy will dial.
     pub async fn run_dast<V, Fut>(
         &self,
         target: &crate::passive::Target,
@@ -72,7 +73,7 @@ impl SecurityScans {
         verify_before_spawn: V,
     ) -> Result<(EngineRun, Vec<Finding>)>
     where
-        V: Fn() -> Fut,
+        V: Fn(Vec<std::net::SocketAddr>) -> Fut,
         Fut: Future<Output = Result<()>>,
     {
         if active {
@@ -124,6 +125,7 @@ impl SecurityScans {
         self.enqueue_job(
             pool,
             project,
+            crate::ScanTrigger::Manual,
             busy,
             move |settings, cancel, busy| async move {
                 let roots = tokio::select! {
@@ -165,10 +167,11 @@ impl SecurityScans {
         Ok((runs, findings))
     }
 
-    pub async fn enqueue_job<F, Fut, J, JobFuture>(
+    pub async fn enqueue_job<F, Fut, J, JobFuture, Out>(
         self: &Arc<Self>,
         pool: DbPool,
         project: String,
+        trigger: crate::ScanTrigger,
         busy: F,
         job: J,
     ) -> Result<ScanSummary>
@@ -176,7 +179,8 @@ impl SecurityScans {
         F: Fn() -> Fut + Send + Sync + 'static,
         Fut: Future<Output = bool> + Send,
         J: FnOnce(ScanSettings, CancellationToken, F) -> JobFuture + Send + 'static,
-        JobFuture: Future<Output = Result<(Vec<EngineRun>, Vec<Finding>)>> + Send,
+        JobFuture: Future<Output = Result<Out>> + Send,
+        Out: Into<JobOutput>,
     {
         self.recover(&pool).await?;
         let settings = store::settings(&pool, &project).await?;
@@ -184,7 +188,7 @@ impl SecurityScans {
         if self.shutdown.is_cancelled() {
             return Err(Error::Conflict("Otto is shutting down.".into()));
         }
-        let scan = store::insert(&pool, &project).await?;
+        let scan = store::insert(&pool, &project, trigger).await?;
         let cancel = self.shutdown.child_token();
         jobs.insert(
             scan.id.clone(),
@@ -208,18 +212,18 @@ impl SecurityScans {
                 if cancel.is_cancelled() || !store::start(&pool, &id).await? {
                     return Err(cancelled());
                 }
-                let (runs, mut findings) = job(settings, cancel.clone(), busy).await?;
-                findings.sort_unstable_by(|a, b| {
+                let mut output: JobOutput = job(settings, cancel.clone(), busy).await?.into();
+                output.findings.sort_unstable_by(|a, b| {
                     a.severity
                         .cmp(&b.severity)
                         .then_with(|| a.fingerprint.cmp(&b.fingerprint))
                 });
-                if findings.len() > crate::report::MAX_FINDINGS {
+                if output.findings.len() > crate::report::MAX_FINDINGS {
                     return Err(Error::internal_public(
                         "This scan produced too many findings. Narrow its scope and retry.",
                     ));
                 }
-                Ok((runs, findings))
+                Ok(output)
             };
             // Cancel queued scans without waiting for the active scan. Once the
             // engine starts, let its deadline/kill-and-reap path finish under the permit.

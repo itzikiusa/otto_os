@@ -96,6 +96,29 @@ pub async fn get(pool: &DbPool, project: &str) -> Result<Option<Schedule>> {
     Ok(row.map(|(cron, timezone)| view(cron, timezone, Utc::now())))
 }
 
+/// The exact saved schedule row a scheduled active grant binds to, with the
+/// person it runs as (the project owner, else whoever saved it).
+#[derive(Debug, Clone, PartialEq, Eq, sqlx::FromRow)]
+pub struct ScheduleRow {
+    pub cron: String,
+    pub timezone: String,
+    pub armed_at: String,
+    pub run_as: String,
+}
+
+pub async fn row(pool: &DbPool, project: &str) -> Result<Option<ScheduleRow>> {
+    sqlx::query_as(
+        "SELECT s.cron, s.timezone, s.armed_at,
+                COALESCE(NULLIF(p.owner_user_id, ''), s.armed_by) AS run_as
+         FROM ide_security_schedules s JOIN ide_named_projects p ON p.id = s.project_id
+         WHERE p.id = ? AND (p.owner_user_id != '' OR s.armed_by != '')",
+    )
+    .bind(project)
+    .fetch_optional(pool)
+    .await
+    .map_err(store::db_error)
+}
+
 pub async fn save(
     pool: &DbPool,
     project: &str,
@@ -229,7 +252,7 @@ mod tests {
             assert_eq!(user.id, owner.id);
             count.fetch_add(1, Ordering::Relaxed);
             let pool = &pool;
-            async move { store::insert(pool, &project).await }
+            async move { store::insert(pool, &project, crate::ScanTrigger::Manual).await }
         };
         tick(&pool, now, dispatch).await.unwrap();
         tick(&pool, now, dispatch).await.unwrap();

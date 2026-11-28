@@ -149,10 +149,10 @@ test.describe('database mobile (phone)', () => {
 
   // A tree row is 36 px on touch: its name sits level with the icon beside it
   // (baseline alignment put it at the row's top, above the icon).
-  test('the Tables sheet: a name sits level with its icon', async ({ page }) => {
+  test('the Tables list: a name sits level with its icon', async ({ page }) => {
     test.skip(redisConnId == null, 'redis-server unavailable');
     await openAndQuery(page);
-    await page.getByRole('button', { name: 'Tables', exact: true }).first().tap();
+    await page.getByRole('button', { name: 'Back to Tables', exact: true }).tap();
     const node = page.locator('.schema-tree .node').filter({ has: page.locator('.node-icon') }).first();
     await expect(node).toBeVisible({ timeout: 15_000 });
     const mid = async (s: string) => { const b = (await node.locator(s).first().boundingBox())!; return b.y + b.height / 2; };

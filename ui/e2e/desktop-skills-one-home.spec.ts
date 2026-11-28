@@ -76,9 +76,9 @@ test('old Settings routes land in Skills Lab and leave the Settings list', async
   await expect(nav.filter({ hasText: /^Skills evaluator$/ })).toHaveCount(0);
 });
 
-test('the Lab ⋯ holds Install all bundled skills and Evaluator defaults', async ({ page }) => {
+test('the Skills ⋯ holds Install all bundled skills; the Lab ⋯ Evaluator defaults', async ({ page }) => {
   await page.goto('/#/skills-eval');
-  await page.getByTestId('lab-more').click();
+  await page.getByTestId('skills-list-more').click();
   const menu = page.getByRole('menu');
   await expect(menu.getByRole('menuitem', { name: /Import a skill/ })).toBeVisible();
   await menu.getByRole('menuitem', { name: /Install all bundled skills/ }).click();
@@ -87,7 +87,7 @@ test('the Lab ⋯ holds Install all bundled skills and Evaluator defaults', asyn
   await confirm.getByRole('button', { name: 'Cancel' }).click();
 
   await page.getByTestId('tab-evaluator').click();
-  await page.getByTestId('lab-more').click();
+  await page.getByTestId('page-header').getByRole('button', { name: 'More actions' }).click();
   await page.getByRole('menu').getByRole('menuitem', { name: /Evaluator defaults/ }).click();
   const sheet = page.getByRole('dialog', { name: 'Evaluator defaults' });
   await expect(sheet.getByTestId('eval-defaults')).toBeVisible();

@@ -30,6 +30,11 @@
   import SITE_CSS from './engine/site.css?raw';
   import SiteCanvas, { type CanvasAction, type SiteDevice } from './SiteCanvas.svelte';
   import LeftPanel, { type LibraryBlock } from './LeftPanel.svelte';
+  import ListDetail from '../../../lib/components/side/ListDetail.svelte';
+  import ListPane from '../../../lib/components/side/ListPane.svelte';
+  import DetailPane from '../../../lib/components/side/DetailPane.svelte';
+  import { DetailOpen } from '../../../lib/components/side/detailOpen.svelte';
+  import Tabs from '../../../lib/components/Tabs.svelte';
   import Inspector from './Inspector.svelte';
   import TemplatePicker from './TemplatePicker.svelte';
   import PreviewModal from './PreviewModal.svelte';
@@ -49,8 +54,12 @@
     /** The view's toolbar notices, and its details panel given this inspector as a "Design" tab. */
     notices?: Snippet;
     details?: Snippet<[Snippet | undefined]>;
+    /** The details pane is showing (the bar's Details toggle). */
+    detailsShown?: boolean;
+    /** Show / hide the details pane (⌥⌘B). */
+    ontoggledetails?: (open: boolean) => void;
   }
-  let { artifact, source, dirty = undefined, readonly = false, compact = false, onchange, notices, details }: Props = $props();
+  let { artifact, source, dirty = undefined, readonly = false, compact = false, onchange, notices, details, detailsShown = false, ontoggledetails }: Props = $props();
 
   // The page stylesheet is injected once into the document (every rule is
   // scoped under .os-*, so it can't touch the app).
@@ -70,7 +79,22 @@
   let issues = $state<SiteIssue[]>([]);
   let undoStack: SiteDoc[] = [];
   let redoStack: SiteDoc[] = [];
-  let narrowPane = $state<'page' | 'blocks' | 'design'>('page');
+  // Panes (design.md): Pages · Layers · Blocks is the list pane (its views
+  // are the header); a phone pushes the canvas once a page or section is
+  // chosen ("‹ Layers"). The Design inspector is the Detail pane (ArtifactView's
+  // details, or a plain one).
+  let phoneOpen = $state(false);
+  const plain = new DetailOpen();
+  const inspShown = $derived(details ? detailsShown : plain.open);
+  function showInsp(open: boolean): void {
+    if (details) ontoggledetails?.(open);
+    else plain.set(open);
+  }
+  const LEFT_TABS = [
+    { id: 'pages', label: 'Pages', icon: 'file', testid: 'site-tab-pages' },
+    { id: 'layers', label: 'Layers', icon: 'layers', testid: 'site-tab-layers' },
+    { id: 'blocks', label: 'Blocks', icon: 'grid', testid: 'site-tab-blocks' },
+  ] as const;
   let canUndo = $state(false);
   let canRedo = $state(false);
   let lastKey: string | null = null;
@@ -198,7 +222,7 @@
   onDestroy(() => siteSelection.clear(artifact.id));
 
   function select(s: string | null, b: string | null): void {
-    if (s) narrowPane = 'design';
+    if (s) phoneOpen = true;
     sectionId = s;
     blockId = s ? b : null;
     if (s && doc) {
@@ -601,12 +625,14 @@
       <button class="icon-btn" onclick={undo} disabled={!canUndo || readonly} aria-label="Undo" title="Undo" aria-keyshortcuts="Meta+z"><Icon name="chevronLeft" size={14} /></button>
       <button class="icon-btn" onclick={redo} disabled={!canRedo || readonly} aria-label="Redo" title="Redo" aria-keyshortcuts="Meta+Shift+z"><Icon name="chevronRight" size={14} /></button>
       {#if findings.some((f) => f.level === 'error')}
-        <button class="chip bad" onclick={() => { select(null, null); narrowPane = 'design'; }} title="Open the checks in the Design panel">
+        <button class="chip bad" onclick={() => { select(null, null); showInsp(true); }} title="Open the checks in the Design panel">
           <Icon name="warning" size={12} /> {findings.filter((f) => f.level === 'error').length} to fix
         </button>
       {/if}
       {#if notices}{@render notices()}{/if}
       <span class="grow"></span>
+      <!-- The Detail pane's toggle (⌥⌘B): the Design inspector and the details. -->
+      <button class="btn small ghost" class:on={inspShown} aria-pressed={inspShown} aria-label={inspShown ? 'Hide design details' : 'Show design details'} title="Design, Otto, versions, links, comments (⌥⌘B)" onclick={() => showInsp(!inspShown)} data-testid="site-details-toggle"><Icon name="info" size={12} /> Details</button>
       <button class="btn small" onclick={() => (previewOpen = true)} disabled={!doc || !doc.pages.length} data-testid="site-preview"><Icon name="play" size={12} /> Preview</button>
       <button class="btn small" onclick={publishMenu} disabled={!doc || !doc.pages.length} aria-haspopup="menu" data-testid="site-publish">
         <Icon name="share" size={12} /> Publish <Icon name="chevronDown" size={12} />
@@ -627,57 +653,6 @@
     {:else if doc.pages.length === 0}
       <TemplatePicker {theme} title={doc.title || artifact.title} {readonly} onpick={pickTemplate} />
     {:else if page}
-      <div class="pane-switch segmented" role="group" aria-label="Site panels">
-        <button aria-pressed={narrowPane === 'page'} class:active={narrowPane === 'page'} onclick={() => (narrowPane = 'page')}>Page</button>
-        <button aria-pressed={narrowPane === 'blocks'} class:active={narrowPane === 'blocks'} onclick={() => { narrowPane = 'blocks'; leftTab = 'blocks'; }}>Blocks</button>
-        <button aria-pressed={narrowPane === 'design'} class:active={narrowPane === 'design'} onclick={() => (narrowPane = 'design')}>Design</button>
-      </div>
-      <div class="work" class:tab-blocks={leftTab === 'blocks'} class:pane-page={narrowPane === 'page'} class:pane-blocks={narrowPane === 'blocks'} class:pane-design={narrowPane === 'design'}>
-        <aside class="left" aria-label="Pages, layers and blocks">
-          <LeftPanel
-            {doc}
-            pageId={page.id}
-            {theme}
-            selectedSection={sectionId}
-            selectedBlock={blockId}
-            {readonly}
-            bind:tab={leftTab}
-            library={libBlocks}
-            libraryState={libState}
-            onpage={(id) => {
-              pageId = id;
-              select(null, null);
-            }}
-            onaddpage={() => void addPage()}
-            onpagemenu={pageMenu}
-            onselect={select}
-            onreorder={(sid, to) => commit(ops.moveSectionTo(doc!, sid, to))}
-            ontogglehidden={(sid) => commit(ops.updateSection(doc!, sid, (s) => (s.hidden = !s.hidden || undefined)))}
-            oninsert={(p) => insert(p)}
-            onloadlibrary={() => void loadLibrary()}
-          />
-        </aside>
-        <section class="canvas" aria-label="Page canvas">
-          <SiteCanvas
-            {doc}
-            {page}
-            {theme}
-            {device}
-            {zoom}
-            still={!playMotion}
-            selectedSection={sectionId}
-            selectedBlock={blockId}
-            {readonly}
-            {domain}
-            embed={embedFn}
-            asset={assetFn}
-            bind:scale
-            onselect={select}
-            onedit={onEdit}
-            onaction={onAction}
-            ondrop={(p, i) => insert(p, i)}
-          />
-        </section>
         {#snippet inspector()}
           <div class="insp-head"><span class="insp-title">Design</span>{#if sectionId || blockId}<button class="linkbtn" onclick={() => select(null, null)}>Page settings</button>{/if}</div>
           <div class="insp-body">
@@ -707,9 +682,75 @@
             />
           </div>
         {/snippet}
-        {#if details}<div class="insp with-details">{@render details(inspector)}</div>
-        {:else}<aside class="insp" aria-label="Design">{@render inspector()}</aside>{/if}
-      </div>
+      <ListDetail
+        module="design"
+        pane="site"
+        name={LEFT_TABS.find((t) => t.id === leftTab)?.label ?? 'Layers'}
+        open={phoneOpen}
+        onback={() => (phoneOpen = false)}
+        defaultWidth={260}
+        testid="site-work"
+      >
+        {#snippet list()}
+          <ListPane testid="site-left">
+            {#snippet views()}
+              <Tabs size="s" label="Site panels" idBase="site" tabs={LEFT_TABS} value={leftTab} onchange={(id) => (leftTab = id)} />
+            {/snippet}
+            <LeftPanel
+              doc={doc!}
+              pageId={page.id}
+              {theme}
+              selectedSection={sectionId}
+              selectedBlock={blockId}
+              {readonly}
+              bind:tab={leftTab}
+              library={libBlocks}
+              libraryState={libState}
+              onpage={(id) => {
+                pageId = id;
+                select(null, null);
+                phoneOpen = true;
+              }}
+              onaddpage={() => void addPage()}
+              onpagemenu={pageMenu}
+              onselect={select}
+              onreorder={(sid, to) => commit(ops.moveSectionTo(doc!, sid, to))}
+              ontogglehidden={(sid) => commit(ops.updateSection(doc!, sid, (s) => (s.hidden = !s.hidden || undefined)))}
+              oninsert={(p) => insert(p)}
+              onloadlibrary={() => void loadLibrary()}
+            />
+          </ListPane>
+        {/snippet}
+        <section class="canvas" aria-label="Page canvas">
+          <SiteCanvas
+            {doc}
+            {page}
+            {theme}
+            {device}
+            {zoom}
+            still={!playMotion}
+            selectedSection={sectionId}
+            selectedBlock={blockId}
+            {readonly}
+            {domain}
+            embed={embedFn}
+            asset={assetFn}
+            bind:scale
+            onselect={select}
+            onedit={onEdit}
+            onaction={onAction}
+            ondrop={(p, i) => insert(p, i)}
+          />
+        </section>
+        {#snippet detail()}
+          {#if details}{@render details(inspector)}
+          {:else}
+            <DetailPane module="design" pane="site-design" title="Design" control={plain}>
+              <div class="insp">{@render inspector()}</div>
+            </DetailPane>
+          {/if}
+        {/snippet}
+      </ListDetail>
     {/if}
   </div>
 
@@ -769,32 +810,22 @@
     background: var(--border);
   }
   .grow { flex: 1; }
-  .work {
-    flex: 1;
-    min-height: 0;
-    display: grid;
-    grid-template-columns: 248px minmax(0, 1fr) 300px;
-    grid-template-rows: minmax(0, 1fr);
-    grid-template-areas: 'left canvas insp';
-  }
-  .left {
-    grid-area: left;
-    min-height: 0;
-    border-inline-end: 1px solid var(--border);
-    background: var(--surface);
-  }
   .canvas {
-    grid-area: canvas;
+    flex: 1;
+    display: flex;
+    flex-direction: column;
     min-width: 0;
     min-height: 0;
   }
+  .canvas > :global(*) {
+    flex: 1;
+    min-height: 0;
+  }
   .insp {
-    grid-area: insp;
+    flex: 1;
     min-height: 0;
     display: flex;
     flex-direction: column;
-    border-inline-start: 1px solid var(--border);
-    background: var(--surface);
   }
   .insp-head {
     display: flex;
@@ -846,48 +877,5 @@
     margin: 16px;
     color: var(--text-dim);
     font-size: var(--fs-s);
-  }
-  .work:has(.with-details) { grid-template-columns: 248px minmax(0, 1fr) 340px; }
-  .insp.with-details > :global(.right) { flex: 1; min-height: 0; border-inline-start: 0; }
-  /* Medium: the right column stacks under the left panel so the canvas keeps its width. */
-  @container site-studio (max-width: 899px) {
-    .work:has(.with-details) { grid-template-columns: 272px minmax(0, 1fr); }
-    .work {
-      grid-template-columns: 272px minmax(0, 1fr);
-      grid-template-rows: minmax(0, 0.9fr) minmax(0, 1.1fr);
-      grid-template-areas: 'left canvas' 'insp canvas';
-    }
-    /* Browsing the block library: give the library most of the column. */
-    .work.tab-blocks {
-      grid-template-rows: minmax(0, 1.8fr) minmax(0, 1fr);
-    }
-    .insp {
-      border-inline-start: 0;
-      border-inline-end: 1px solid var(--border);
-      border-block-start: 1px solid var(--border);
-    }
-  }
-  .pane-switch { display: none; }
-  /* Narrow: show the selected editing panel without stacking it below the board. */
-  @container site-studio (max-width: 699px) {
-    .pane-switch { display: flex; margin: 8px 12px; }
-    .work, .work.tab-blocks {
-      grid-template-columns: minmax(0, 1fr);
-      grid-template-rows: minmax(360px, 1fr);
-      grid-template-areas: 'panel';
-      overflow-y: auto;
-    }
-    .work > .left, .work > .insp, .work > .canvas { grid-area: panel; display: none; }
-    .work.pane-page > .canvas { display: block; }
-    .work.pane-blocks > .left, .work.pane-design > .insp { display: flex; flex-direction: column; }
-    .left,
-    .insp {
-      border: 0;
-      border-block-start: 1px solid var(--border);
-      max-height: none;
-    }
-    .insp-body {
-      overflow: visible;
-    }
   }
 </style>

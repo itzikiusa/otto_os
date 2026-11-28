@@ -20,7 +20,7 @@ async function setup(page: Page) {
   await openApiEditor(page);
   await page.getByRole('button', { name: /^Environment:/ }).click();
   await page.getByRole('menuitem', { name: 'Manage environments…', exact: true }).click();
-  await page.locator('.env-pick').filter({ hasText: 'Environment A' }).click();
+  await page.getByTestId('api-env-row').filter({ hasText: 'Environment A' }).click();
   return { ctx, api, env, workspace, otherWorkspace };
 }
 
@@ -36,7 +36,7 @@ test('environment draft guards request tabs, close, module, workspace, selection
       () => page.locator('.req-tab:not(.special) .req-tab-main').first().click(),
       () => page.getByRole('button', { name: 'Close environments', exact: true }).click(),
       () => home(page).click(),
-      () => page.locator('.env-pick').filter({ hasText: 'Environment B' }).click(),
+      () => page.getByTestId('api-env-row').filter({ hasText: 'Environment B' }).click(),
       () => page.getByRole('button', { name: 'New environment', exact: true }).click(),
       async () => {
         await page.getByRole('button', { name: /^Environment:/ }).click();

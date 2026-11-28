@@ -1,6 +1,10 @@
 <script lang="ts">
   import { announceShown } from '../../../lib/announce.svelte';
   import Tabs, { type TabItem } from '../../../lib/components/Tabs.svelte';
+  import ListDetail from '../../../lib/components/side/ListDetail.svelte';
+  import ListPane from '../../../lib/components/side/ListPane.svelte';
+  import DetailPane from '../../../lib/components/side/DetailPane.svelte';
+  import { DetailOpen } from '../../../lib/components/side/detailOpen.svelte';
   import { toastError } from '../../../lib/toastError';
   import { copyWithToast } from '../../../lib/clipboard';
   import { untrack, type Snippet } from 'svelte';
@@ -144,8 +148,13 @@
   let stateId = $state<string | null>(null);
   let play = $state(false);
   let showSource = $state(false);
-  let showSceneTools = $state(false);
-  let showDetailsDrawer = $state(false);
+  // Panes (design.md): the Scene tools are the Studio's list pane (⋯ › Hide
+  // Scene ⌘B; a phone shows the viewport first, "‹ Scene" goes to the list);
+  // Details is its Detail pane — beside the viewport while it keeps 480 px
+  // (starts open), else a sheet that opens on request.
+  let phoneOpen = $state(true);
+  const details = new DetailOpen();
+  const setDetails = (open: boolean): void => details.set(open);
   let turntable = $state(false);
   // ── 3D Inspection & Polygon Commenting ────────────────────────────────────
   let shading = $state<ShadingMode>('shaded');
@@ -194,11 +203,10 @@
   ]);
   let rightTab = $state<RightTab>(untrack(() => (openOtto ? 'otto' : isModelArtifact && commentsPanel ? 'comments' : 'inspector')));
   $effect(() => {
-    if (openOtto) untrack(() => { rightTab = 'otto'; showDetailsDrawer = true; });
+    if (openOtto) untrack(() => { rightTab = 'otto'; setDetails(true); });
   });
   let vp = $state<ReturnType<typeof Scene3DViewport> | null>(null);
   let vpKey = $state(0); // bumped by the viewport's Retry: a fresh renderer
-  let studioW = $state(0); // ≤ 980: one side pane at a time (with both the canvas would be a sliver)
 
   const pin3dInputs = $derived.by(() => {
     if (!comments) return [];
@@ -224,7 +232,7 @@
     if (!comments) return;
     comments.selectedId = id;
     rightTab = 'comments';
-    showDetailsDrawer = true;
+    setDetails(true);
     const hit = comments.threads.find((t) => t.root.id === id);
     if (hit?.root.pin_3d) vp?.focusAnchor(hit.root.pin_3d);
   }
@@ -655,7 +663,10 @@
     </div>
   </div>
 {:else}
-  <div class="studio3d" class:wide-right={rightTab === 'otto'} class:scene-open={showSceneTools} class:details-open={showDetailsDrawer} bind:clientWidth={studioW} data-testid="studio3d">
+  <div class="studio3d" data-testid="studio3d">
+    <ListDetail module="design" pane="scene3d" name="Scene" open={phoneOpen} onback={() => (phoneOpen = false)} defaultWidth={260}>
+    {#snippet list()}
+    <ListPane>
     <Studio3dLeftPanel
       {doc}
       {isModelArtifact}
@@ -678,16 +689,16 @@
       ongotoview={(c) => vp?.goToView(c)}
       onviewmenu={viewMenu}
     />
+    </ListPane>
+    {/snippet}
 
     <section class="center" aria-label="3D viewport">
       <Studio3dToolbar
         {isModelArtifact}
         canEdit={auth.can('design', 'edit')}
         {canComment}
-        sceneOpen={showSceneTools}
-        detailsOpen={showDetailsDrawer}
-        onscene={() => { showSceneTools = !showSceneTools; if (studioW <= 980) showDetailsDrawer = false; }}
-        ondetails={() => { showDetailsDrawer = !showDetailsDrawer; if (studioW <= 980) showSceneTools = false; }}
+        detailsOpen={details.open}
+        ondetails={() => details.toggle()}
         ongenerate={generateMenu}
         {exportItems}
         {pipelineItems}
@@ -787,8 +798,11 @@
       {/if}
     </section>
 
-    <aside class="right" id="s3d-details-panel" aria-label="Details">
-      <Tabs label="Details panel" idBase="s3d" tabs={rightTabs} value={rightTab} onchange={(id) => (rightTab = id)} />
+    {#snippet detail()}
+    <DetailPane module="design" pane="details3d" title="Details" control={details} testid="s3d-details-panel">
+      {#snippet views()}
+        <div class="s3d-views"><Tabs size="s" label="Details panel" idBase="s3d" tabs={rightTabs} value={rightTab} onchange={(id) => (rightTab = id)} /></div>
+      {/snippet}
       <div class="panel" role="tabpanel" id="s3d-panel-{rightTab}" aria-labelledby="s3d-tab-{rightTab}">
         {#if rightTab === 'inspector'}
           <Inspector {doc} bind:selectedId onchange={edit} {readonly} {swatches} brandName={kit?.label ?? null} {colors} {editState} />
@@ -820,7 +834,9 @@
           {@render links()}
         {/if}
       </div>
-    </aside>
+    </DetailPane>
+    {/snippet}
+    </ListDetail>
   </div>
   <input class="hidden-file" type="file" accept=".glb,.gltf,model/gltf-binary,model/gltf+json" bind:this={glbInput} onchange={(e) => void uploadModel(e)} />
 {/if}
@@ -850,23 +866,11 @@
 />
 
 <style>
+  /* Scene (list pane) | viewport | Details (Detail pane): a ListDetail row. */
   .studio3d {
     flex: 1;
     min-height: 0;
-    display: grid;
-    grid-template-columns: 248px minmax(0, 1fr) 320px;
-    container-type: inline-size;
-  }
-  /* The Otto tab holds a conversation and a variants tray: a little wider. */
-  .studio3d.wide-right {
-    grid-template-columns: 248px minmax(0, 1fr) 360px;
-  }
-  .right {
-    min-height: 0;
-    background: var(--surface);
     display: flex;
-    flex-direction: column;
-    border-inline-start: 1px solid var(--border);
   }
   .block-head {
     display: flex;
@@ -882,6 +886,7 @@
     color: var(--text-dim);
   }
   .center {
+    flex: 1;
     min-width: 0;
     min-height: 0;
     display: flex;
@@ -961,8 +966,13 @@
     inset-inline-start: 12px;
     max-width: calc(100% - 24px);
   }
+  .s3d-views {
+    display: flex;
+    min-width: 0;
+  }
+  /* Touch: finger-sized tabs in the Details header. */
   @media (pointer: coarse) {
-    .right :global(.otab) { min-block-size: 40px; }
+    .s3d-views :global(.otab) { min-block-size: 40px; }
   }
   .panel {
     flex: 1;
@@ -1048,67 +1058,5 @@
   }
   .hidden-file {
     display: none;
-  }
-  /* Narrow panes put the side panes behind the toolbar's Scene / Details toggles. */
-  @container (max-width: 980px) {
-    .studio3d :global(.scene-toggle) { display: inline-flex; }
-    .studio3d,
-    .studio3d.wide-right {
-      grid-template-columns: minmax(0, 1fr) 300px;
-    }
-    .studio3d > :global(.left) {
-      display: none;
-    }
-    .studio3d.scene-open :global(.left) { display: flex; grid-column: 1 / -1; max-block-size: 320px; border-block-end: 1px solid var(--border); }
-    .studio3d.scene-open { grid-template-rows: auto minmax(360px, 1fr); }
-  }
-  /* Tablets and phone landscape: the canvas comes first. Both panes collapse to
-     toggles and open as side columns, so the model never shrinks to a sliver
-     between two docked panes. */
-  @container (max-width: 1180px) {
-    @media (pointer: coarse), (max-height: 500px) {
-      .studio3d :global(.scene-toggle),
-      .studio3d :global(.details-toggle) { display: inline-flex; }
-      .studio3d,
-      .studio3d.wide-right,
-      .studio3d.scene-open { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 1fr); }
-      .studio3d > :global(.left),
-      .right { display: none; }
-      .studio3d.scene-open :global(.left) { display: flex; grid-column: auto; max-block-size: none; border-block-end: 0; }
-      .studio3d.scene-open { grid-template-columns: 248px minmax(0, 1fr); }
-      .studio3d.details-open .right { display: flex; }
-      .studio3d.details-open { grid-template-columns: minmax(0, 1fr) 320px; }
-      .studio3d.scene-open.details-open { grid-template-columns: 248px minmax(0, 1fr) 320px; }
-    }
-  }
-  /* Phone and tablet portrait: one column. An open pane takes the lower half
-     under the canvas (one at a time), so the toolbar never moves and the model
-     stays in view while you edit it. */
-  @container (max-width: 768px) {
-    .studio3d :global(.details-toggle) { display: inline-flex; }
-    .studio3d,
-    .studio3d.wide-right,
-    .studio3d.scene-open,
-    .studio3d.details-open,
-    .studio3d.scene-open.details-open {
-      grid-template-columns: minmax(0, 1fr);
-      grid-template-rows: minmax(0, 1fr);
-    }
-    .right { display: none; }
-    .studio3d.scene-open,
-    .studio3d.details-open {
-      grid-template-rows: minmax(0, 1fr) minmax(0, 1fr);
-    }
-    .studio3d.scene-open :global(.left),
-    .studio3d.details-open .right {
-      display: flex;
-      order: 2;
-      grid-column: auto;
-      max-block-size: none;
-      border-inline: 0;
-      border-block-start: 1px solid var(--border);
-    }
-    /* A jump to a comment or Otto opens Details while Scene is open: Details wins. */
-    .studio3d.scene-open.details-open :global(.left) { display: none; }
   }
 </style>

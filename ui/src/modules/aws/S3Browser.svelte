@@ -22,15 +22,14 @@
   import S3Preview from './S3Preview.svelte';
   import S3TransferBars from './S3TransferBars.svelte';
   import { router } from '../../lib/router.svelte';
-  import { ctxMenu } from '../../lib/contextmenu.svelte';
+  import { ctxMenu, type MenuItem } from '../../lib/contextmenu.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import { copyTextOrThrow } from '../../lib/clipboard';
-  import { viewport } from '../../lib/stores/viewport.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
   import Skeleton from '../../lib/components/Skeleton.svelte';
   import Icon from '../../lib/components/Icon.svelte';
-  import Modal from '../../lib/components/Modal.svelte';
+  import DetailPane from '../../lib/components/side/DetailPane.svelte';
   import FolderPicker from '../../lib/components/FolderPicker.svelte';
   import { TableWindow } from '../../lib/tableWindow.svelte';
   import ViewToolbar from './ViewToolbar.svelte';
@@ -274,7 +273,15 @@
     return parts.map((p, i) => ({ label: p, prefix: parts.slice(0, i + 1).join('/') + '/' }));
   });
 
-  // ── preview drawer ──
+  // ── preview (the Detail pane) ──
+  function previewMenu(): MenuItem[] {
+    const p = preview;
+    if (!p) return [];
+    return [
+      { label: 'Copy S3 URI', icon: 'copy', action: () => void copy(`s3://${bucket}/${p.obj.key}`, 'S3 URI') },
+      { label: 'Copy presigned link', icon: 'link', disabled: !canRead, action: () => void presign(p.obj) },
+    ];
+  }
   let preview = $state<{ obj: S3Object; data: S3PreviewResp | null; loading: boolean; error: string } | null>(null);
   const selKey = $derived(preview?.obj.key ?? '');
   async function openPreview(o: S3Object): Promise<void> {
@@ -651,7 +658,6 @@
     role="group"
     aria-label="Objects — drop files here to upload"
     class="split"
-    class:with-drawer={preview !== null && !viewport.isMobile}
     class:drag-over={dragOver}
     ondragover={onDragOver}
     ondragleave={(e) => { if (e.currentTarget === e.target) dragOver = false; }}
@@ -748,18 +754,21 @@
       </div>
     {/if}
 
-    {#if preview && !viewport.isMobile}
-      <aside class="drawer" aria-label="Object preview">
-        {@render previewBody()}
-      </aside>
-    {/if}
-  </div>
-
-  {#if preview && viewport.isMobile}
-    <Modal title={leaf(preview.obj.key)} width={720} onclose={() => (preview = null)}>
+    <DetailPane
+      module="aws"
+      pane="s3-preview"
+      title="Object preview"
+      open={preview !== null}
+      onclose={() => { preview = null; void focusAppContent(); }}
+      menu={previewMenu}
+      testid="aws-s3-preview"
+    >
+      {#snippet action()}
+        <button class="icon-btn" onclick={() => preview && void download(preview.obj)} aria-label="Download object" title="Download"><Icon name="arrowDown" size={14} /></button>
+      {/snippet}
       {@render previewBody()}
-    </Modal>
-  {/if}
+    </DetailPane>
+  </div>
 {/if}
 
 <S3TransferBars {uploading} download={dl} oncanceldownload={() => dl?.ctrl.abort()} />
@@ -778,15 +787,8 @@
     <div class="pv-head">
       <strong class="mono" title={preview.obj.key}>{leaf(preview.obj.key)}</strong>
       <span class="dim">{fmtBytes(preview.obj.size)} · {fmtDate(preview.obj.last_modified)}</span>
-      <div class="pv-actions">
-        <button class="btn small" onclick={() => preview && void download(preview.obj)}><Icon name="arrowDown" size={12} /> Download</button>
-        <button class="btn small" onclick={() => preview && void copy(`s3://${bucket}/${preview.obj.key}`, 'S3 URI')}><Icon name="copy" size={12} /> URI</button>
-        <button class="btn small" onclick={() => preview && void presign(preview.obj)} disabled={!canRead}><Icon name="link" size={12} /> Link</button>
-        {#if !viewport.isMobile}
-          <button class="icon-btn" onclick={() => { preview = null; void focusAppContent(); }} aria-label="Close preview" title="Close preview"><Icon name="x" size={13} /></button>
-        {/if}
-      </div>
     </div>
+    <div class="pv-wrap">
     <S3Preview
       accountId={account.id}
       {bucket}
@@ -797,6 +799,7 @@
       onretry={() => preview && void openPreview(preview.obj)}
       ondownload={() => preview && void download(preview.obj)}
     />
+    </div>
   {/if}
 {/snippet}
 
@@ -902,39 +905,31 @@
   .sep {
     color: var(--text-dim);
   }
+  /* The listing | the preview (Detail pane), one row. */
   .split {
     flex: 1;
     min-height: 0;
-    display: grid;
-    grid-template-columns: minmax(0, 1fr);
-  }
-  .split.with-drawer {
-    grid-template-columns: minmax(0, 1fr) minmax(280px, 42%);
-  }
-  .drawer {
-    border-inline-start: 1px solid var(--border);
-    background: var(--surface);
-    min-height: 0;
-    overflow: auto;
-    padding: 10px 12px;
     display: flex;
-    flex-direction: column;
-    gap: 8px;
+  }
+  .split > .tbl-wrap {
+    flex: 1;
+    min-width: 0;
   }
   .pv-head {
     display: flex;
     flex-direction: column;
     gap: 4px;
+    padding: 10px 16px 4px;
     font-size: var(--fs-m);
   }
   .pv-head strong {
     word-break: break-all;
   }
-  .pv-actions {
+  .pv-wrap {
     display: flex;
-    gap: 6px;
-    align-items: center;
-    flex-wrap: wrap;
+    flex-direction: column;
+    gap: 8px;
+    padding: 4px 16px 12px;
   }
   .split {
     position: relative;

@@ -1,5 +1,5 @@
 // The git graph's viewport (arch-1-09: split out of GraphView.svelte): the
-// phone/tablet breakpoint, the lane layout over the loaded history, the row
+// lane layout over the loaded history, the row
 // window (virtualization) at a fixed pitch, scroll-driven paging and the
 // jump-to-commit scroll that lands a row which isn't rendered yet. GraphView
 // binds the scroller and the top spacer into it and renders `visibleRows`.
@@ -7,6 +7,7 @@
 import { tick } from 'svelte';
 import type { CommitInfo } from '../../../lib/api/types';
 import { listRange, type ListRange } from '../../../lib/listWindow.svelte';
+import { viewport } from '../../../lib/stores/viewport.svelte';
 import { LANE_W, MAX_GUTTER_W, layoutLanes, type LaneMemo, type LaneRow } from '../graph-lanes';
 
 export interface GraphViewportHost {
@@ -25,23 +26,6 @@ export type GraphViewport = ReturnType<typeof createGraphViewport>;
 export const OVERSCAN = 25;
 
 export function createGraphViewport(h: GraphViewportHost) {
-  // ── Mobile (phone) layout ─────────────────────────────────────────────────
-  // On a phone the 3-pane desktop layout (refs | graph | diff) can't fit, so
-  // the panes stack as COLLAPSIBLE accordion sections, each independently
-  // scrollable. Tracked via matchMedia so the same component serves both
-  // layouts without duplicating markup. The breakpoint is 1024px so it catches
-  // phone portrait + landscape AND the tablet range (iPad portrait 834,
-  // real-phone landscape 932) — the desktop 3-pane can't fit there without the
-  // diff getting clipped off-screen. Desktop (≥1025) keeps the 3-pane view.
-  let isMobile = $state(false);
-  $effect(() => {
-    const mq = window.matchMedia('(max-width: 1024px)');
-    const sync = () => (isMobile = mq.matches);
-    sync();
-    mq.addEventListener('change', sync);
-    return () => mq.removeEventListener('change', sync);
-  });
-
   /** The scrolling commit list — also the element rows are looked up inside
    *  when jumping to a ref. */
   let panelEl = $state<HTMLDivElement | null>(null);
@@ -59,10 +43,10 @@ export function createGraphViewport(h: GraphViewportHost) {
   // gutter is drawn at the same height), so there is one source of truth:
   //  - desktop 32px: two text lines (subject + sha/author/date) need ~29px; the
   //    old 28px pitch jammed them together.
-  //  - ≤1024px 46px touch rows: these used to be CSS-only while the windowing
-  //    math and the gutter stayed at 28 — lanes broke into dashes between rows
-  //    and the spacers / jump-to-ref target drifted by 18px per row.
-  const rowH = $derived(isMobile ? 46 : 32);
+  //  - phone / tablet 46px touch rows: these used to be CSS-only while the
+  //    windowing math and the gutter stayed at 28 — lanes broke into dashes
+  //    between rows and the spacers / jump-to-ref target drifted by 18px per row.
+  const rowH = $derived(viewport.isDesktop ? 32 : 46);
   let viewTop = $state(0);
   let viewH = $state(0);
 
@@ -75,7 +59,7 @@ export function createGraphViewport(h: GraphViewportHost) {
   }
 
   // Keep `viewH` correct across panel resizes (detail pane opening, window
-  // resize, mobile accordion) — a stale height renders too few or too many rows.
+  // resize, the phone push) — a stale height renders too few or too many rows.
   $effect(() => {
     const el = panelEl;
     if (!el) return;
@@ -114,7 +98,7 @@ export function createGraphViewport(h: GraphViewportHost) {
   }
 
   /** A graph nobody can see (window hidden, another module/sub-tab covering
-   *  it, the phone accordion folded) parks its auto-fetch re-syncs. */
+   *  it, the phone's Branches list on screen) parks its auto-fetch re-syncs. */
   function visible(): boolean {
     if (typeof document !== 'undefined' && document.hidden) return false;
     const el = panelEl;
@@ -220,7 +204,6 @@ export function createGraphViewport(h: GraphViewportHost) {
   }
 
   return {
-    get isMobile() { return isMobile; },
     get panelEl() { return panelEl; },
     set panelEl(v: HTMLDivElement | null) { panelEl = v; },
     get topSpacerEl() { return topSpacerEl; },

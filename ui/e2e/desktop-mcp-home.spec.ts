@@ -82,7 +82,7 @@ test('a new request appears without a reload, in words, and Approve clears it', 
   await expect(row).toContainText('Approval');
   await expect(row).toContainText('asks');
   await expect(row).toContainText('otto.create_pr');
-  await expect(page.getByTestId('mcp-pending-badge')).toBeVisible();
+  await expect(page.getByTestId('mcp-nav-home').locator('.otab-count')).toBeVisible();
   await row.getByRole('button', { name: 'Approve', exact: true }).click();
   await expect(row).toHaveCount(0);
   const { ctx } = await apiCtx();

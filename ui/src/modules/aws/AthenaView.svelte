@@ -14,7 +14,6 @@
   import type { Completion, CompletionContext, CompletionResult } from '@codemirror/autocomplete';
   import { aws } from '../../lib/stores/aws.svelte';
   import { awsApi, isLoginRequired } from '../../lib/api/aws';
-  import { viewport } from '../../lib/stores/viewport.svelte';
   import { ctxMenu } from '../../lib/contextmenu.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import { copyTextOrThrow } from '../../lib/clipboard';
@@ -23,6 +22,8 @@
   import LoadState from '../../lib/components/LoadState.svelte';
   import Skeleton from '../../lib/components/Skeleton.svelte';
   import Icon from '../../lib/components/Icon.svelte';
+  import ListDetail from '../../lib/components/side/ListDetail.svelte';
+  import ListPane from '../../lib/components/side/ListPane.svelte';
   import ResultsGrid from '../database/ResultsGrid.svelte';
   import RegionPicker from './RegionPicker.svelte';
   import { athenaCostUsd, fmtAgo, fmtBytes, fmtMs, awsErrorText } from './util';
@@ -388,6 +389,7 @@
   }
 
   function insertTable(db: string, t: AthenaTable): void {
+    phoneOpen = true;
     sql = `SELECT *\nFROM ${db}.${t.name}\nLIMIT 100;`;
     database = db;
   }
@@ -423,91 +425,91 @@
     stopPoll();
   });
   const loginNeeded = $derived(isLoginRequired(new Error(catError)));
-  let treeOpen = $state(!viewport.isMobile);
+  // Phone: the editor is the page; "‹ Catalog" shows the catalog (the list
+  // page), and putting a table into the editor brings the editor back.
+  let phoneOpen = $state(true);
   $effect(() => { if (statusUnknown) announce(`Query status unknown. ${statusUnknown}`); });
 </script>
 
-<div class="ath" class:mobile={viewport.isMobile}>
-  {#if treeOpen}
-    <aside class="tree" aria-label="Athena catalog">
-      <div class="tree-head">
-        <label class="tf">
-          <Icon name="search" size={12} />
-          <input dir="ltr" type="search" bind:value={treeFilter} placeholder="Filter catalog…" aria-label="Filter catalog" />
-        </label>
-        <button class="icon-btn" onclick={() => void loadCatalog()} title="Refresh catalog" aria-label="Refresh catalog" disabled={catLoading}><Icon name="refresh" size={12} /></button>
-        {#if viewport.isMobile}
-          <button class="icon-btn" onclick={() => (treeOpen = false)} aria-label="Hide catalog" title="Hide catalog"><Icon name="x" size={12} /></button>
-        {/if}
-      </div>
-      {#if catLoading && !catalog}
-        <div class="pad"><Skeleton rows={6} label="the data catalog" /></div>
-      {:else if catError && !catalog}
-        <LoadState what="the catalog" error={awsErrorText(catError)} empty onretry={() => void loadCatalog()}>{#snippet errorActions()}{#if loginNeeded}<button class="btn primary" onclick={onsignin}><Icon name="key" size={12} /> Sign in</button>{/if}{/snippet}</LoadState>
+{#snippet catalogFilter()}
+  <label class="input-group">
+    <Icon name="search" size={12} />
+    <input dir="ltr" type="search" bind:value={treeFilter} placeholder="Filter catalog…" aria-label="Filter catalog" />
+  </label>
+{/snippet}
+
+<ListDetail module="aws" pane="athena" name="Catalog" open={phoneOpen} onback={() => (phoneOpen = false)}>
+  {#snippet list()}
+    <ListPane
+      searchRow={catalogFilter}
+      menu={() => [{ label: 'Refresh catalog', icon: 'refresh', disabled: catLoading, action: () => void loadCatalog() }]}
+      loading={catLoading && !catalog}
+      testid="athena-catalog"
+    >
+      {#if catError && !catalog}
+        <LoadState what="the catalog" error={awsErrorText(catError)} empty variant="compact" onretry={() => void loadCatalog()}>{#snippet errorActions()}{#if loginNeeded}<button class="btn primary small" onclick={onsignin}><Icon name="key" size={12} /> Sign in</button>{/if}{/snippet}</LoadState>
       {:else}
-        <ul class="dbs">
+        <div role="tree" aria-label="Athena catalog">
           {#each treeDbs as db (db)}
             {@const open = openDbs[db] === true || treeFilter.trim() !== ''}
-            <li>
-              <button class="node" class:cur={db === database} onclick={() => void toggleDb(db)} aria-expanded={open}>
+            <div class="side-row">
+              <button class="side-row-main" data-side-row data-side-toggle role="treeitem" aria-level={1} aria-selected={db === database} aria-expanded={open} onclick={() => void toggleDb(db)}>
                 <Icon name={open ? 'chevronDown' : 'chevronRight'} size={12} />
-                <Icon name="db" size={12} />
-                <span class="nlabel">{db}</span>
+                <Icon name="db" size={14} />
+                <span class="side-row-title" class:cur={db === database}>{db}</span>
               </button>
-              {#if open}
-                {#if tablesLoading[db]}
-                  <div class="sub dim">loading…</div>
-                {:else if !catalog?.tables[db] && tablesError[db]}
-                  <LoadState what="the tables in {db}" error={awsErrorText(tablesError[db])} empty variant="compact" onretry={() => void toggleDb(db, true)} />
-                {:else if !catalog?.tables[db]}
-                  <div class="sub"><button class="link" onclick={() => void toggleDb(db, true)}>load tables</button></div>
-                {:else}
-                  <ul class="tables">
-                    {#each treeTables(db) as t (t.name)}
-                      {@const tk = `${db}.${t.name}`}
-                      {@const topen = openTables[tk] === true}
-                      <li>
-                        <button use:rowMenu
-                          class="node"
-                          onclick={() => (openTables = { ...openTables, [tk]: !topen })}
-                          ondblclick={() => insertTable(db, t)}
-                          oncontextmenu={(e) => tableMenu(e, db, t)}
-                          aria-expanded={topen}
-                          title={`${tk} · double-click to SELECT`}
-                        >
-                          <Icon name={topen ? 'chevronDown' : 'chevronRight'} size={12} />
-                          <Icon name="grid" size={12} />
-                          <span class="nlabel">{t.name}</span>
-                          <span class="dim cnt">{t.columns.length}</span>
-                        </button>
-                        {#if topen}
-                          <ul class="cols">
-                            {#each t.columns as c (c.name)}
-                              <li class="col"><span class="mono">{c.name}</span><span class="dim">{c.type}</span></li>
-                            {/each}
-                          </ul>
-                        {/if}
-                      </li>
-                    {:else}
-                      <li class="sub dim">no tables</li>
+            </div>
+            {#if open}
+              {#if tablesLoading[db]}
+                <div class="sub dim">loading…</div>
+              {:else if !catalog?.tables[db] && tablesError[db]}
+                <LoadState what="the tables in {db}" error={awsErrorText(tablesError[db])} empty variant="compact" onretry={() => void toggleDb(db, true)} />
+              {:else if !catalog?.tables[db]}
+                <div class="sub"><button class="link" onclick={() => void toggleDb(db, true)}>load tables</button></div>
+              {:else}
+                {#each treeTables(db) as t (t.name)}
+                  {@const tk = `${db}.${t.name}`}
+                  {@const topen = openTables[tk] === true}
+                  <div class="side-row" style:--side-depth={1}>
+                    <button use:rowMenu
+                      class="side-row-main"
+                      data-side-row
+                      data-side-toggle
+                      role="treeitem"
+                      aria-level={2}
+                      aria-selected="false"
+                      aria-expanded={topen}
+                      onclick={() => (openTables = { ...openTables, [tk]: !topen })}
+                      ondblclick={() => insertTable(db, t)}
+                      oncontextmenu={(e) => tableMenu(e, db, t)}
+                      title={`${tk} · double-click to SELECT`}
+                    >
+                      <Icon name={topen ? 'chevronDown' : 'chevronRight'} size={12} />
+                      <Icon name="grid" size={14} />
+                      <span class="side-row-title">{t.name}</span>
+                      <span class="side-row-trailing">{t.columns.length}</span>
+                    </button>
+                  </div>
+                  {#if topen}
+                    {#each t.columns as c (c.name)}
+                      <div class="col"><span class="mono">{c.name}</span><span class="dim">{c.type}</span></div>
                     {/each}
-                  </ul>
-                {/if}
+                  {/if}
+                {:else}
+                  <div class="sub dim">no tables</div>
+                {/each}
               {/if}
-            </li>
+            {/if}
           {:else}
-            <li class="sub dim">{treeFilter ? 'No matches.' : 'No databases.'}</li>
+            <div class="sub dim">{treeFilter ? 'No matches.' : 'No databases.'}</div>
           {/each}
-        </ul>
+        </div>
       {/if}
-    </aside>
-  {/if}
+    </ListPane>
+  {/snippet}
 
   <section class="main">
     <div class="bar">
-      {#if viewport.isMobile && !treeOpen}
-        <button class="icon-btn" onclick={() => (treeOpen = true)} aria-label="Show catalog" title="Catalog"><Icon name="sidebar" size={13} /></button>
-      {/if}
       <RegionPicker {account} service="athena" bind:region />
       <label class="sel"><span class="lbl">Workgroup</span>
         <select bind:value={workgroup} aria-label="Workgroup">
@@ -619,121 +621,19 @@
       {/if}
     </div>
   </section>
-</div>
+</ListDetail>
 
 <style>
-  .ath {
-    flex: 1;
-    min-height: 0;
-    position: relative; /* scopes the phone catalog overlay to this pane */
-    display: grid;
-    grid-template-columns: minmax(200px, 240px) minmax(0, 1fr);
-  }
-  .ath.mobile {
-    grid-template-columns: minmax(0, 1fr);
-  }
-  .ath.mobile .tree {
-    position: absolute;
-    inset: 0;
-    z-index: 5;
-    background: var(--surface);
-  }
-  .tree {
-    border-inline-end: 1px solid var(--border);
-    display: flex;
-    flex-direction: column;
-    min-height: 0;
-    overflow: hidden;
-    background: var(--bg-sidebar);
-    font-size: var(--fs-m);
-  }
-  .tree-head {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    padding: 6px 8px;
-    border-bottom: 1px solid var(--border);
-  }
-  .tf {
-    display: flex;
-    align-items: center;
-    gap: 4px;
-    flex: 1;
-    height: 26px;
-    padding: 0 6px;
-    border: 1px solid var(--border);
-    border-radius: var(--radius-m);
-    background: var(--bg);
-    color: var(--text-dim);
-  }
-  .tf:focus-within {
-    border-color: var(--accent-text);
-    box-shadow: 0 0 0 3px var(--accent-soft-strong);
-  }
-  .tf input {
-    flex: 1;
-    min-width: 0;
-    border: 0;
-    background: transparent;
-    color: var(--text);
-    font: inherit;
-    font-size: var(--fs-s);
-    outline: none;
-  }
-  .dbs,
-  .tables,
-  .cols {
-    list-style: none;
-    margin: 0;
-    padding: 0;
-  }
-  .dbs {
-    overflow: auto;
-    flex: 1;
-    padding: 4px 0;
-  }
-  .node {
-    display: flex;
-    align-items: center;
-    gap: 4px;
-    width: 100%;
-    padding: 2px 8px;
-    border: 0;
-    background: transparent;
-    color: var(--text);
-    text-align: start;
-    cursor: pointer;
-    font: inherit;
-    font-size: var(--fs-m);
-  }
-  .node:hover {
-    background: var(--hover);
-  }
-  .node.cur .nlabel {
+  .cur {
     font-weight: 600;
-  }
-  .nlabel {
-    flex: 1;
-    min-width: 0;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-  .cnt {
-    font-size: var(--fs-xs);
-  }
-  .tables .node {
-    padding-inline-start: 22px;
-  }
-  .cols {
-    padding-block: 0 2px; padding-inline: 44px 0;
   }
   .col {
     display: flex;
     justify-content: space-between;
     gap: 8px;
+    padding-block: 1px;
+    padding-inline: 52px 8px;
     font-size: var(--fs-s);
-    padding-block: 1px; padding-inline: 0 8px;
     overflow: hidden;
   }
   .col span {
@@ -742,7 +642,8 @@
     white-space: nowrap;
   }
   .sub {
-    padding-block: 2px; padding-inline: 24px 8px;
+    padding-block: 2px;
+    padding-inline: 32px 8px;
     font-size: var(--fs-s);
   }
   .dim {
@@ -752,6 +653,7 @@
     padding: 10px;
   }
   .main {
+    flex: 1;
     display: flex;
     flex-direction: column;
     min-width: 0;

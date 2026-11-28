@@ -61,7 +61,7 @@ test('R1-013: a duplicate id\'s /pr/<n> opens the registered repo\'s pull reques
   await expect(activeTab(page)).toContainText('r1-link2-b', { timeout: 10_000 });
   await go(page, '#/git/' + dup + '/pr/7');
   await expect(activeTab(page)).toContainText('r1-link2-a', { timeout: 10_000 });
-  await expect(page.locator('.git-views .rv-tab[aria-selected="true"]')).toContainText('Pull requests');
+  await expect(page.locator('.git-views [role="tab"][aria-selected="true"]')).toContainText('Pull requests');
 });
 
 test('R1-013: a duplicate-id lookup that answers after you moved on goes nowhere', async ({ page }) => {
@@ -153,8 +153,8 @@ test('R1-045: Pull requests and back mid-stream: the draft keeps streaming into 
   await body.fill('');
   await card.getByRole('button', { name: 'Draft from the diff' }).click();
   await expect(subject).toHaveValue('feat(app): greet the world', { timeout: 10_000 });
-  await page.locator('.git-views .rv-tab', { hasText: 'Pull requests' }).click();
-  await page.locator('.git-views .rv-tab', { hasText: 'History' }).click();
+  await page.locator('.git-views [role="tab"]', { hasText: 'Pull requests' }).click();
+  await page.locator('.git-views [role="tab"]', { hasText: 'History' }).click();
   await expect(page.getByTestId('commit-card').locator('.body-input')).toHaveValue('- say hello world', { timeout: 15_000 });
   await expect(replaceAsk(page)).toHaveCount(0);
 });
@@ -165,9 +165,9 @@ test('R1-045: a piece that streams while on Pull requests is caught up on return
   await body.fill('');
   await card.getByRole('button', { name: 'Draft from the diff' }).click();
   await expect(subject).toHaveValue('feat(app): greet the world', { timeout: 10_000 });
-  await page.locator('.git-views .rv-tab', { hasText: 'Pull requests' }).click();
+  await page.locator('.git-views [role="tab"]', { hasText: 'Pull requests' }).click();
   await page.waitForTimeout(2000); // ui-guards: allow — the body's first piece lands while away (1.5 s apart)
-  await page.locator('.git-views .rv-tab', { hasText: 'History' }).click();
+  await page.locator('.git-views [role="tab"]', { hasText: 'History' }).click();
   const back = page.getByTestId('commit-card');
   await expect(back.locator('.body-input')).toHaveValue(/^- say hello/, { timeout: 3000 });
   await expect(back.locator('.body-input')).toHaveValue('- say hello world', { timeout: 15_000 });
@@ -181,9 +181,9 @@ test('R1-045: a draft that finishes while on Pull requests lands on return witho
   await body.fill('');
   await card.getByRole('button', { name: 'Draft from the diff' }).click();
   await expect(subject).toHaveValue('feat(app): greet the world', { timeout: 10_000 });
-  await page.locator('.git-views .rv-tab', { hasText: 'Pull requests' }).click();
+  await page.locator('.git-views [role="tab"]', { hasText: 'Pull requests' }).click();
   await page.waitForTimeout(6000); // ui-guards: allow — the rest streams and the draft ends while away
-  await page.locator('.git-views .rv-tab', { hasText: 'History' }).click();
+  await page.locator('.git-views [role="tab"]', { hasText: 'History' }).click();
   await expect(page.getByTestId('commit-card').locator('.body-input')).toHaveValue('- say hello world', { timeout: 10_000 });
   await page.waitForTimeout(500); // ui-guards: allow — a confirm would open now
   await expect(replaceAsk(page)).toHaveCount(0);

@@ -7,6 +7,9 @@
   import LoadState from '../../lib/components/LoadState.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import Icon from '../../lib/components/Icon.svelte';
+  import ListPane from '../../lib/components/side/ListPane.svelte';
+  import SideRow from '../../lib/components/side/SideRow.svelte';
+  import SideSection from '../../lib/components/side/SideSection.svelte';
   import Badge from '../../lib/components/Badge.svelte';
   import EnvBadge from '../../lib/components/EnvBadge.svelte';
   import PathField from '../../lib/components/PathField.svelte';
@@ -287,74 +290,52 @@
       </div>
 
       <div class="ssh-grid">
-        <aside class="ssh-rail" aria-label="Target machines">
-          <button
-            type="button"
-            class="ssh-host-btn"
-            class:is-selected={mode === 'local'}
-            aria-pressed={mode === 'local'}
-            onclick={pickLocalMode}
-          >
-            <span class="ssh-host-icon" aria-hidden="true">
-              <Icon name="ide" size={16} />
-            </span>
-            <span class="ssh-host-copy">
-              <span class="ssh-host-name">Local workspace</span>
-              <span class="ssh-host-sub">This Mac ({ide.targetOs || 'macos'} · {ide.targetArch || 'arm64'})</span>
-            </span>
-          </button>
-
-          <div class="ssh-rail-sep">
-            <span class="ssh-sec-title">Saved SSH hosts</span>
-            <button type="button" class="btn small ghost" onclick={openConnectionsPage}>
-              <Icon name="plug" size={12} />
-              Connections
-            </button>
-          </div>
-
-          <LoadState
-            what="SSH connections"
-            variant="compact"
-            loading={connsLoading}
-            error={connsError}
-            empty={sshConns.length === 0}
-            onretry={loadSshConnections}
-          >
-            {#snippet emptyView()}
-              <EmptyState
-                icon="server"
-                title="No SSH hosts yet"
-                body="Add an SSH profile in Connections to edit, build, test, and debug remote projects."
-                actionLabel="Add SSH host…"
-                actionKind="secondary"
-                onaction={openConnectionsPage}
-              />
-            {/snippet}
-
-            <div class="ssh-conn-list">
-              {#each sshConns as conn (conn.id)}
-                <button
-                  type="button"
-                  class="ssh-host-btn"
-                  class:is-selected={mode === 'ssh' && selectedConn?.id === conn.id}
-                  aria-pressed={mode === 'ssh' && selectedConn?.id === conn.id}
-                  onclick={() => pickSshHost(conn)}
-                >
-                  <span class="ssh-host-icon" aria-hidden="true">
-                    <Icon name="server" size={16} />
-                  </span>
-                  <span class="ssh-host-copy">
-                    <span class="ssh-host-top">
-                      <span class="ssh-host-name">{conn.name}</span>
-                      <EnvBadge env={conn.environment} readOnly={conn.read_only} />
-                    </span>
-                    <span class="ssh-host-sub ssh-mono" dir="ltr">{connEndpointText(conn)}</span>
-                  </span>
+        <!-- The machines are a list (the shared pane, rows and keyboard walk). -->
+        <div class="ssh-rail">
+          <ListPane name="Target machines">
+            <SideRow icon="ide" title="Local workspace" meta={`This Mac (${ide.targetOs || 'macos'} · ${ide.targetArch || 'arm64'})`} selected={mode === 'local'} onclick={pickLocalMode} />
+            <SideSection title="Saved SSH hosts" count={connsLoading || connsError ? null : sshConns.length} foldable={false}>
+              {#snippet actions()}
+                <button type="button" class="btn small ghost" onclick={openConnectionsPage}>
+                  <Icon name="plug" size={12} />
+                  Connections
                 </button>
-              {/each}
-            </div>
-          </LoadState>
-        </aside>
+              {/snippet}
+              <LoadState
+                what="SSH connections"
+                variant="compact"
+                loading={connsLoading}
+                error={connsError}
+                empty={sshConns.length === 0}
+                onretry={loadSshConnections}
+              >
+                {#snippet emptyView()}
+                  <EmptyState
+                    icon="server"
+                    title="No SSH hosts yet"
+                    body="Add an SSH profile in Connections to edit, build, test, and debug remote projects."
+                    actionLabel="Add SSH host…"
+                    actionKind="secondary"
+                    onaction={openConnectionsPage}
+                  />
+                {/snippet}
+                {#each sshConns as conn (conn.id)}
+                  {@const sel = mode === 'ssh' && selectedConn?.id === conn.id}
+                  <div class="side-row two-line" class:selected={sel}>
+                    <button type="button" class="side-row-main" data-side-row aria-current={sel ? 'true' : undefined} onclick={() => pickSshHost(conn)}>
+                      <Icon name="server" size={14} />
+                      <span class="side-row-text">
+                        <span class="side-row-title">{conn.name}</span>
+                        <span class="side-row-meta ssh-mono" dir="ltr">{connEndpointText(conn)}</span>
+                      </span>
+                      <span class="side-row-trailing"><EnvBadge env={conn.environment} readOnly={conn.read_only} /></span>
+                    </button>
+                  </div>
+                {/each}
+              </LoadState>
+            </SideSection>
+          </ListPane>
+        </div>
 
         <div class="ssh-detail">
           {#if mode === 'local'}
@@ -550,31 +531,10 @@
   }
   .ssh-cur-lbl { font-size: var(--fs-xs); font-weight: 500; color: var(--text-dim); }
   .ssh-grid { display: grid; grid-template-columns: 260px minmax(0, 1fr); gap: 14px; min-inline-size: 0; }
-  .ssh-rail {
-    display: flex; flex-direction: column; gap: 8px; padding: 10px;
-    border-radius: var(--radius-m); background: var(--surface-2); border: 1px solid var(--border); min-inline-size: 0;
-  }
-  .ssh-rail-sep {
-    display: flex; align-items: center; justify-content: space-between; gap: 6px;
-    padding-block-start: 6px; border-block-start: 1px solid var(--border);
-  }
-  .ssh-conn-list { display: flex; flex-direction: column; gap: 4px; max-block-size: 260px; overflow-y: auto; }
-  .ssh-host-btn {
-    display: flex; align-items: flex-start; gap: 8px; padding: 8px; border-radius: var(--radius-s);
-    border: 1px solid transparent; background: transparent; color: var(--text); text-align: start;
-    cursor: pointer; transition: background var(--dur-fast) var(--ease-out);
-  }
-  .ssh-host-btn:hover { background: var(--hover); }
-  .ssh-host-btn.is-selected { background: var(--accent-soft); border-color: var(--accent-line); }
-  .ssh-host-icon {
-    display: inline-flex; align-items: center; justify-content: center;
-    inline-size: 28px; block-size: 28px; border-radius: var(--radius-s);
-    background: var(--surface); color: var(--accent-text); flex-shrink: 0;
-  }
-  .ssh-host-copy { display: flex; flex-direction: column; gap: 2px; min-inline-size: 0; flex: 1; }
+  /* The list pane in a card: its edge is the card's border. */
+  .ssh-rail { display: flex; flex-direction: column; min-inline-size: 0; max-block-size: 420px; border-radius: var(--radius-m); border: 1px solid var(--border); overflow: hidden; }
+  .ssh-rail :global(.side-list) { border-inline-end: 0; }
   .ssh-host-top { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
-  .ssh-host-name { font-size: var(--fs-s); font-weight: 600; color: var(--text); }
-  .ssh-host-sub { font-size: var(--fs-xs); color: var(--text-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .ssh-detail { display: flex; flex-direction: column; gap: 10px; min-inline-size: 0; }
   .ssh-pane {
     display: flex; flex-direction: column; gap: 10px; padding: 12px;

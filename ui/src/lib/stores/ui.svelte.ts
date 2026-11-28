@@ -70,17 +70,9 @@ const LS = {
   termToolbar: 'otto_term_toolbar',
   browserPanelVersion: 'otto_browser_panel_version',
   browserAgentOpen: 'otto_browser_agent_open',
-  browserAgentH: 'otto_browser_agent_h',
   /** Legacy single threshold — migrated once into `dbAutoVertical`, then removed. */
   dbAutoVerticalCols: 'otto_db_auto_vertical_cols',
   dbAutoVertical: 'otto_db_auto_vertical_by_engine',
-  wfCtx: 'otto_wf_ctx_open',
-  wfCtxWidth: 'otto_wf_ctx_width',
-  wfCtxTab: 'otto_wf_ctx_tab',
-  wfSideWidth: 'otto_wf_side_width',
-  runDetailH: 'otto_wf_run_detail_h',
-  wfDockSide: 'otto_wf_dock_side',
-  wfInspSideW: 'otto_wf_insp_side_w',
   clientId: 'otto_client_id',
   sessionIsolation: 'otto_session_isolation',
   sidebarOrder: 'otto_sidebar_order',
@@ -88,10 +80,7 @@ const LS = {
   sidebarCollapsedGroups: 'otto_sidebar_groups_collapsed',
   sidebarFavorites: 'otto_sidebar_favorites',
   sidebarGroupOrder: 'otto_sidebar_group_order',
-  gitGraphListWidth: 'otto_git_graph_list_width',
-  gitGraphSideWidth: 'otto_git_graph_side_width',
   apiBuilderH: 'otto_api_builder_h',
-  vaultGraphPanelWidth: 'otto_vault_graph_panel_width',
 };
 
 export const RIGHT_MIN = 260;
@@ -103,11 +92,6 @@ export const RIGHT_MAX = 2000;
 const RIGHT_LEAVE = 360;
 export const RAIL_MIN = 190;
 export const RAIL_MAX = 420;
-/** Workflow run "Context files" sidebar bounds (a focused file browser). */
-export const WF_CTX_MIN = 240;
-export const WF_CTX_MAX = 560;
-/** Workflow run-detail (inspector) resizable-height floor; the cap is viewport-aware. */
-export const RUN_DETAIL_MIN = 160;
 
 export const isTauri = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
 
@@ -169,38 +153,8 @@ function clampRail(px: number): number {
 }
 /** DB Explorer "auto-Vertical past N columns" threshold: 0 = never, capped so
  *  a typo can't disable the feature by accident; NaN → the default (10). */
-function clampWfCtx(px: number): number {
-  return Math.max(WF_CTX_MIN, Math.min(WF_CTX_MAX, Math.round(px)));
-}
-function clampWfSide(px: number): number {
-  return Math.max(200, Math.min(600, Math.round(px)));
-}
-function clampWfInspSide(px: number): number {
-  const vw = typeof window !== 'undefined' ? window.innerWidth : 1400;
-  const max = Math.max(300, Math.round(vw * 0.6));
-  return Math.max(280, Math.min(max, Math.round(px)));
-}
-
-function clampRunDetail(px: number): number {
-  const vh = typeof window !== 'undefined' ? window.innerHeight : 900;
-  const max = Math.max(RUN_DETAIL_MIN, Math.round(vh * 0.85));
-  return Math.max(RUN_DETAIL_MIN, Math.min(max, Math.round(px)));
-}
-/** Git graph list pane when a commit detail is open. */
-function clampGitGraphList(px: number): number {
-  return Math.max(300, Math.min(720, Math.round(px)));
-}
 /** Git graph LEFT refs sidebar (LOCAL/REMOTE/TAGS/…). Floor keeps the section
  *  headers legible; cap stops it from crowding out the commit graph. */
-function clampGitGraphSide(px: number): number {
-  return Math.max(180, Math.min(480, Math.round(px)));
-}
-/** Vault graph controls panel. Floor keeps the section labels + counts legible;
- *  cap stops the panel from eating the graph it is filtering. Service/tag names
- *  are long, so the ceiling is generous. */
-function clampVaultGraphPanel(px: number): number {
-  return Math.max(200, Math.min(560, Math.round(px)));
-}
 /** API client builder pane height (above the response pane). */
 function clampApiBuilder(px: number): number {
   const vh = typeof window !== 'undefined' ? window.innerHeight : 900;
@@ -222,30 +176,8 @@ class UiStore {
   browserPanelVersion: BrowserPanelVersion = $state(
     lsGet(LS.browserPanelVersion) === 'v1' ? 'v1' : 'v2',
   );
-  /** Browser page: the embedded agent dock (terminal + ask bar) is expanded. */
+  /** Browser page: the agent (terminal + ask bar, the Detail pane's Agent view) is shown. */
   browserAgentOpen = $state(lsGet(LS.browserAgentOpen) !== '0'); // default open
-  /** Browser page: the agent dock's height in px (drag-resizable). */
-  browserAgentH = $state(Math.min(900, Math.max(160, Number(lsGet(LS.browserAgentH)) || 280)));
-  // Workflow run "Context files" sidebar: defaults open, resizable, desktop-only.
-  wfCtxOpen = $state(lsGet(LS.wfCtx) !== '0');
-  wfCtxWidth = $state(clampWfCtx(Number(lsGet(LS.wfCtxWidth)) || 340));
-  // Right sidebar tab (Files | Agents) + resizable left panel width.
-  wfCtxTab: 'files' | 'agents' = $state(lsGet(LS.wfCtxTab) === 'agents' ? 'agents' : 'files');
-  wfSideWidth = $state(clampWfSide(Number(lsGet(LS.wfSideWidth)) || 270));
-  // Workflow run-detail (inspector) resizable max-height cap.
-  runDetailHeight = $state(clampRunDetail(Number(lsGet(LS.runDetailH)) || 300));
-  // Workflow node inspector: dock to a resizable RIGHT column instead of the
-  // bottom strip (the 'seamless', wider view), + that column's width.
-  wfDockSide = $state(lsGet(LS.wfDockSide) === '1');
-  wfInspSideWidth = $state(clampWfInspSide(Number(lsGet(LS.wfInspSideW)) || 400));
-  // Git graph list pane width in detail mode.
-  gitGraphListWidth = $state(clampGitGraphList(Number(lsGet(LS.gitGraphListWidth)) || 420));
-  // Git graph LEFT refs sidebar width (drag-resizable; default matches the CSS 220px).
-  gitGraphSideWidth = $state(clampGitGraphSide(Number(lsGet(LS.gitGraphSideWidth)) || 220));
-  // Vault graph controls panel width (drag-resizable; default matches the CSS).
-  vaultGraphPanelWidth = $state(
-    clampVaultGraphPanel(Number(lsGet(LS.vaultGraphPanelWidth)) || 210),
-  );
   // API client builder pane height (0 = unset → CSS default).
   apiBuilderHeight = $state(
     Number(lsGet(LS.apiBuilderH)) > 0 ? clampApiBuilder(Number(lsGet(LS.apiBuilderH))) : 0,
@@ -597,34 +529,6 @@ class UiStore {
     }
   }
 
-  /** Toggle the workflow run "Context files" sidebar open/collapsed. */
-  toggleWfCtx(): void {
-    this.wfCtxOpen = !this.wfCtxOpen;
-    lsSet(LS.wfCtx, this.wfCtxOpen ? '1' : '0');
-  }
-
-  setWfCtxTab(tab: 'files' | 'agents'): void {
-    this.wfCtxTab = tab;
-    lsSet(LS.wfCtxTab, tab);
-  }
-  setWfCtxWidth(px: number): void {
-    this.wfCtxWidth = clampWfCtx(px);
-    lsSet(LS.wfCtxWidth, String(this.wfCtxWidth));
-  }
-
-  setRunDetailHeight(px: number): void {
-    this.runDetailHeight = clampRunDetail(px);
-    lsSet(LS.runDetailH, String(this.runDetailHeight));
-  }
-  setWfDockSide(on: boolean): void {
-    this.wfDockSide = on;
-    lsSet(LS.wfDockSide, on ? '1' : '0');
-  }
-  setWfInspSideWidth(px: number): void {
-    this.wfInspSideWidth = clampWfInspSide(px);
-    lsSet(LS.wfInspSideW, String(this.wfInspSideWidth));
-  }
-
 
   /** `persist=false` while a drag is live — localStorage is written once, on release. */
   setRailWidth(px: number, persist = true): void {
@@ -632,21 +536,6 @@ class UiStore {
     if (persist) lsSet(LS.railWidth, String(this.railWidth));
   }
 
-  /** `persist=false` while dragging (one localStorage write on release). */
-  setGitGraphListWidth(px: number, persist = true): void {
-    this.gitGraphListWidth = clampGitGraphList(px);
-    if (persist) lsSet(LS.gitGraphListWidth, String(this.gitGraphListWidth));
-  }
-  /** `persist=false` while dragging (one localStorage write on release). */
-  setGitGraphSideWidth(px: number, persist = true): void {
-    this.gitGraphSideWidth = clampGitGraphSide(px);
-    if (persist) lsSet(LS.gitGraphSideWidth, String(this.gitGraphSideWidth));
-  }
-  /** `persist=false` while dragging (one localStorage write on release). */
-  setVaultGraphPanelWidth(px: number, persist = true): void {
-    this.vaultGraphPanelWidth = clampVaultGraphPanel(px);
-    if (persist) lsSet(LS.vaultGraphPanelWidth, String(this.vaultGraphPanelWidth));
-  }
   setApiBuilderHeight(px: number, persist = true): void {
     this.apiBuilderHeight = clampApiBuilder(px);
     if (persist) lsSet(LS.apiBuilderH, String(this.apiBuilderHeight));
@@ -663,10 +552,6 @@ class UiStore {
   setBrowserAgentOpen(on: boolean): void {
     this.browserAgentOpen = on;
     lsSet(LS.browserAgentOpen, on ? '1' : '0');
-  }
-  setBrowserAgentH(px: number): void {
-    this.browserAgentH = Math.min(900, Math.max(160, Math.round(px)));
-    lsSet(LS.browserAgentH, String(this.browserAgentH));
   }
 
   setTheme(theme: ThemeName): void {

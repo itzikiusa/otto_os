@@ -9,7 +9,6 @@
   import Icon from '../../lib/components/Icon.svelte';
   import Badge from '../../lib/components/Badge.svelte';
   import Tabs from '../../lib/components/Tabs.svelte';
-  import LoadState from '../../lib/components/LoadState.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
   import { ctxMenu, type MenuItem } from '../../lib/contextmenu.svelte';
@@ -31,9 +30,14 @@
     type ProfileDraft,
   } from '../../lib/mcpProfiles';
   import ProfileEditor from './ProfileEditor.svelte';
+  import ListDetail from '../../lib/components/side/ListDetail.svelte';
+  import ListPane from '../../lib/components/side/ListPane.svelte';
+  import SideRow from '../../lib/components/side/SideRow.svelte';
 
   const isAdmin = $derived(auth.can('mcp', 'admin'));
   let selectedId = $state<string | null>(null);
+  /** Phone: the list is the page until a profile is opened ("‹ Profiles"). */
+  let phoneOpen = $state(false);
   let editor = $state<{ editing: McpProfile | null; initial: ProfileDraft } | null>(null);
   let busy = $state(false);
   const CONFIG_TABS = [
@@ -121,6 +125,9 @@
   const NEEDS_ADMIN = 'Needs MCP admin';
 
   function menu(e: MouseEvent | KeyboardEvent, p: McpProfile): void {
+    ctxMenu.show(e, menuItems(p));
+  }
+  function menuItems(p: McpProfile): MenuItem[] {
     // The locked-profile reason wins: it holds even for an admin.
     const locked = p.locked ? 'Built in — duplicate it to make your own' : undefined;
     const admin = isAdmin ? undefined : NEEDS_ADMIN;
@@ -131,7 +138,7 @@
       { separator: true },
       { label: 'Delete…', icon: 'trash', danger: true, disabled: !isAdmin || p.locked, title: (p.locked ? 'Full can’t be deleted' : undefined) ?? admin, action: () => void remove(p) },
     ];
-    ctxMenu.show(e, items);
+    return items;
   }
 
   async function copy(text: string, what: string): Promise<void> {
@@ -144,45 +151,50 @@
   }
 </script>
 
-<div class="profiles" data-testid="mcp-profiles">
-  <div class="head">
+<ListDetail
+  module="mcp"
+  pane="profiles"
+  name="Profiles"
+  open={phoneOpen}
+  onback={() => (phoneOpen = false)}
+  empty={mcpProfiles.loaded && profiles.length === 0}
+  testid="mcp-profiles"
+>
+  {#snippet list()}
+    <ListPane
+      count={profiles.length}
+      primary={isAdmin ? { icon: 'plus', label: 'New profile', onclick: newProfile, testid: 'mcp-profile-new' } : undefined}
+      loading={mcpProfiles.loading && !mcpProfiles.loaded}
+      error={mcpProfiles.error}
+      onretry={() => void reload()}
+    >
+      {#each profiles as p (p.id)}
+        <SideRow
+          title={p.name}
+          meta={profileSummary(groups, p)}
+          selected={selected?.id === p.id}
+          testid="mcp-profile-{p.id}"
+          menu={() => menuItems(p)}
+          onclick={() => { selectedId = p.id; phoneOpen = true; }}
+        >
+          {#snippet trailing()}
+            {#if p.is_default}<Badge tone="accent" label="Default" />{/if}
+            {#if p.locked}<span class="lock" title="Built in, read-only" aria-label="Built in, read-only"><Icon name="lock" size={12} /></span>{/if}
+          {/snippet}
+        </SideRow>
+      {/each}
+    </ListPane>
+  {/snippet}
+
+  <div class="profiles">
+    {#if mcpProfiles.loaded && profiles.length === 0}
+      <EmptyState variant="page" icon="layers" title="No MCP profiles" body="The built-in profiles are missing — restart the daemon to restore them." />
+    {/if}
     <p class="muted small intro">
       A profile is a named slice of Otto’s MCP tools. Sessions pick one or more when they start (the
       default is preselected) and see only those tools; outside agents can attach a single profile.
       Profiles only narrow — permissions, the Otto server checklist and approvals still apply.
     </p>
-    <button class="btn small" data-testid="mcp-profile-new" disabled={!isAdmin || !mcpProfiles.loaded} title={isAdmin ? undefined : NEEDS_ADMIN} onclick={newProfile}>
-      <Icon name="plus" size={12} /> New profile
-    </button>
-  </div>
-
-  <LoadState what="MCP profiles" loading={mcpProfiles.loading && !mcpProfiles.loaded} error={mcpProfiles.error} empty={mcpProfiles.loaded && profiles.length === 0} rows={3} onretry={() => void reload()}>
-    {#snippet emptyView()}
-      <EmptyState icon="layers" title="No MCP profiles" body="The built-in profiles are missing — restart the daemon to restore them." />
-    {/snippet}
-    <div class="split">
-      <ul class="list" aria-label="MCP profiles">
-        {#each profiles as p (p.id)}
-          <li>
-            <button
-              class="prof-row"
-              class:active={selected?.id === p.id}
-              aria-current={selected?.id === p.id ? 'true' : undefined}
-              data-testid="mcp-profile-{p.id}"
-              onclick={() => (selectedId = p.id)}
-              oncontextmenu={(e) => { e.preventDefault(); menu(e, p); }}
-            >
-              <span class="name">
-                {p.name}
-                {#if p.is_default}<Badge tone="accent" label="Default" />{/if}
-                {#if p.locked}<span class="lock" title="Built in, read-only" aria-label="Built in, read-only"><Icon name="lock" size={12} /></span>{/if}
-              </span>
-              <span class="sum">{profileSummary(groups, p)}</span>
-            </button>
-          </li>
-        {/each}
-      </ul>
-
       {#if selected && cfg}
         <section class="detail" aria-label="{selected.name} profile">
           <div class="d-head">
@@ -220,10 +232,9 @@
           </div>
           {#if configTab === 'http'}<p class="muted small">Endpoint: <code class="mono">{cfg.httpUrl}</code></p>{/if}
         </section>
-      {/if}
-    </div>
-  </LoadState>
-</div>
+    {/if}
+  </div>
+</ListDetail>
 
 {#if editor}
   <ProfileEditor
@@ -238,74 +249,17 @@
 
 <style>
   .profiles {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
     display: flex;
     flex-direction: column;
     gap: 12px;
-  }
-  .head {
-    display: flex;
-    align-items: flex-start;
-    justify-content: space-between;
-    gap: 12px;
+    padding: 18px 20px 32px;
   }
   .intro {
     margin: 0;
     max-width: 72ch;
-  }
-  .split {
-    display: grid;
-    grid-template-columns: minmax(200px, 280px) minmax(0, 1fr);
-    gap: 14px;
-    align-items: start;
-  }
-  .list {
-    list-style: none;
-    margin: 0;
-    padding: 0;
-    border: 1px solid var(--border);
-    border-radius: var(--radius-m);
-    overflow: hidden;
-    background: var(--surface);
-  }
-  .prof-row {
-    display: flex;
-    flex-direction: column;
-    align-items: flex-start;
-    gap: 2px;
-    width: 100%;
-    padding: 8px 12px;
-    font: inherit;
-    text-align: start;
-    color: var(--text);
-    background: transparent;
-    border: none;
-    border-bottom: 1px solid color-mix(in srgb, var(--border) 60%, transparent);
-    cursor: pointer;
-  }
-  li:last-child .prof-row {
-    border-bottom: none;
-  }
-  .prof-row:hover {
-    background: var(--surface-2);
-  }
-  .prof-row.active {
-    background: var(--accent-soft);
-  }
-  .prof-row:focus-visible {
-    outline: 2px solid var(--accent-text);
-    outline-offset: -2px;
-  }
-  .name {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    font-size: var(--fs-m);
-    overflow-wrap: anywhere;
-  }
-  .sum {
-    font-size: var(--fs-xs);
-    color: var(--text-dim);
-    overflow-wrap: anywhere;
   }
   .lock {
     display: inline-flex;
@@ -399,11 +353,8 @@
     margin: 0;
   }
   @media (max-width: 640px) {
-    .split {
-      grid-template-columns: minmax(0, 1fr);
-    }
-    .head {
-      flex-direction: column;
+    .profiles {
+      padding: 12px 14px 24px;
     }
   }
 </style>

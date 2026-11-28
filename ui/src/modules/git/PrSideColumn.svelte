@@ -1,7 +1,8 @@
 <script lang="ts">
   // The pull request's ONE details card (lib DetailsCard, patterns.md "Details
-  // card"): branch, the timeline and the review agents (the page's other
-  // views), reviewers, CI checks, merge checks, labels, facts.
+  // card"), heading the PR workspace's Detail pane: branch, the timeline and
+  // the review agents (the page's other views), reviewers, CI checks, merge
+  // checks, labels, facts.
   import type { PrChecksResp, PrCommit, PrDetail } from '../../lib/api/types';
   import Icon from '../../lib/components/Icon.svelte';
   import DetailsCard from '../../lib/components/DetailsCard.svelte';
@@ -38,8 +39,8 @@
   const glyph = (s: string) => (s === 'success' ? 'check' : s === 'failure' ? 'x' : s === 'pending' ? 'clock' : 'dot') as 'check' | 'x' | 'clock' | 'dot';
 </script>
 
-<DetailsCard label="Pull request details" floating testid="pr-details-card">
-<div class="side">
+<DetailsCard label="Pull request details" testid="pr-details-card">
+<div class="sc">
   <section class="dc-group sc-doors">
     <div class="dc-line">
       <div class="dc-row dc-static dc-grow" title="{pr.source_branch} → {pr.target_branch}">
@@ -136,8 +137,8 @@
 {/if}
 
 <style>
-  .side { display: flex; flex-direction: column; gap: 18px; font-size: var(--fs-s); min-width: 0; padding-block-end: 14px; }
-  .side > section:not(.sc-doors) { padding-inline: 14px; }
+  .sc { display: flex; flex-direction: column; gap: 18px; font-size: var(--fs-s); min-width: 0; padding-block-end: 14px; }
+  .sc > section:not(.sc-doors) { padding-inline: 14px; }
   .sc-doors { border-block-end: 1px solid var(--border); }
   .h {
     margin: 0 0 8px;
@@ -150,7 +151,7 @@
   .h-row { display: flex; align-items: center; justify-content: space-between; gap: 6px; }
   .sc-edit { background: none; border: none; padding: 4px; margin: -4px; color: var(--text-dim); cursor: pointer; display: inline-flex; border-radius: var(--radius-s); }
   .sc-edit:hover, .sc-edit:focus-visible { color: var(--text); }
-  @media (max-width: 1024px) { .sc-edit { padding: 8px; margin: -8px; } }
+  @media (pointer: coarse) { .sc-edit { padding: 8px; margin: -8px; } }
   .sc-row { display: flex; align-items: center; gap: 8px; padding-block: 4px; min-width: 0; }
   .ell { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: start; }
   .ok { display: inline-flex; align-items: center; gap: 4px; color: var(--success); font-size: var(--fs-xs); white-space: nowrap; }

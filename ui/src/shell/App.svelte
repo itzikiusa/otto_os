@@ -15,9 +15,9 @@
   import TabBar from './TabBar.svelte';
   import BottomNav from './BottomNav.svelte';
   import Drawer from './Drawer.svelte';
-  import ShortNavDrawer from './ShortNavDrawer.svelte';
+  import PhoneNavDrawer from './PhoneNavDrawer.svelte';
+  import { DRAWER_LEFT_WIDTH } from '../lib/components/side/paneKeys';
   import Skeleton from '../lib/components/Skeleton.svelte';
-  import NavButtons from './NavButtons.svelte';
   import Icon from '../lib/components/Icon.svelte';
   import LoadState from '../lib/components/LoadState.svelte';
   import LazyMount from '../lib/components/LazyMount.svelte';
@@ -33,7 +33,6 @@
   import CapsBanner from './CapsBanner.svelte';
   import { barStore } from '../lib/stores/bar.svelte';
   import { confirmer } from '../lib/confirm.svelte';
-  import NotificationBell from './NotificationBell.svelte';
   import { serviceHealth } from '../lib/stores/serviceHealth.svelte';
   import ConfirmDialog from '../lib/components/ConfirmDialog.svelte';
   import { slackSend } from '../lib/slackSend.svelte';
@@ -74,7 +73,6 @@
   import { paneWindowAction, showPaneDisplays } from '../lib/nativePaneMenu';
   import { ctxMenu } from '../lib/contextmenu.svelte';
   import { viewport } from '../lib/stores/viewport.svelte';
-  import { pageChrome } from '../lib/stores/pageChrome.svelte';
   import { lightMode } from '../lib/lightMode.svelte';
   import { resyncViewportFit } from '../lib/viewportFit';
   import { ws, LS_ATTENTION } from '../lib/stores/workspace.svelte';
@@ -176,10 +174,14 @@
     return queue.length ? prefetchPagesWhenIdle(queue) : undefined;
   });
   const compactShell = $derived(!viewport.isDesktop && !isPopout && !isEmbedded);
-  const navFolded = $derived(compactShell && viewport.isTablet && (viewport.tabletNavFolded !== null ? viewport.tabletNavFolded : pageChrome.foldNav && !ui.railExpanded));
+  // A tablet shows the Rail unless the person expanded the Navigator (persisted, viewport.tabletNavFolded).
+  const navFolded = $derived(compactShell && viewport.isTablet && viewport.tabletNavFolded);
   // The page draws its own PageHeader (the first registered header, in the
   // centre column — not one inside the right panel's browser tab).
-  const pageTitled = $derived(compactShell && !!uiControl.barOwner?.closest('.mcenter'));
+  // Never a class the compact layout toggles in the same update (`.mcenter`):
+  // read before the DOM catches up, it stayed false after a resize to a phone
+  // and the shell bar sat above the page's own header (two rows).
+  const pageTitled = $derived(compactShell && !!uiControl.barOwner?.closest('[data-shell-center]'));
 
   // Native sidebar vibrancy (desktop shell): the window has an NSVisualEffect
   // view behind the page, so the document goes transparent and ONLY chrome
@@ -967,8 +969,8 @@
       <button class="pb-dismiss" onclick={() => serviceHealth.dismiss()} aria-label="Dismiss notice" title="Dismiss notice"><Icon name="x" size={12} /></button>
     </div>
   {/if}
-  <!-- A phone shows one session at a time (#/agents is the list): no strip. -->
-  {#if moduleName === 'agents' && !viewport.isPhone}
+  <!-- A phone (or one on its side) shows one session at a time (#/agents is the list): no strip. -->
+  {#if moduleName === 'agents' && !viewport.navDrawer}
     <TabBar />
   {/if}
   {#if workspaceLoadError}
@@ -1021,8 +1023,11 @@
      (⌘+/−), which re-rasterizes everything (terminal included) and keeps
      coordinates correct. ui.zoom still drives native zoom inside Tauri. -->
 <div class="shell" class:vibrant class:embedded={isEmbedded} class:mobile={compactShell} class:tablet={compactShell && viewport.isTablet} class:short={compactShell && viewport.isShort} class:bnav={compactShell && viewport.isPhone} class:page-titled={pageTitled}>
-  <!-- Threads draws the one header row on phones and tablets (no second pair of panel toggles); a narrow Mac window keeps it for the traffic lights. -->
-  {#if compactShell && !(moduleName === 'threads' && (viewport.navDrawer || !isTauri))}
+  <!-- Phone and tablet: ONE header row (design.md §7.1, decision 12). A page's PageHeader IS the
+       top bar (☰ or ‹ Back on a phone, title, actions, Side panel); a page without one keeps this
+       bar with the same contents. History arrows stay in the Rail / Navigator. A narrow Mac
+       window keeps the bar for its traffic lights. -->
+  {#if compactShell && !(pageTitled && !isTauri)}
   <header class="mtopbar" class:tauri-top={isTauri} data-tauri-drag-region use:windowDrag={isTauri}>
     {#if viewport.navDrawer}
       <button
@@ -1036,17 +1041,11 @@
         <Icon name="sidebar" size={20} />
       </button>
     {/if}
-    <!-- Back/Forward: visible whenever there is history to walk. Placed left of
-         the title so the thumb can reach them comfortably on phone + tablet. -->
-    <NavButtons />
     <!-- Agents: the pane header (‹ · word · title) names the session; the bar says where you are. -->
     <span class="mtop-title">{moduleTitle}</span>
     <span class="grow"></span>
-    <!-- Desktop + tablet reach the bell in the Navigator/Rail; the phone's
-         Navigator is a closed drawer, so the top bar carries it instead. -->
-    {#if viewport.navDrawer}
-      <NotificationBell placement="below" />
-    {/if}
+    <!-- The bell lives in the Navigator / Rail, and on a phone at the top of the drawer
+         (BottomNav's "Menu" tab carries the unread dot). -->
     {#if showRightPanel}
       <button
         class="mtop-btn"
@@ -1101,7 +1100,7 @@
     >
       <div class="primary-pane">
         <div class="primary-row">
-          <div class="center" class:mcenter={compactShell}>
+          <div class="center" class:mcenter={compactShell} data-shell-center>
             {@render centerContent()}
             {#if !isPopout && !isEmbedded && viewport.isDesktop}
               <!-- The floating "Type or speak… ⌘K" bar (layout.md §7): bottom-
@@ -1116,7 +1115,7 @@
                session (`ws.activeSession`); elsewhere a workspace folder. It belongs
                to the main pane, so a side-by-side split keeps it there. -->
           {#if showRightPanel}
-            <Drawer bind:open={() => ui.rightOpenNow, (open) => ui.setRight(open, ui.rightTabNow)} inline={!compactShell} side="right" label={SIDE_PANEL} width="min(92vw, 360px)">
+            <Drawer bind:open={() => ui.rightOpenNow, (open) => ui.setRight(open, ui.rightTabNow)} inline={!compactShell} side="right" label={SIDE_PANEL} width={viewport.isPhone ? '100vw' : 'min(92vw, 360px)'}>
               <!-- Its chunk starts with the Agents page, or on first show (pages.svelte.ts). -->
               {@const RightPanel = loadedRightPanel()}
               {#if RightPanel}<RightPanel forceOpen={compactShell} />{:else}<div class="rp-loading" class:rail-slot={!compactShell}>{#if compactShell}<Skeleton rows={4} height={28} label="the {SIDE_PANEL}" />{/if}</div>{/if}
@@ -1141,11 +1140,12 @@
     <StatusBar />
   {/if}
 </div>
-<!-- Phone (and a phone on its side): Navigator in a LEFT drawer, ui.navDrawerOpen — not persisted,
-     closed on load/navigation/rotation. Tablet keeps the persistent Navigator. -->
+<!-- Phone (and a phone on its side): the ONE drawer — Navigator, workspaces and the old "More"
+     rows (PhoneNavDrawer) — opened by the header's ☰ and BottomNav's "Menu"; ui.navDrawerOpen is
+     not persisted, closed on load/navigation/rotation. Tablet keeps the Navigator / Rail column. -->
 {#if compactShell && viewport.navDrawer}
-  <Drawer bind:open={ui.navDrawerOpen} side="left" label="Navigator" width="min(86vw, 280px)">
-    {#if viewport.isShort}<ShortNavDrawer />{:else}<Navigator />{/if}
+  <Drawer bind:open={ui.navDrawerOpen} side="left" label="Navigator" width={DRAWER_LEFT_WIDTH} bare>
+    <PhoneNavDrawer />
   </Drawer>
 {/if}
 
@@ -1391,7 +1391,7 @@
     overflow: hidden;
     border-inline-end: 1px solid var(--border);
   }
-  .msidebar.mfolded { width: auto; border-inline-end: 0; } /* tablet + pageChrome.foldNav: the Rail (own border) */
+  .msidebar.mfolded { width: auto; border-inline-end: 0; } /* tablet, folded: the Rail (own border) */
   .mcenter {
     /* the single content pane fills the remaining width */
     flex: 1;

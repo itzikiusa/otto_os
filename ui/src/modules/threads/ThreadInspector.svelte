@@ -1,10 +1,12 @@
 <script lang="ts">
-  // The right panel as T3's "Open a surface" (person-facing: "panel"): with
-  // nothing open it lists them (B F C P S while the panel has focus); opened
-  // ones sit as tabs with + (another), close and maximize. On a phone (the
-  // details drawer) the card folds to one line and the key badges and
-  // Maximize (which the drawer can't do) go. Every surface is its own
-  // lazy chunk, prefetched on hover, so the panel itself stays light.
+  // Thread details: the Threads Detail pane (design.md §3, DetailPane) as T3's
+  // "Open a surface" (person-facing: "panel"): with nothing open it lists them
+  // (B F C P S while the panel has focus); opened ones are the pane's views
+  // (its header), with + (another) as its one action and Close <surface> /
+  // Widen under ⋯. Inline while the conversation keeps its floor, else a right
+  // sheet (a phone, a tablet): there the card folds to one line and the key
+  // badges and Widen go. Every surface is its own lazy chunk, prefetched on
+  // hover, so the panel itself stays light.
   import { tick } from 'svelte';
   import { runtimeDrafts } from '../../lib/stores/runtimeDrafts.svelte';
   import { addComposerContext, type ComposerContext } from './runtime/composerContext';
@@ -19,6 +21,9 @@
   import { loadBrowserView } from '../../lib/browserPort';
   import { ws } from '../../lib/stores/workspace.svelte';
   import ThreadDetailsCard from './ThreadDetailsCard.svelte';
+  import DetailPane from '../../lib/components/side/DetailPane.svelte';
+  import { DETAIL_PANE } from '../../lib/components/side/paneKeys';
+  import { MIN_CONVERSATION_W, SURFACE_W } from './threadsLayout';
   import ThreadAgentsTasks from './runtime/ThreadAgentsTasks.svelte';
   import RuntimeSubagentPane from './runtime/RuntimeSubagentPane.svelte';
   import { PrSurfaceView, SideChatView } from './threadLazy.svelte';
@@ -112,11 +117,24 @@
     open.includes('connections') || threads.mcpActivities.some((a) => a.session_id === focusedSession?.id),
   );
 
+  // A surface opens wider, at its own remembered width; Widen gives it all but the conversation's floor.
+  const surfaceOpen = $derived(open.includes(threads.inspectorTab));
+  const SURFACE_RANGE = { default: SURFACE_W, min: 300, max: 1200 };
+  // svelte-ignore state_referenced_locally
+  let sheet = $state(threads.inspectorCompact);
+  $effect(() => threads.setInspectorCompact(sheet));
+
+  function paneMenu(): MenuItem[] {
+    const items: MenuItem[] = [];
+    if (active) items.push({ label: `Close ${SURFACE_LABEL[active]}`, icon: 'x', action: closeActive });
+    if (!sheet) items.push({ label: threadsChrome.maximized ? 'Restore panel width' : 'Widen panel', icon: threadsChrome.maximized ? 'minimize' : 'maximize', title: 'The conversation stays beside it', action: () => (threadsChrome.maximized = !threadsChrome.maximized) });
+    return items;
+  }
+
   function launch(s: Surface): void {
     if (!s.disabled) threads.setInspectorTab(s.id);
   }
 
-  let inspectorEl = $state<HTMLElement | null>(null);
   let addBtnEl = $state<HTMLButtonElement | null>(null);
 
   function closeActive(): void {
@@ -126,7 +144,7 @@
     if (next) threads.setInspectorTab(next);
     void tick().then(() => {
       const target = next
-        ? inspectorEl?.querySelector<HTMLElement>(`[data-testid="threads-tab-${next}"]`)
+        ? document.querySelector<HTMLElement>(`[data-testid="threads-inspector"] [data-testid="threads-tab-${next}"]`)
         : addBtnEl;
       target?.focus({ preventScroll: true });
     });
@@ -166,35 +184,37 @@
   }
 </script>
 
-<aside bind:this={inspectorEl} class="ti" aria-label="Thread panel" data-testid="threads-inspector" use:surfaceKeys>
-  <!-- Thread details head the panel (they float beside the conversation
-       only while this panel is closed). -->
-  <!-- On a phone a subagent's tab is a full-height sheet: the card gives way. -->
-  {#if contextCwd && !(threads.inspectorCompact && active === 'subagent')}
-    <div class="ti-card"><ThreadDetailsCard cwd={contextCwd} threadId={focusedSession?.id ?? null} summary={active !== null} /></div>
-  {/if}
-  {#if contextThreadId}<ThreadAgentsTasks sessionId={contextThreadId} />{/if}
-  <header class="ti-head">
+<DetailPane
+  module="threads"
+  pane={surfaceOpen ? 'surface' : 'inspector'}
+  legacy={{ w: surfaceOpen ? 'threads.surfaceW' : 'threads.inspectorW' }}
+  title="Thread details"
+  open={threads.inspectorVisible}
+  onclose={() => threads.setInspectorOpen(false)}
+  ontoggle={() => threads.toggleInspector()}
+  range={surfaceOpen ? SURFACE_RANGE : DETAIL_PANE}
+  minContent={MIN_CONVERSATION_W}
+  maximized={threadsChrome.maximized}
+  bind:sheet
+  menu={active || !sheet ? paneMenu : undefined}
+  testid="threads-inspector"
+>
+  {#snippet views()}
     {#if tabs.length > 0}
-      <div class="ti-tabs">
-        <Tabs
-          label="Open panels"
-          size="s"
-          idBase="threads-insp"
-          testid="threads-inspector-tabs"
-          {tabs}
-          value={active ?? tabs[0].id}
-          onchange={(id) => threads.setInspectorTab(id)}
-        />
-      </div>
+      <Tabs
+        label="Open panels"
+        size="s"
+        idBase="threads-insp"
+        testid="threads-inspector-tabs"
+        {tabs}
+        value={active ?? tabs[0].id}
+        onchange={(id) => threads.setInspectorTab(id)}
+      />
     {:else}
       <span class="ti-title">Open a panel</span>
     {/if}
-    {#if active}
-      <button type="button" class="icon-btn" aria-label="Close {SURFACE_LABEL[active]}" title="Close {SURFACE_LABEL[active]}" onclick={closeActive}>
-        <Icon name="x" size={12} />
-      </button>
-    {/if}
+  {/snippet}
+  {#snippet action()}
     <button
       bind:this={addBtnEl}
       type="button"
@@ -205,20 +225,17 @@
       data-testid="threads-surface-add"
       onclick={openAddMenu}
     >
-      <Icon name="plus" size={13} />
+      <Icon name="plus" size={14} />
     </button>
-    {#if !threads.inspectorCompact}<button
-      type="button"
-      class="icon-btn"
-      class:ti-on={threadsChrome.maximized}
-      aria-pressed={threadsChrome.maximized}
-      aria-label={threadsChrome.maximized ? 'Restore panel width' : 'Widen panel'}
-      title={threadsChrome.maximized ? 'Restore width' : 'Widen — the conversation stays beside it'}
-      onclick={() => (threadsChrome.maximized = !threadsChrome.maximized)}
-    >
-      <Icon name={threadsChrome.maximized ? 'minimize' : 'maximize'} size={12} />
-    </button>{/if}
-  </header>
+  {/snippet}
+<div class="ti" use:surfaceKeys>
+  <!-- Thread details head the panel (they float beside the conversation
+       only while this panel is closed). -->
+  <!-- On a phone a subagent's tab is a full-height sheet: the card gives way. -->
+  {#if contextCwd && !(threads.inspectorCompact && active === 'subagent')}
+    <div class="ti-card"><ThreadDetailsCard cwd={contextCwd} threadId={focusedSession?.id ?? null} summary={active !== null} /></div>
+  {/if}
+  {#if contextThreadId}<ThreadAgentsTasks sessionId={contextThreadId} />{/if}
 
   <div
     class="ti-panel"
@@ -265,17 +282,16 @@
       </ul>
     {/if}
   </div>
-</aside>
+</div>
+</DetailPane>
 
 <style>
   .ti {
+    flex: 1;
     display: flex;
     flex-direction: column;
-    height: 100%;
     min-width: 0;
     min-height: 0;
-    background: var(--surface);
-    border-inline-start: 1px solid var(--border);
   }
   /* The card never takes more than half the panel: the surface below keeps a usable height. */
   .ti-card {
@@ -284,28 +300,12 @@
     max-block-size: 50%;
     overflow-y: auto;
   }
-  .ti-head {
-    display: flex;
-    align-items: center;
-    gap: 2px;
-    min-block-size: 38px;
-    padding-inline: 10px 6px;
-    border-block-end: 1px solid var(--border);
-    flex-shrink: 0;
-  }
-  .ti-tabs {
-    flex: 1;
-    min-width: 0;
-    overflow-x: auto;
-  }
   .ti-title {
     flex: 1;
+    padding-inline-start: 8px;
     font-size: var(--fs-m);
-    font-weight: 500;
+    font-weight: 600;
     color: var(--text);
-  }
-  .ti-on {
-    color: var(--accent-text);
   }
   .ti-panel {
     flex: 1;

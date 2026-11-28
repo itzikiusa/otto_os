@@ -55,7 +55,8 @@ test('a resize redraw is not work: tiled idle shells stay Idle', async ({ page }
   await expect(page.locator(`.ai-row[data-workspace="${wsId}"]`)).toHaveCount(4, { timeout: 30_000 });
   await page.getByTestId('agents-select-toggle').click();
   for (const t of TITLES) await page.getByLabel(`Select ${t}`).check();
-  await page.getByTestId('agents-tile-selected').click();
+  await page.getByTestId('agents-select-more').click();
+  await page.getByRole('menuitem', { name: 'Tile' }).click();
   await expect(page.locator('[data-tile-id]')).toHaveCount(4, { timeout: 30_000 });
   // Each shell repaints its whole screen on SIGWINCH in two frames a second
   // apart, the way a full-screen TUI (Claude's, a multi-line prompt) does.

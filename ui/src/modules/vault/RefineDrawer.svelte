@@ -1,7 +1,7 @@
 <script lang="ts">
   import { toastError } from '../../lib/toastError';
   import { announceShown } from '../../lib/announce.svelte';
-  // "Refine with Otto" — a bottom drawer under the note editor/reading view.
+  // "Refine with Otto" — the Refine view of the Vault's Detail pane.
   // One refine session per note (server-side): the first Send spawns it (the
   // POST is LONG — it resolves when the agent's turn completes), and ~800ms
   // after POSTing we poll GET refine-session until the session id lands so the
@@ -287,19 +287,19 @@
 
 <style>
   .refine-drawer {
-    flex: 0 0 40%;
+    flex: 1;
     min-height: 0;
     display: flex;
     flex-direction: column;
-    border-top: 1px solid var(--border);
-    background: var(--surface);
   }
   .bar {
     display: flex;
+    flex-wrap: wrap;
     align-items: center;
     gap: 8px;
-    padding: 8px 12px;
-    border-bottom: 1px solid var(--border);
+    padding-block: 8px;
+    padding-inline: 16px 12px;
+    border-block-end: 1px solid var(--separator);
   }
   .spark {
     display: inline-flex;

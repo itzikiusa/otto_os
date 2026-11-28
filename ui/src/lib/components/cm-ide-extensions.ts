@@ -204,7 +204,8 @@ class CombinedGutterMarker extends GutterMarker {
       const item = this.runItem, btn = document.createElement('button');
       btn.type = 'button'; btn.className = `cm-ide-gutter-run-btn cm-ide-run-btn is-${item.kind}`;
       btn.dataset.gutterRun = String(item.line); btn.dataset.gutterLine = String(item.line); btn.dataset.gutterKind = item.kind;
-      const debuggable = item.language !== 'makefile';
+      // Plain Karma (no Angular CLI) has no debugger: the daemon leaves its debug_program out.
+      const debuggable = item.language !== 'makefile' && !(item.run_spec?.runner === 'karma' && !item.run_spec.debug_program);
       const label = `${debuggable ? 'Run or debug' : 'Run'} ${item.label}`; btn.title = label; btn.setAttribute('aria-label', label);
       btn.appendChild(gutterSvg('play'));
       btn.addEventListener('mousedown', (e) => { e.stopPropagation(); });
@@ -217,6 +218,7 @@ class CombinedGutterMarker extends GutterMarker {
             ? [{ label: `Run '${item.label}' (keep containers)`, icon: 'play' as const, action: () => cbs.onGutterAction?.(item, 'run_keep_tc') }]
             : []),
           ...(debuggable ? [{ label: `Debug '${item.label}'`, icon: isIconName('bug') ? ('bug' as const) : ('target' as const), action: () => cbs.onGutterAction?.(item, 'debug') }] : []),
+          ...(item.note ? [{ separator: true }, { label: item.note, icon: 'info' as const, disabled: true, title: item.note }] : []),
         ]);
       });
       actSlot.appendChild(btn);

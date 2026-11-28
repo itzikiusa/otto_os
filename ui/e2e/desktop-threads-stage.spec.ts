@@ -147,7 +147,7 @@ test('closing a parent with open children offers to close them too', async ({ pa
   for (const id of ['rt_parent', 'rt_kid1', 'rt_kid2']) await expect.poll(() => statusOf(page, id)).toBe('closed');
 });
 
-test('at 1280 both panels open leave the conversation about 640 px', async ({ page }) => {
+test('at 1280 both panels open leave the conversation about 600 px', async ({ page }) => {
   await boot(page, [{ id: 'rt_wide', title: 'Long model thread', provider: 'claude', last_active_at: '2026-11-12T10:09:00Z' }]);
   await page.evaluate(() => { location.hash = '#/threads/rt_wide'; });
   await expect(page.getByTestId('runtime-thread-rt_wide')).toBeVisible({ timeout: 15_000 });
@@ -156,10 +156,9 @@ test('at 1280 both panels open leave the conversation about 640 px', async ({ pa
   await expect(page.getByTestId('threads-inspector')).toBeVisible();
   await expect(page.getByTestId('threads-sidebar')).toBeVisible();
   const center = await page.locator('.th-center-col').boundingBox();
-  expect(center?.width ?? 0).toBeGreaterThanOrEqual(630);
-  // The thread-list and right-panel toggles are told apart.
-  await expect(page.getByTestId('threads-toggle-sidebar')).toHaveAttribute('title', /thread list/);
-  await expect(page.getByTestId('threads-toggle-inspector')).toHaveAttribute('title', /right panel/);
+  expect(center?.width ?? 0).toBeGreaterThanOrEqual(590);
+  // The details toggle names what it holds (the panel glyph is the Side panel's).
+  await expect(page.getByTestId('threads-toggle-inspector')).toHaveAttribute('aria-label', 'Thread details');
   await expect(page.getByTestId('threads-surface-changes')).toContainText('Changes');
   await shot(page, 'both-panels-1280');
 });

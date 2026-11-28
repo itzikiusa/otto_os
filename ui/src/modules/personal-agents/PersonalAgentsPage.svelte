@@ -24,6 +24,7 @@
   import Icon from '../../lib/components/Icon.svelte';
   import { lazyComponent } from '../../lib/lazy-component.svelte';
   import Modal from '../../lib/components/Modal.svelte';
+  import DetailPane from '../../lib/components/side/DetailPane.svelte';
   import { ctxMenu } from '../../lib/contextmenu.svelte';
   import { focusAgent, railOrder } from './agentHome';
   import { confirmDeleteAgent } from './confirmDelete';
@@ -35,7 +36,7 @@
 
   const AgentEditSheetLazy = lazyComponent(() => import('./AgentEditSheet.svelte'));
   const AgentPageLazy = lazyComponent(() => import('./AgentPage.svelte'));
-  // The side panel and the quick create carry the personality / template
+  // The Routines pane and the quick create carry the personality / template
   // catalogs: loaded when first shown, never with the page.
   const SidePanelLazy = lazyComponent(() => import('./AgentSidePanel.svelte'));
   // The conversation (header, intro, composer) loads beside the list; its
@@ -75,7 +76,8 @@
   });
   const loadError = $derived(loadErrorOf(personalAgents, 'agentsError'));
 
-  // Sheets are route-backed. Opening one never replaces the conversation.
+  // Routines (the Detail pane) and the History / Settings sheet are
+  // route-backed. Opening one never replaces the conversation.
   const routinesOpen = $derived(!!deepId && ['routines', 'schedules'].includes(deepTab));
   const historyOpen = $derived(!!deepId && ['history', 'activity', 'runs'].includes(deepTab));
   $effect(() => {
@@ -138,7 +140,7 @@
     {/snippet}
   </PageHeader>
   {/if}
-  <PageBody fill padded={sub === 'rooms'}>
+  <PageBody fill padded={false}>
     {#if !ws.currentId}
       <EmptyState variant="page" icon="user" title="Add a workspace to get started"
         body="Personal agents and their channels belong to a workspace. Add your project folder to create them."
@@ -194,19 +196,31 @@
               <EmptyState icon="user" title="Agent not found" body="It may have been deleted, or it belongs to another workspace." actionLabel="Back to your agents" onaction={() => router.go('personal-agents')} />
             {/if}
           </div>
+          {#if selected}
+            {@const agent = selected}
+            <DetailPane
+              module="personal-agents"
+              pane="routines"
+              title="Routines"
+              open={routinesOpen}
+              onclose={closeSheet}
+              ontoggle={() => router.go(routinesOpen ? `personal-agents/${agent.id}` : `personal-agents/${agent.id}/routines`)}
+              testid="pa-routines-pane"
+            >
+              {#if SidePanelLazy.component}
+                <SidePanelLazy.component {agent} />
+              {:else}
+                <LoadState what="routines" error={SidePanelLazy.error} loading={!SidePanelLazy.error} empty onretry={() => SidePanelLazy.retry()} />
+              {/if}
+            </DetailPane>
+          {/if}
         </div>
       </LoadState>
     {/if}
 
-    {#if deepId && selected}
-      <Modal title={`${routinesOpen ? 'Routines' : historyOpen ? 'History' : 'Settings'} · ${selected.name}`} width={routinesOpen ? 560 : 820} onclose={closeSheet}>
-        {#if routinesOpen}
-          {#if SidePanelLazy.component}
-            <SidePanelLazy.component agent={selected} embedded onclose={closeSheet} />
-          {:else}
-            <LoadState what="routines" error={SidePanelLazy.error} loading={!SidePanelLazy.error} empty onretry={() => SidePanelLazy.retry()} />
-          {/if}
-        {:else if AgentPageLazy.component}
+    {#if deepId && selected && !routinesOpen}
+      <Modal title={`${historyOpen ? 'History' : 'Settings'} · ${selected.name}`} width={820} onclose={closeSheet}>
+        {#if AgentPageLazy.component}
           <AgentPageLazy.component agentId={selected.id} embedded />
         {:else}
           <LoadState what="agent settings" error={AgentPageLazy.error} loading={!AgentPageLazy.error} empty onretry={() => AgentPageLazy.retry()} />
@@ -246,7 +260,4 @@
   .pa-hint { display: flex; align-items: center; gap: 6px; margin: 0; padding: 6px 12px; color: var(--text-dim); font-size: var(--fs-s); flex-wrap: wrap; border-block-end: 1px solid var(--border); }
   .linklike { border: 0; background: none; padding: 0; color: var(--accent-text); font: inherit; font-weight: 600; cursor: pointer; }
   .linklike:hover { text-decoration: underline; }
-  @media (max-width: 640px) {
-    .pa-home { flex-direction: column; }
-  }
 </style>

@@ -1,6 +1,6 @@
 <script lang="ts">
-  // Notes rail: one row per DOM annotation ("mark") on the currently-open
-  // page, newest last. A thin renderer over `browser.annotations` — mutation
+  // The marks list — the body of the Browser's "Marks" Detail pane: one row
+  // per DOM annotation ("mark") on the currently-open page, newest last. A thin renderer over `browser.annotations` — mutation
   // (edit comment / delete / send-to-session) goes through the `browser`
   // store, never the API module directly (matches the scheduledTasks /
   // runWithOtto convention). Live rows arrive via the `browser_annotation_added`
@@ -18,14 +18,11 @@
   let {
     annotations,
     liveMode = false,
-    onclose,
     onfocusmark,
   }: {
     annotations: BrowserAnnotation[];
     /** True when rendered beside a live tab (tailors the empty-state hint). */
     liveMode?: boolean;
-    /** Optional close callback to collapse the rail. */
-    onclose?: () => void;
     /** Jump to the marked element in the page. */
     onfocusmark?: (selector: string) => void;
   } = $props();
@@ -74,7 +71,7 @@
     const deleted = await remove(id);
     if (!deleted) return;
     await tick();
-    const btns = railEl?.querySelectorAll<HTMLButtonElement>('.row .actions button, .rail-close');
+    const btns = railEl?.querySelectorAll<HTMLButtonElement>('.row .actions button');
     if (btns && btns.length > 0) {
       btns[Math.min(idx, btns.length - 1)]?.focus();
     } else {
@@ -84,16 +81,6 @@
 </script>
 
 <div class="notes-rail" bind:this={railEl}>
-  <div class="rail-head">
-    <Icon name="note" size={13} />
-    <span>Marks</span>
-    <span class="count">{annotations.length}</span>
-    {#if onclose}
-      <button class="icon-btn rail-close" onclick={onclose} aria-label="Hide marks" title="Hide marks">
-        <Icon name="x" size={12} />
-      </button>
-    {/if}
-  </div>
 
   {#if annotations.length === 0}
     <p class="empty">
@@ -162,28 +149,10 @@
 
 <style>
   .notes-rail {
-    width: 260px;
-    flex-shrink: 0;
-    border-inline-start: 1px solid var(--border);
-    overflow-y: auto;
-    padding: 10px;
+    padding: 10px 12px;
     display: flex;
     flex-direction: column;
     gap: 8px;
-  }
-  .rail-head {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    color: var(--text-dim);
-    font-size: var(--fs-s);
-    font-weight: 600;
-    padding: 0 2px;
-  }
-  .count {
-    margin-inline-start: auto;
-    color: var(--text-dim);
-    font-weight: 400;
   }
   .empty {
     margin: 0;
@@ -282,28 +251,6 @@
   .actions :global(.icon-btn) {
     width: 24px;
     height: 24px;
-  }
-  .rail-close {
-    width: 22px;
-    height: 22px;
-    flex-shrink: 0;
-  }
-  /* Phone / short landscape: rail collapses to compact vertical cap. */
-  @media (max-width: 640px), (max-height: 500px) {
-    .notes-rail {
-      width: auto;
-      max-height: 34%;
-      border-inline-start: none;
-      border-top: 1px solid var(--border);
-    }
-  }
-  @container (max-width: 640px) {
-    .notes-rail {
-      width: auto;
-      max-height: 40%;
-      border-inline-start: none;
-      border-top: 1px solid var(--border);
-    }
   }
   @media (pointer: coarse), (max-width: 640px) {
     .actions :global(.icon-btn) { min-width: 36px; min-height: 36px; }

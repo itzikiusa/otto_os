@@ -10,12 +10,18 @@
   import { loadErrorText } from '../../lib/loadError';
   import Icon from '../../lib/components/Icon.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
+  import ListDetail from '../../lib/components/side/ListDetail.svelte';
+  import ListPane from '../../lib/components/side/ListPane.svelte';
+  import SideRow from '../../lib/components/side/SideRow.svelte';
 
   let {mode}: {mode: 'trash' | 'history'} = $props();
   let trash = $state<VaultTrashEntry[]>([]);
   // Raw: pages of 200 are replaced/appended wholesale, never mutated in place.
   let revisions = $state.raw<VaultRevision[]>([]);
   let selected = $state<VaultRevisionDetail | null>(null);
+  // Edit history is a list / detail of its own (a nested ListDetail): a phone
+  // pushes the compare view ("‹ Edits"); Back keeps the edit marked.
+  let phoneOpen = $state(false);
   let currentHash = $state<string | null>(null);
   let busy = $state(false);
   let more = $state(false);
@@ -64,6 +70,8 @@
 
   async function selectRevision(entry: VaultRevision) {
     if (!vault.current) return;
+    phoneOpen = true;
+    if (selected?.id === entry.id) return;
     const request = ++detailSeq, id = vault.current.id, workspace = vault.wsId;
     error = ''; selected = null; currentHash = null;
     try {
@@ -136,49 +144,69 @@
     {/each}
   {:else}
     <p>Review saved before/after versions of editor and agent writes. Restoring creates another recoverable edit.</p>
-    <label>File path <input dir="ltr" aria-label="History file path" bind:value={vault.historyPath} placeholder="All files" /></label>
     {#if vault.historySince}<p>Changes since {new Date(vault.historySince).toLocaleString()} <button class="btn small ghost" onclick={() => {vault.historySince = ''; vault.persistView();}}>Show all dates</button></p>{/if}
     <div class="history-layout">
-      <nav aria-label="Saved revisions">
-        {#if loading}<Skeleton rows={4} height={36} label="the edit history" />{:else if visibleRevisions.length === 0 && !error}<p>No recorded edits. History begins with writes made after this feature was installed.</p>{/if}
-        {#each visibleRevisions as entry (entry.id)}
-          <button class="rev" class:active={selected?.id === entry.id} aria-current={selected?.id === entry.id ? 'true' : undefined} onclick={() => void selectRevision(entry)}>
-            <strong>{entry.path}</strong><small title={new Date(entry.created_at).toLocaleString()}>{rel(entry.created_at)} · {entry.reason}{entry.committed ? '' : ' · write not confirmed'}</small>
-          </button>
-        {/each}
-        {#if more}<button class="btn small" disabled={loading} onclick={() => void loadOlder()}>Load older edits</button>{/if}
-      </nav>
-      <div class="revision-detail">
-        {#if selected}
-          <h3>{selected.path}</h3>
-          <div class="actions"><button class="btn small" disabled={busy || selected.before === null || currentHash === null} onclick={() => void restoreRevision('before')}>Restore before version</button><button class="btn small" disabled={busy || currentHash === null} onclick={() => void restoreRevision('after')}>Restore after version</button></div>
-          {#if (selected.before?.length ?? 0) + selected.after.length <= 500_000}
-            <DiffView before={selected.before ?? ''} after={selected.after} mode="line" contextLines={4} />
-          {:else}
-            <p>This revision is large. Full versions are available below; restore always uses the complete content.</p>
-            <details><summary>Before version</summary><pre>{selected.before ?? '(File did not exist)'}</pre></details>
-            <details><summary>After version</summary><pre>{selected.after}</pre></details>
-          {/if}
-        {:else}<p>Select an edit to compare its versions.</p>{/if}
-      </div>
+      <ListDetail
+        module="vault"
+        pane="revisions"
+        name="Edits"
+        open={phoneOpen && !!selected}
+        onback={() => (phoneOpen = false)}
+        empty={!loading && !error && !vault.historyPath.trim() && visibleRevisions.length === 0}
+      >
+        {#snippet list()}
+          <ListPane count={visibleRevisions.length} loading={loading && revisions.length === 0}>
+            {#snippet searchRow()}
+              <input class="input" dir="ltr" type="search" aria-label="History file path" bind:value={vault.historyPath} placeholder="Filter by file path" />
+            {/snippet}
+            {#each visibleRevisions as entry (entry.id)}
+              <SideRow
+                icon="clock"
+                title={entry.path}
+                meta="{rel(entry.created_at)} · {entry.reason}{entry.committed ? '' : ' · write not confirmed'}"
+                tip={new Date(entry.created_at).toLocaleString()}
+                selected={selected?.id === entry.id}
+                onclick={() => void selectRevision(entry)}
+              />
+            {:else}
+              <p class="none">No edits match “{vault.historyPath.trim()}”. <button class="btn small ghost" onclick={() => (vault.historyPath = '')}>Clear</button></p>
+            {/each}
+            {#snippet footer()}
+              {#if more}<button class="btn small" disabled={loading} onclick={() => void loadOlder()}>Load older edits</button>{/if}
+            {/snippet}
+          </ListPane>
+        {/snippet}
+        <div class="revision-detail">
+          {#if visibleRevisions.length === 0 && !loading && !error && !vault.historyPath.trim()}
+            <p>No recorded edits. History begins with writes made after this feature was installed.</p>
+          {:else if selected}
+            <h3>{selected.path}</h3>
+            <div class="actions"><button class="btn small" disabled={busy || selected.before === null || currentHash === null} onclick={() => void restoreRevision('before')}>Restore before version</button><button class="btn small" disabled={busy || currentHash === null} onclick={() => void restoreRevision('after')}>Restore after version</button></div>
+            {#if (selected.before?.length ?? 0) + selected.after.length <= 500_000}
+              <DiffView before={selected.before ?? ''} after={selected.after} mode="line" contextLines={4} />
+            {:else}
+              <p>This revision is large. Full versions are available below; restore always uses the complete content.</p>
+              <details><summary>Before version</summary><pre>{selected.before ?? '(File did not exist)'}</pre></details>
+              <details><summary>After version</summary><pre>{selected.after}</pre></details>
+            {/if}
+          {:else}<p>Select an edit to compare its versions.</p>{/if}
+        </div>
+      </ListDetail>
     </div>
   {/if}
 </section>
 <style>
-  .recovery { padding: 18px; overflow: auto; min-height: 0; height: 100%; color: var(--text); }
+  .recovery { padding: 18px; overflow: auto; min-height: 0; height: 100%; color: var(--text); display: flex; flex-direction: column; }
+  .recovery > * { flex: none; }
   header, .actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; } header { justify-content: space-between; }
   h2 { margin: 0; font-size: var(--fs-xl); } h3 { overflow-wrap: anywhere; font-size: var(--fs-m); } p, small, label { font-size: var(--fs-s); color: var(--text-dim); }
-  .rev, input { padding: 6px 8px; border: 1px solid var(--border); background: var(--bg); color: var(--text); border-radius: var(--radius-s); font: inherit; }
-  .rev { cursor: pointer; } .rev:hover { background: var(--hover); } input { min-width: 0; max-width: 100%; box-sizing: border-box; }
+  .trash-entry input { padding: 6px 8px; border: 1px solid var(--border); background: var(--bg); color: var(--text); border-radius: var(--radius-s); font: inherit; min-width: 0; max-width: 100%; box-sizing: border-box; }
   .trash-entry { display: flex; align-items: center; gap: 12px; padding: 12px 0; border-bottom: 1px solid var(--border); flex-wrap: wrap; }
   .trash-entry > div { flex: 1; min-width: 180px; overflow-wrap: anywhere; } small { display: block; margin-top: 4px; }
   label { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
-  .history-layout { display: grid; grid-template-columns: minmax(190px, 30%) minmax(0, 1fr); gap: 16px; margin-top: 14px; }
-  nav { display: flex; flex-direction: column; gap: 6px; } nav .rev { text-align: start; overflow-wrap: anywhere; }
-  /* Many "Load older" pages: off-screen rows skip layout and paint. */
-  nav .rev { content-visibility: auto; contain-intrinsic-size: auto 52px; }
-  nav .rev.active { border-color: var(--accent); background: var(--accent-soft); }
-  .revision-detail { min-width: 0; overflow: auto; } .actions { margin-bottom: 12px; }
+  /* The list / detail fills what the intro leaves (min one screenful). */
+  .recovery > .history-layout { flex: 1 0 360px; display: flex; min-height: 0; margin-top: 14px; border-block-start: 1px solid var(--separator); }
+  .revision-detail { flex: 1; min-width: 0; overflow: auto; padding: 0 16px 16px; } .actions { margin-bottom: 12px; }
+  .none { padding-inline: 8px; }
   pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 500px; overflow: auto; font-size: var(--fs-s); }
-  @media (max-width: 640px) { .history-layout { grid-template-columns: minmax(0, 1fr); } nav { max-height: 240px; overflow: auto; } }
 </style>

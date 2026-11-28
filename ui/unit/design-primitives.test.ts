@@ -58,12 +58,13 @@ test('Modal: only a press that began on the backdrop closes; dismissable gates e
   assert.match(src, /if \(dismissable\) onclose\(\)/);
 });
 
-test('BottomNav "More" sheet is a real dialog', () => {
-  // The sheet is the shared shell Drawer, which owns the dialog semantics
-  // (role=dialog, pushModal, dialogFocus, Esc, scrim) — asserted for Drawer above.
+test('BottomNav "Menu" opens the ONE phone drawer, a real dialog', () => {
+  // The tab opens the shell's Navigator Drawer (PhoneNavDrawer), which owns
+  // the dialog semantics (role=dialog, pushModal, dialogFocus, Esc, scrim).
   const src = read('src/shell/BottomNav.svelte');
-  assert.match(src, /<Drawer\b[^>]*title="More"/);
-  assert.match(src, /aria-expanded=\{moreOpen\}/);
+  assert.match(src, /onclick=\{\(\) => \(ui\.navDrawerOpen = true\)\}/);
+  assert.match(src, /aria-expanded=\{ui\.navDrawerOpen\}/);
+  assert.doesNotMatch(src, /<Drawer\b/, 'no second module drawer');
   assert.doesNotMatch(src, /svelte-ignore/);
   const drawer = read('src/shell/Drawer.svelte');
   assert.match(drawer, /dialogFocus/);

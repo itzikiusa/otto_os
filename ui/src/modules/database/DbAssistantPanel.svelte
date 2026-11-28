@@ -7,6 +7,7 @@
   // tool and writes its proposed SQL, surfaced below with Insert / Run. The
   // session is hidden from the Agents section (meta.source = 'db_assist').
   import Icon from '../../lib/components/Icon.svelte';
+  import DetailPane from '../../lib/components/side/DetailPane.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import Terminal from '../../lib/components/Terminal.svelte';
   import AgentByline from '../../lib/components/AgentByline.svelte';
@@ -101,50 +102,35 @@
   }
 </script>
 
-<section class="db-assist">
-  <header class="da-head">
-    <span class="da-title"><Icon name="zap" size={14} /> {info.title}</span>
-    {#if !started && providers.length > 1}
-      <select
-        class="da-provider"
-        value={database.assistProvider}
-        onchange={(e) => database.setAssistProvider((e.currentTarget as HTMLSelectElement).value)}
-        title="Which agent investigates this database"
-      >
-        {#each providers as p (p)}
-          <option value={p}>{p}</option>
-        {/each}
-      </select>
-    {/if}
+<!-- The page's Detail pane: inline beside the view while there is room, a
+     sheet otherwise (full width on a phone). Its header: the mode, Stop while a
+     turn runs, ⋯ Summarize, Close (discards, after asking). -->
+<DetailPane
+  module="database"
+  pane="assistant"
+  title={info.title}
+  open={database.assistOpen}
+  onclose={() => void close()}
+  legacy={{ w: 'db.assistW' }}
+  menu={() => [{ label: 'Summarize…', icon: 'download', disabled: database.assistBusy || !database.assistId, title: 'Write a summary of this investigation and download it as Markdown', action: () => void database.summarizeAssist() }]}
+  testid="db-assistant"
+>
+  {#snippet action()}
     {#if database.assistBusy}
       <span class="da-working"><LiveWorkingDot label="Working…" /></span>
       <!-- Stop of a query/turn: neutral and immediate (patterns §7) — the
            session stays live, nothing is discarded. -->
       <button
-        class="btn small da-stop"
+        class="icon-btn da-stop"
         onclick={() => database.stopAssist()}
+        aria-label="Stop"
         title="Stop waiting on this turn — releases the input (a started session stays live)"
       >
-        <Icon name="stop" size={12} /> Stop
+        <Icon name="stop" size={14} />
       </button>
     {/if}
-    <button
-      class="btn small da-summarize"
-      onclick={() => void database.summarizeAssist()}
-      disabled={database.assistBusy || !database.assistId}
-      title="Write a summary of this investigation and download it as Markdown"
-    >
-      <Icon name="download" size={13} /> Summarize
-    </button>
-    <button
-      class="icon-btn"
-      onclick={() => void close()}
-      aria-label="Close DB assistant"
-      title="Close — discards the session and working files"
-    >
-      <Icon name="x" size={14} />
-    </button>
-  </header>
+  {/snippet}
+<section class="db-assist">
 
   <!-- The live, fully-interactive shell of the chosen agent (the SAME Terminal as
        Agents). readOnly is FALSE — the user types directly to the agent here. -->
@@ -234,6 +220,7 @@
     </div>
   {/if}
 </section>
+</DetailPane>
 
 <style>
   .db-assist {
@@ -247,32 +234,6 @@
     color: var(--text);
     overflow: hidden;
   }
-  .da-head {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    padding: 8px 10px;
-    border-bottom: 1px solid var(--border);
-    flex: none;
-  }
-  .da-title {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    font-size: var(--fs-m);
-    font-weight: 600;
-    white-space: nowrap;
-  }
-  .da-provider {
-    border: 1px solid var(--border);
-    background: var(--bg);
-    color: var(--text);
-    border-radius: var(--radius-s);
-    font-size: var(--fs-xs);
-    padding: 2px 4px;
-    cursor: pointer;
-    text-transform: capitalize;
-  }
   .da-working {
     display: inline-flex;
     align-items: center;
@@ -280,10 +241,6 @@
     font-size: var(--fs-xs);
     color: var(--accent-text);
     font-weight: 600;
-  }
-  /* Summarize is pushed to the far end; Stop sits beside "working…". */
-  .da-summarize {
-    margin-inline-start: auto;
   }
   .da-empty .sub.warn {
     color: var(--warning);

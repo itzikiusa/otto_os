@@ -17,6 +17,9 @@
   import Icon from '../../lib/components/Icon.svelte';
   import { loadErrorText } from '../../lib/loadError';
   import { guardUnsaved } from '../../lib/leaveGuard';
+  import ListDetail from '../../lib/components/side/ListDetail.svelte';
+  import ListPane from '../../lib/components/side/ListPane.svelte';
+  import SideRow from '../../lib/components/side/SideRow.svelte';
   let groups = $state<AccessGroup[]>([]),
     roles = $state<AccessRole[]>([]),
     users = $state<User[]>([]);
@@ -41,6 +44,8 @@
   // time (like Context library's Skills | Souls | Context) keeps ONE primary
   // action on screen instead of two stacked forms each with its own.
   let tab = $state<'groups' | 'presets'>('groups');
+  /** Phone: the group / preset form is pushed over its list ("‹ Groups"). */
+  let phoneOpen = $state(false);
   // Save stays disabled until something changed (layout.md → Settings form).
   const groupDirty = $derived(
     !selected || name.trim() !== selected.name || description.trim() !== (selected.description ?? ''),
@@ -105,6 +110,8 @@
     }),
   );
   async function chooseGroup(group?: AccessGroup) {
+    if (busy) return;
+    phoneOpen = true;
     if (group?.id === selected?.id && group) return;
     const dirty = selected ? groupDirty : !!(name.trim() || description.trim());
     if (dirty && !(await confirmer.ask('Switching groups discards your unsaved changes.', { title: 'Discard unsaved changes?', danger: true, confirmLabel: 'Discard', cancelLabel: 'Keep editing' }))) return;
@@ -112,7 +119,9 @@
     else newGroup();
   }
   async function chooseRole(role?: AccessRole) {
-    if (role?.id === roleId) return;
+    if (busy) return;
+    phoneOpen = true;
+    if (role?.id === roleId && role) return;
     const dirty = savedRole ? roleDirty : !!(roleName.trim() || roleDescription.trim() || operations.length);
     if (dirty && !(await confirmer.ask('Switching presets discards your unsaved changes.', { title: 'Discard unsaved changes?', danger: true, confirmLabel: 'Discard', cancelLabel: 'Keep editing' }))) return;
     editRole(role);
@@ -239,60 +248,59 @@
   }
 </script>
 
+<!-- The shared row look, drawn here so a row is named by its title and is
+     disabled while a save is in flight (selection locks until it returns). -->
+{#snippet row(title: string, meta: string | null | undefined, tip: string, on: boolean, pick: () => void)}
+  <div class="side-row" class:two-line={!!meta} class:selected={on}>
+    <button type="button" class="side-row-main" data-side-row aria-label={title} title={tip} aria-current={on ? 'true' : undefined} disabled={busy} onclick={pick}>
+      <span class="side-row-text"><span class="side-row-title" dir="auto">{title}</span>{#if meta}<span class="side-row-meta" dir="auto">{meta}</span>{/if}</span>
+    </button>
+  </div>
+{/snippet}
+
 <div class="settings-section">
   <PageHeader
     title={sectionLabel('access-groups')}
     subtitle="Reusable access rules across resources"
-  />
-  <PageBody width="readable">
-  <SectionIntro>
-    Groups grant access to resources, not pages: <strong>users still need page access in Settings → Users.</strong>
-    Role presets are reusable sets of operations you copy into a resource rule.
-  </SectionIntro>
-<section class="access-groups">
-  {#if !auth.isRoot}<p class="hint">Only the root account can manage groups and role presets.</p>
+  >
+    {#snippet tabs()}
+      {#if auth.isRoot}
+        <div class="segmented" role="group" aria-label="Show">
+          <button class:active={tab === 'groups'} aria-pressed={tab === 'groups'} onclick={() => { tab = 'groups'; error = ''; }}>
+            Groups <span class="count">{groups.length}</span>
+          </button>
+          <button class:active={tab === 'presets'} aria-pressed={tab === 'presets'} onclick={() => { tab = 'presets'; error = ''; }}>
+            Role presets <span class="count">{roles.length}</span>
+          </button>
+        </div>
+      {/if}
+    {/snippet}
+  </PageHeader>
+  {#if !auth.isRoot}
+    <PageBody width="readable"><p class="hint">Only the root account can manage groups and role presets.</p></PageBody>
   {:else}
+  <PageBody fill padded={false}>
   <LoadState what="groups and role presets" {loading} error={loadError} empty={loading || !!loadError} rows={4} onretry={() => void load()}>
-    <div class="segmented tabs" role="group" aria-label="Show">
-      <button class:active={tab === 'groups'} aria-pressed={tab === 'groups'} onclick={() => { tab = 'groups'; error = ''; }}>
-        Groups <span class="count">{groups.length}</span>
-      </button>
-      <button class:active={tab === 'presets'} aria-pressed={tab === 'presets'} onclick={() => { tab = 'presets'; error = ''; }}>
-        Role presets <span class="count">{roles.length}</span>
-      </button>
-    </div>
-    {#if error}<p class="error" use:announceShown={{ text: error, assertive: true }}><Icon name="warning" size={12} /> {error}</p>{/if}
     {#if tab === 'groups'}
-    <section aria-label="Groups">
       <!-- An empty list hides its pane: the page opens on the create form. -->
-      <div class="layout" class:single={groups.length === 0}>
-        {#if groups.length}
-        <div class="list-pane">
-          <div class="list-head">
-            <span class="list-label">{groups.length ? 'All groups' : 'No groups yet'}</span>
-            <button class="icon-btn" aria-label="New group" title="New group" disabled={busy} onclick={() => chooseGroup()}><Icon name="plus" size={14} /></button>
-          </div>
-          <nav class="list" aria-label="Access groups">
+      <ListDetail module="settings" pane="access-groups" name="Groups" open={phoneOpen} onback={() => (phoneOpen = false)} empty={groups.length === 0}>
+        {#snippet list()}
+          <ListPane count={groups.length} primary={{ icon: 'plus', label: 'New group', onclick: () => void chooseGroup() }} testid="access-groups-list">
             {#if !selected}
-              <div class="lrow active new" aria-current="true"><span class="row-name">{name.trim() || 'New group'}</span><span class="row-meta">Not created yet</span></div>
+              <SideRow title={name.trim() || 'New group'} meta="Not created yet" selected onclick={() => {}} />
             {/if}
             {#each groups as group (group.id)}
-              <button
-                class="lrow"
-                class:active={selected?.id === group.id}
-                aria-current={selected?.id === group.id ? 'true' : undefined}
-                aria-label={group.name}
-                title={group.description ?? group.name}
-                disabled={busy}
-                onclick={() => chooseGroup(group)}
-              >
-                <span class="row-name">{group.name}</span>
-                {#if group.description}<span class="row-meta">{group.description}</span>{/if}
-              </button>
+              {@render row(group.name, group.description, group.description ?? group.name, selected?.id === group.id, () => void chooseGroup(group))}
             {/each}
-          </nav>
-        </div>
-        {/if}
+          </ListPane>
+        {/snippet}
+        <div class="ag-content">
+          <section class="access-groups" aria-label="Groups">
+            <SectionIntro>
+              Groups grant access to resources, not pages: <strong>users still need page access in Settings → Users.</strong>
+              Role presets are reusable sets of operations you copy into a resource rule.
+            </SectionIntro>
+            {#if error}<p class="error" use:announceShown={{ text: error, assertive: true }}><Icon name="warning" size={12} /> {error}</p>{/if}
         <fieldset disabled={busy} class="detail">
           <legend class="detail-title">{selected ? selected.name : 'New group'}</legend>
           <div class="field"><label for="ag-name">Group name</label><input dir="auto" id="ag-name" class="input" bind:value={name} maxlength="120" placeholder="Database readers" /></div>
@@ -347,40 +355,27 @@
             </div>
           {/if}
         </fieldset>
-      </div>
-    </section>
+          </section>
+        </div>
+      </ListDetail>
     {:else}
-    <section aria-label="Role presets">
-      <p class="hint">
-        Copy a preset into a resource rule. Editing a preset does not change existing rules.
-      </p>
-      <div class="layout" class:single={roles.length === 0}>
-        {#if roles.length}
-        <div class="list-pane">
-          <div class="list-head">
-            <span class="list-label">{roles.length ? 'All presets' : 'No presets yet'}</span>
-            <button class="icon-btn" aria-label="New preset" title="New preset" disabled={busy} onclick={() => chooseRole()}><Icon name="plus" size={14} /></button>
-          </div>
-          <nav class="list" aria-label="Role presets">
+      <ListDetail module="settings" pane="role-presets" name="Role presets" open={phoneOpen} onback={() => (phoneOpen = false)} empty={roles.length === 0}>
+        {#snippet list()}
+          <ListPane count={roles.length} primary={{ icon: 'plus', label: 'New preset', onclick: () => void chooseRole() }} testid="role-presets-list">
             {#if !roleId}
-              <div class="lrow active new" aria-current="true"><span class="row-name">{roleName.trim() || 'New preset'}</span><span class="row-meta">Not created yet</span></div>
+              <SideRow title={roleName.trim() || 'New preset'} meta="Not created yet" selected onclick={() => {}} />
             {/if}
             {#each roles as role (role.id)}
-              <button
-                class="lrow"
-                class:active={roleId === role.id}
-                aria-current={roleId === role.id ? 'true' : undefined}
-                aria-label={role.name}
-                disabled={busy}
-                onclick={() => chooseRole(role)}
-              >
-                <span class="row-name">{role.name}</span>
-                <span class="row-meta">{resourceLabels[role.kind]}</span>
-              </button>
+              {@render row(role.name, resourceLabels[role.kind], role.name, roleId === role.id, () => void chooseRole(role))}
             {/each}
-          </nav>
-        </div>
-        {/if}
+          </ListPane>
+        {/snippet}
+        <div class="ag-content">
+          <section class="access-groups" aria-label="Role presets">
+            <p class="hint">
+              Copy a preset into a resource rule. Editing a preset does not change existing rules.
+            </p>
+            {#if error}<p class="error" use:announceShown={{ text: error, assertive: true }}><Icon name="warning" size={12} /> {error}</p>{/if}
         <fieldset disabled={busy} class="detail">
           <legend class="detail-title">{roleId ? roleName || 'Preset' : 'New preset'}</legend>
           <div class="field"><label for="rp-name">Preset name</label><input dir="auto" id="rp-name" class="input" bind:value={roleName} maxlength="120" placeholder="Read-only analyst" /></div>
@@ -427,13 +422,13 @@
             >
           </div>
         </fieldset>
-      </div>
-    </section>
+          </section>
+        </div>
+      </ListDetail>
     {/if}
   </LoadState>
-  {/if}
-</section>
   </PageBody>
+  {/if}
 </div>
 
 <style>
@@ -445,30 +440,25 @@
     height: 100%;
     min-height: 0;
   }
+  .ag-content {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+    padding: 20px 24px 32px;
+  }
   .access-groups {
     display: flex;
     flex-direction: column;
-    gap: 24px;
+    gap: 12px;
     color: var(--text);
     max-width: var(--settings-col);
   }
-  .tabs {
-    align-self: flex-start;
-  }
-  .tabs .count {
+  .count {
     color: var(--text-dim);
     font-variant-numeric: tabular-nums;
   }
-  .access-groups :global(section) {
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
-  }
   p {
     margin: 0;
-  }
-  .count {
-    font-weight: 500;
   }
   .sub-title {
     margin: 8px 0 0;
@@ -485,82 +475,6 @@
   }
   .dim {
     color: var(--text-dim);
-  }
-  .layout {
-    display: grid;
-    grid-template-columns: minmax(180px, 240px) minmax(0, 1fr);
-    gap: 16px;
-    align-items: start;
-  }
-  .layout.single {
-    grid-template-columns: minmax(0, 1fr);
-  }
-  /* Phone: the group list stacks above the editor (layout.md §4.1). */
-  @media (max-width: 640px) {
-    .layout {
-      grid-template-columns: minmax(0, 1fr);
-    }
-  }
-  .list-pane {
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
-    min-width: 0;
-  }
-  .list-head {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    min-height: 24px;
-  }
-  .list-label {
-    font-size: var(--fs-xs);
-    color: var(--text-dim);
-  }
-  .list {
-    display: flex;
-    flex-direction: column;
-    border: 1px solid var(--border);
-    border-radius: var(--radius-m);
-    background: var(--surface);
-    overflow: hidden auto;
-    max-height: 400px;
-  }
-  .lrow {
-    display: flex;
-    flex-direction: column;
-    gap: 1px;
-    padding: 6px 10px;
-    text-align: start;
-    border: none;
-    background: transparent;
-    color: var(--text);
-    font: inherit;
-    cursor: pointer;
-    min-width: 0;
-  }
-  .lrow + .lrow {
-    border-top: 1px solid var(--border);
-  }
-  .lrow:hover:not(:disabled):not(.active) {
-    background: var(--hover);
-  }
-  .lrow.active {
-    background: var(--accent-soft);
-  }
-  .row-name {
-    font-size: var(--fs-m);
-    min-width: 0;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-  .row-meta {
-    font-size: var(--fs-xs);
-    color: var(--text-dim);
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
   }
   .detail {
     display: flex;
@@ -648,11 +562,8 @@
     margin-top: 6px;
   }
   @container (max-width: 640px) {
-    .layout {
-      grid-template-columns: 1fr;
-    }
-    .list {
-      max-height: 180px;
+    .ag-content {
+      padding: 14px 16px 24px;
     }
   }
 </style>

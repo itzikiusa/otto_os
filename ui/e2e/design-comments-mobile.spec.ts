@@ -74,7 +74,7 @@ test('tap to pin a comment, then read and resolve it in the Details sheet', asyn
   await expectFullyInViewport(page, thread.getByTestId('design-comment-resolve'));
   await thread.getByTestId('design-comment-resolve').tap();
   await expect(page.getByTestId('design-comments-resolved')).toHaveText(/Resolved \(1\)/);
-  await page.getByRole('button', { name: 'Back to design', exact: true }).tap();
+  await page.getByRole('button', { name: 'Close Design details', exact: true }).tap();
   await expect(page.getByTestId('design-stage')).toBeVisible();
   await expect(page.getByTestId('design-pin')).toHaveCount(0);
 });
@@ -82,7 +82,10 @@ test('tap to pin a comment, then read and resolve it in the Details sheet', asyn
 test('an empty design explains how to comment, in the sheet', async ({ page }) => {
   const id = await design(`Phone empty ${stamp}`);
   await open(page, id);
-  await page.getByRole('button', { name: 'Show design details', exact: true }).tap();
+  // Design details is the Detail pane: a sheet on a phone (opened here), a
+  // column beside the stage where it fits (already open).
+  const toggle = page.getByTestId('design-details-toggle');
+  if ((await toggle.getAttribute('aria-pressed')) !== 'true') await toggle.tap();
   await page.getByTestId('design-tab-comments').tap();
   await expect(page.getByTestId('design-comments')).toContainText('No comments yet');
   await expect(page.getByTestId('design-comments')).toContainText('Press C or use Comment to pin one on the design.');

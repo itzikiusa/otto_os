@@ -1,4 +1,5 @@
 import { test, expect, type Page } from '@playwright/test';
+import { idePane } from './ide-panes';
 import { mkdtempSync, realpathSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -53,9 +54,9 @@ async function assertZeroCutOff(page: Page, step: string): Promise<void> {
 async function toggleMode(page: Page): Promise<void> {
   const { width: vw, height: vh } = page.viewportSize()!;
   if (vw <= 640) {
-    await page.locator('nav.bottomnav').getByRole('button', { name: /^More/ }).click();
-    const sheet = page.getByRole('dialog', { name: 'More' });
-    await expectFullyInViewport(page, sheet, 'More drawer');
+    await page.locator('nav.bottomnav').getByTestId('bottomnav-menu').click();
+    const sheet = page.locator('.drawer[aria-label="Navigator"]');
+    await expectFullyInViewport(page, sheet, 'Menu drawer');
     await sheet.getByTestId('light-toggle').click();
     await expect(sheet).toBeHidden();
     return;
@@ -178,16 +179,10 @@ test('IDE Devices panel, Toolchains modal (iOS/Android/Flutter), and Browser↔I
   await assertZeroCutOff(page, 'ide initial');
 
   // On stacked phone/landscape viewports, switch to the Tools pane first.
-  const toolsTab = page.getByTestId('ide-stack-tab-tools');
   const dock = page.getByTestId('ide-bottom-dock');
-  await expect(toolsTab.or(dock).first()).toBeVisible({ timeout: 20_000 });
-  if (await toolsTab.isVisible()) {
-    await expect(async () => {
-      await toolsTab.click();
-      await expect(toolsTab).toHaveAttribute('aria-pressed', 'true');
-      await expect(dock).toBeVisible({ timeout: 2_000 });
-    }).toPass({ timeout: 15_000 });
-  }
+  await expect(page.getByTestId('ide-page')).toBeVisible({ timeout: 20_000 });
+  await idePane(page, 'tools');
+  await expect(dock).toBeVisible();
 
   // Open the on-demand Devices tool window via dock view menu (or directly if already visible).
   const devicesTab = page.getByTestId('ide-tab-devices');
@@ -197,7 +192,7 @@ test('IDE Devices panel, Toolchains modal (iOS/Android/Flutter), and Browser↔I
   }
   await expect(devicesTab).toBeVisible();
   await devicesTab.click();
-  await expect(page.locator('[aria-label="Simulators and emulators"]')).toBeVisible({ timeout: 15_000 });
+  await expect(page.locator('aside[aria-label="Devices"]')).toBeVisible({ timeout: 15_000 });
   await assertZeroCutOff(page, 'ide devices tab');
 
   // Open and validate the IDE New Simulator / AVD modal (fits in viewport, platform toggle, submit validation).

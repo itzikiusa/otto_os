@@ -581,3 +581,58 @@ fn js_test_items_use_the_packages_runner_from_its_root_with_an_escaped_name() {
     );
     assert_eq!(spec.cwd.as_deref(), Some(&*api.to_string_lossy()));
 }
+
+/// Karma (Jasmine) selects a spec by its suites' titles and its own; only an
+/// Angular CLI project debugs Karma (through js-debug), plain Karma stays Run-only.
+#[test]
+fn karma_items_debug_by_jasmine_full_name_only_in_angular_projects() {
+    let tmp = tempfile::tempdir().unwrap();
+    let src = "\
+describe('App', () => {
+  it('should create the app', () => {});
+  describe('greeting', () => {
+    it('says hello', () => {});
+  });
+  it('should render title', () => {});
+});
+";
+    for (dir, angular) in [("ng", true), ("plain", false)] {
+        let root = tmp.path().join(dir);
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(
+            root.join("package.json"),
+            r#"{"devDependencies":{"karma":"6"}}"#,
+        )
+        .unwrap();
+        if angular {
+            std::fs::write(root.join("angular.json"), "{}").unwrap();
+        }
+        let path = root.join("src/app.spec.ts").to_string_lossy().into_owned();
+        let items = detect_gutter_items(&path, src, &[]);
+        assert!(items
+            .iter()
+            .all(|i| i.run_spec.runner == IdeRunnerKind::Karma));
+        let names: Vec<Option<&str>> = items
+            .iter()
+            .map(|i| i.run_spec.debug_test_name.as_deref())
+            .collect();
+        if angular {
+            assert_eq!(
+                names,
+                [
+                    Some("App"),
+                    Some("App should create the app"),
+                    Some("App greeting"),
+                    Some("App greeting says hello"),
+                    Some("App should render title"),
+                ]
+            );
+            assert!(items
+                .iter()
+                .all(|i| i.run_spec.debug_program.as_deref() == Some(path.as_str())));
+        } else {
+            assert!(names.iter().all(Option::is_none), "{names:?}");
+            assert!(items.iter().all(|i| i.run_spec.debug_program.is_none()));
+        }
+    }
+}

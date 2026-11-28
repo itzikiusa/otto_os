@@ -4,12 +4,14 @@
 // behind one visible button. The menu is the editor's own context menu
 // (cm-ide-refactor.ts), touch-shaped: Go to definition, Find usages, Show documentation,
 // Rename, Quick fix, Find / Replace in file, Go to line and Text size first, then the
-// rest of the desktop menu. With no code editor on screen (a preview, a table) it falls
+// rest of the desktop menu. Navigate Back is a row here, not a second ‹ beside the
+// page header's Back. With no code editor on screen (a preview, a table) it falls
 // back to the file-level rows.
 
 import { ctxMenu, type MenuItem } from '../../../lib/contextmenu.svelte';
 import { idePreferences } from '../../../lib/idePreferences.svelte';
 import { openGoToLine } from '../search/ideQuickOpen.svelte';
+import { canIdeNavigateBack, navigateIdeBack } from './ideEditorStoreBridge.svelte';
 import { nextIdeFontSize } from './idePhoneChromeModel';
 
 export function bumpIdeFontSize(delta: -1 | 1): void {
@@ -19,6 +21,7 @@ export function bumpIdeFontSize(delta: -1 | 1): void {
 /** Rows when no code editor is on screen. */
 export function ideTouchFallbackRows(): MenuItem[] {
   return [
+    { label: 'Navigate Back', icon: 'chevronLeft', disabled: !canIdeNavigateBack(), action: () => void navigateIdeBack() },
     { label: 'Go to Line…', icon: 'step', action: () => openGoToLine() },
     { label: 'Text Size', icon: 'text', children: [
       { label: 'Larger', icon: 'plus', action: () => bumpIdeFontSize(1) },
@@ -41,7 +44,7 @@ export async function openIdeEditorTouchMenu(anchor: HTMLElement): Promise<void>
       import('../../../lib/components/cm-ide-refactor'),
     ]);
     const view = EditorView.findFromDOM(dom);
-    if (view && refactor.openIdeEditorMenu(view, r.right, r.bottom + 4, { goToLine: () => openGoToLine(), textSize: bumpIdeFontSize })) return;
+    if (view && refactor.openIdeEditorMenu(view, r.right, r.bottom + 4, { goToLine: () => openGoToLine(), textSize: bumpIdeFontSize, back: () => void navigateIdeBack(), canBack: canIdeNavigateBack() })) return;
   }
   ctxMenu.showAt(anchor, ideTouchFallbackRows(), { align: 'end' });
 }

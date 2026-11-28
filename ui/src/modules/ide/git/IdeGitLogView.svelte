@@ -9,9 +9,9 @@
   import EmptyState from '../../../lib/components/EmptyState.svelte';
   import Icon from '../../../lib/components/Icon.svelte';
   import LoadState from '../../../lib/components/LoadState.svelte';
-  import PaneDivider from '../../../lib/components/PaneDivider.svelte';
   import { loadErrorText } from '../../../lib/loadError';
-  import { loadPaneWidth } from '../../../lib/paneResizer';
+  import ListPane from '../../../lib/components/side/ListPane.svelte';
+  import ListDetail from '../../../lib/components/side/ListDetail.svelte';
   import { git } from '../../../lib/stores/git.svelte';
   import { rel } from '../../../lib/stores/now.svelte';
   import BlamePanel from '../../../lib/diff/BlamePanel.svelte';
@@ -40,12 +40,11 @@
     modeSeq = 0,
   }: Props = $props();
 
-  const LS_LOG_W = 'otto.ide.gitLogW';
-  const PANE_MIN = 240;
-  const PANE_MAX = 640;
+  // The commits are the list of a ListDetail nested in the tool window (rich rows: `wide`; the old key is read once).
   const LOG_LIMIT = 250;
 
-  let listW = $state(loadPaneWidth(LS_LOG_W, 380, PANE_MIN, PANE_MAX));
+  // A phone pushes: the list fills the tool window; a tapped commit is shown with "‹ Commits" in the page header.
+  let phoneOpen = $state(false);
   let branchFilter = $state<string>('__all__');
   let searchQuery = $state('');
   let branches = $state.raw<RefBranch[]>([]);
@@ -292,8 +291,11 @@
     </div>
   {:else if mode === 'log' || (mode === 'file' && relFilePath)}
     <div class="gl-split">
-      <aside class="gl-left" style:inline-size="{listW}px">
-        <div class="gl-filters">
+      <!-- A list nested in the tool window (the page's list is the explorer). -->
+      <ListDetail module="ide" pane="gitLog" name="Commits" wide open={phoneOpen} onback={() => (phoneOpen = false)} defaultWidth={380} legacy={{ w: 'otto.ide.gitLogW' }}>
+      {#snippet list()}
+      <ListPane count={filteredCommits.length}>
+        {#snippet searchRow()}<div class="gl-filters">
           {#if mode === 'log'}
             <select
               class="gl-branch-select"
@@ -320,9 +322,8 @@
               data-testid="ide-git-log-search"
             />
           </div>
-        </div>
+        </div>{/snippet}
 
-        <div class="gl-commits">
           <LoadState what="commits" loading={logLoading} error={logError} empty={filteredCommits.length === 0} variant="compact">
             {#snippet emptyView()}
               <EmptyState
@@ -334,29 +335,27 @@
             {/snippet}
 
             {#each filteredCommits as c (c.sha)}
-              <button
-                type="button"
-                class="gl-commit-row"
-                class:active={selectedCommit?.sha === c.sha}
-                onclick={() => (selectedSha = c.sha)}
-                data-testid="ide-git-commit-row"
-              >
-                <div class="gl-commit-top">
-                  <span class="gl-subject ellipsis" dir="auto" title={c.subject}>{c.subject || '(no commit message)'}</span>
-                  {#if c.refs.length > 0}<Badge tone="accent" variant="outline" label={c.refs[0]} />{/if}
-                </div>
-                <div class="gl-commit-meta">
-                  <span class="ellipsis">{c.author}</span>
-                  <span class="mono">{c.short_sha}</span>
-                  <span class="mono">{rel(c.date, { compact: true })}</span>
-                </div>
-              </button>
+              <div class="side-row two-line" class:selected={selectedCommit?.sha === c.sha}>
+                <button
+                  type="button"
+                  class="side-row-main gl-commit-row"
+                  class:active={selectedCommit?.sha === c.sha}
+                  data-side-row
+                  aria-current={selectedCommit?.sha === c.sha ? 'true' : undefined}
+                  onclick={() => { selectedSha = c.sha; phoneOpen = true; }}
+                  data-testid="ide-git-commit-row"
+                >
+                  <span class="side-row-text">
+                    <span class="side-row-title" dir="auto" title={c.subject}>{c.subject || '(no commit message)'}</span>
+                    <span class="side-row-meta">{c.author} · <span class="mono">{c.short_sha}</span> · {rel(c.date, { compact: true })}</span>
+                  </span>
+                  {#if c.refs.length > 0}<span class="side-row-trailing"><Badge tone="accent" variant="outline" label={c.refs[0]} /></span>{/if}
+                </button>
+              </div>
             {/each}
           </LoadState>
-        </div>
-      </aside>
-
-      <PaneDivider bind:width={listW} storageKey={LS_LOG_W} min={PANE_MIN} max={PANE_MAX} defaultWidth={380} label="Resize commit list" />
+      </ListPane>
+      {/snippet}
 
       <section class="gl-right" aria-label="Commit diff">
         {#if !selectedCommit}
@@ -398,6 +397,7 @@
           </div>
         {/if}
       </section>
+      </ListDetail>
     </div>
   {/if}
 </div>
@@ -410,18 +410,10 @@
   .gl-jump-input { inline-size: 56px; block-size: 22px; padding-inline: 6px; font-size: var(--fs-xs); color: var(--text); background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-s); }
   .gl-blame-wrap { flex: 1; min-block-size: 0; overflow: auto; }
   .gl-split { display: flex; flex: 1; min-block-size: 0; min-inline-size: 0; overflow: hidden; }
-  .gl-left { display: flex; flex-direction: column; flex-shrink: 0; min-block-size: 0; min-inline-size: 200px; border-inline-end: 1px solid var(--border); background: var(--surface); }
-  .gl-filters { display: flex; align-items: center; gap: 6px; padding-block: 6px; padding-inline: 8px; border-block-end: 1px solid var(--border); flex-shrink: 0; }
+  .gl-filters { display: flex; align-items: center; gap: 6px; }
   .gl-branch-select { max-inline-size: 136px; block-size: 24px; padding-inline: 6px; font-size: var(--fs-xs); color: var(--text); background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--radius-s); }
   .gl-search { flex: 1; min-inline-size: 80px; block-size: 24px; font-size: var(--fs-xs); }
-  .gl-commits { flex: 1; min-block-size: 0; overflow-y: auto; }
-  .gl-commit-row { inline-size: 100%; display: flex; flex-direction: column; gap: 2px; padding-block: 6px; padding-inline: 10px; border: 0; border-block-end: 1px solid var(--separator); background: transparent; color: var(--text); text-align: start; cursor: pointer; }
-  .gl-commit-row:hover { background: var(--hover); }
-  .gl-commit-row.active { background: var(--accent-soft); }
-  .gl-commit-top { display: flex; align-items: center; gap: 6px; min-inline-size: 0; font-size: var(--fs-xs); font-weight: 500; }
-  .gl-subject { flex: 1; min-inline-size: 0; }
-  .gl-commit-meta { display: flex; align-items: center; gap: 8px; font-size: var(--fs-xs); color: var(--text-dim); min-inline-size: 0; }
-  .gl-commit-meta > :first-child { flex: 1; }
+
   .gl-right { display: flex; flex-direction: column; flex: 1; min-block-size: 0; min-inline-size: 0; overflow: hidden; }
   .gl-commit-head { display: flex; align-items: center; gap: 8px; block-size: 30px; min-block-size: 30px; padding-inline: 10px; border-block-end: 1px solid var(--border); background: var(--surface-2); flex-shrink: 0; min-inline-size: 0; }
   .gl-head-subject { flex: 1; font-size: var(--fs-xs); font-weight: 600; }

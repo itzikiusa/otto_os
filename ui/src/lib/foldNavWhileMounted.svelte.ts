@@ -1,4 +1,4 @@
-// One sidebar, like T3 (patterns.md §10): while a page with its own list
+// One sidebar, like T3 (the person's choice — design §7.9): while a page with its own list
 // column is open (Threads, Agents) Otto's navigator folds to its icon rail —
 // not persisted, the shell's own preference is untouched — and comes back on
 // leaving. Expanding the rail there is remembered as "don't fold" (`pref`),

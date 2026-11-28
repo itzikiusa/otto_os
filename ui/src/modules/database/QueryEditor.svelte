@@ -1010,13 +1010,7 @@
       if (database.queryLanguage !== 'redis' && !isScriptNow() && hasStatement && !tab.running) formatNow();
       return;
     }
-    // ⌘B — collapse/restore the schema sidebar (the biggest single win in
-    // width when you are actually writing SQL).
-    if (cmd && !e.shiftKey && !e.altKey && e.code === 'KeyB') {
-      e.preventDefault();
-      database.toggleSidebar();
-      return;
-    }
+    // ⌘B (hide / show the tables pane) is the shell's, for every list pane.
     // ⇧⌘E — maximize the editor over the results pane (and back).
     if (cmd && e.shiftKey && !e.altKey && e.code === 'KeyE') {
       e.preventDefault();

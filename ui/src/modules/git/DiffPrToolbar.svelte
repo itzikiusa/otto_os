@@ -6,6 +6,7 @@
   // hide test files. Wraps instead of overflowing ≤1024px, where the file
   // stepper (DiffFileStepper) gets a row of its own. State lives in DiffViewer.
   import type { Snippet } from 'svelte';
+  import { viewport } from '../../lib/stores/viewport.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import { plural } from '../../lib/plural';
   import DiffFileStepper from './DiffFileStepper.svelte';
@@ -24,17 +25,11 @@
     /** Some files load on demand (a truncated / summary diff without a loader). */
     largeNote: boolean;
     rawSearch: string;
-    /** The search lives here while the file tree (which has its own) is hidden. */
-    showSearch: boolean;
-    /** The host offers a file tree at all. */
-    canTree: boolean;
-    treeOpen: boolean;
     isMobile: boolean;
     mode: 'unified' | 'split';
     wrapLines: boolean;
     canFold: boolean;
     allCollapsed: boolean;
-    ontoggletree: () => void;
     ontogglewrap: () => void;
     ontoggletests: () => void;
     onfold: () => void;
@@ -70,15 +65,11 @@
     del,
     largeNote,
     rawSearch = $bindable(),
-    showSearch,
-    canTree,
-    treeOpen,
     isMobile,
     mode = $bindable(),
     wrapLines,
     canFold,
     allCollapsed,
-    ontoggletree,
     ontogglewrap,
     ontoggletests,
     onfold,
@@ -130,8 +121,7 @@
     {/if}
   </span>
   <span class="grow"></span>
-  {#if showSearch}
-    <div class="pt-search-wrap">
+  <div class="pt-search-wrap">
       <input dir="auto"
         class="toolbar-search input"
         type="text"
@@ -143,7 +133,6 @@
         <span class="pt-match">{matchCount} match{matchCount === 1 ? '' : 'es'}</span>
       {/if}
     </div>
-  {/if}
   {#if searching && searchDone !== null}
     <!-- Content search covers files whose lines are loaded; the rest load in
          the background (diff-prefetch.ts) up to a cap. -->
@@ -163,15 +152,6 @@
     ><Icon name="sparkle" size={12} /> AI findings ({aiCount})</button>
   {/if}
   <div class="pt-icons" role="group" aria-label="Diff view options">
-    {#if canTree}
-      <button
-        class="icon-btn pt-tog pt-tree"
-        aria-pressed={treeOpen}
-        aria-label={treeOpen ? 'Hide file tree' : 'Show file tree'}
-        title={treeOpen ? 'Hide file tree' : 'Show file tree'}
-        onclick={ontoggletree}
-      ><Icon name="sidebar" size={14} /></button>
-    {/if}
     {#if !isMobile}
       <!-- Side by side is desktop-only; ≤1024 always renders unified. -->
       <div class="segmented pt-seg" role="group" aria-label="Diff layout">
@@ -213,7 +193,7 @@
       onclick={ontoggletests}
     ><Icon name="flask" size={14} /></button>
   </div>
-  {#if isMobile && feedKey}<DiffFileStepper {feedKey} />{/if}
+  {#if viewport.navDrawer && feedKey}<DiffFileStepper {feedKey} />{/if}
 </div>
 
 <style>
@@ -366,9 +346,7 @@
       gap: 4px;
       min-height: 0;
     }
-    /* …and the tree toggle: there the tree is the stepper's file picker. */
-    .pt-stats,
-    .pr-toolbar :global(.pt-tree) {
+    .pt-stats {
       display: none;
     }
     .pt-search-wrap {

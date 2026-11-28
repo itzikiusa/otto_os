@@ -6,7 +6,7 @@ import type { IdeFsEntry } from '../store/ideTypes';
 
 /** Row height the tree's virtualiser and its CSS share: comfortable touch targets on a
  *  coarse pointer (phone, tablet), the dense desktop row otherwise. */
-export const TREE_ROW_H_FINE = 26;
+export const TREE_ROW_H_FINE = 30;
 export const TREE_ROW_H_COARSE = 40;
 
 export function treeRowHeight(coarsePointer: boolean): number {

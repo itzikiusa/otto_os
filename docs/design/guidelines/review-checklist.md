@@ -197,8 +197,12 @@ use `rgba(0,0,0,…)`), but each one needs a reason.
 - [ ] Works at phone (≤ 640 px), tablet (641–1024 px) and desktop. Only the
       640/1024 breakpoints are used; split panes use container queries.
 - [ ] No horizontal page scroll. Wide content scrolls inside its own container.
-- [ ] On phone, list/detail uses push navigation with a back button in
-      `PageHeader`'s `leading` slot. Hit areas are at least 36 px.
+- [ ] On phone, list/detail uses push navigation (`ListDetail`): the list is
+      the page and the one `‹ <list>` Back is in `PageHeader` (drawn for
+      you). Hit areas are at least 36 px.
+- [ ] Side surfaces come from `lib/components/side` (layout.md §4.1): one
+      row look, ⋯ › Hide <name> ⌘B, `otto.pane.<module>.<pane>` keys, arrow
+      keys; `npm run check`'s `side-pane` ratchet does not grow.
 
 ### Keyboard and command surface
 

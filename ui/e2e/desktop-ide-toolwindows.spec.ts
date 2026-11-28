@@ -84,7 +84,7 @@ test.describe('Desktop IDE — tool windows', () => {
       await shot(page, `01-tree-badges-dock-${scheme}.png`);
       if (scheme === 'dark') {
         // The ⋯ holds the rest; Debug can be put on the strip from it.
-        await page.getByTestId('ide-tree-more-btn').click();
+        await page.getByTestId('ide-project-tree-more').click();
         const menu = page.locator('.ctx-menu');
         for (const name of ['Add folder to project…', 'Local history and deleted files…', 'Collapse all folders', 'Refresh']) {
           await expect(menu.getByRole('menuitem', { name })).toBeVisible();
@@ -98,7 +98,7 @@ test.describe('Desktop IDE — tool windows', () => {
     // I1-23: opening a file elsewhere (quick tab switch) reveals it in the tree.
     await openPolyglotFile(page, 'app', 'main.go');
     await openPolyglotFile(page, 'notes', 'roadmap.md');
-    await page.getByTestId('ide-tree-more-btn').click();
+    await page.getByTestId('ide-project-tree-more').click();
     await page.locator('.ctx-menu').getByRole('menuitem', { name: 'Collapse all folders' }).click();
     await expect(treeRow(page, 'app/main.go')).toHaveCount(0);
     await page.locator('.ide-tab-btn', { hasText: 'main.go' }).first().click();
@@ -118,14 +118,14 @@ test.describe('Desktop IDE — tool windows', () => {
     expect(execFileSync('git', ['status', '--porcelain'], { cwd: seed.workspaceRoot, encoding: 'utf8' }).trim()).toBe('');
   });
 
-  test('Git diff has one layout control; at 1280 the agent leaves the editor ≥ 700 px', async ({ page }) => {
+  test('Git diff has one layout control; at 1280 the agent is a sheet, the explorer stays', async ({ page }) => {
     test.setTimeout(90_000);
     appendFileSync(join(seed.workspaceRoot, 'notes', 'roadmap.md'), '\nA second change.\n');
     await bootPolyglotIde(page, seed, 'dark');
     await page.getByTestId('ide-dock-tab-git').click();
     const gitView = page.getByTestId('ide-git-changes-view');
     await expect(gitView).toContainText('roadmap.md', { timeout: 15_000 });
-    await gitView.locator('.gc-file-btn', { hasText: 'roadmap.md' }).first().click();
+    await gitView.locator('[data-side-row]', { hasText: 'roadmap.md' }).first().click();
     await expect(gitView.locator('.gc-diff-scroll')).toContainText('A second change', { timeout: 15_000 });
     await expect(gitView.getByRole('button', { name: /Side-by-side/ })).toHaveCount(0);
     await expect(gitView.getByRole('group', { name: 'Diff layout' })).toHaveCount(1);
@@ -142,13 +142,15 @@ test.describe('Desktop IDE — tool windows', () => {
     await expect(page.getByTestId('ide-project-tree')).toBeVisible();
     await page.getByTestId('ide-toggle-agent').click();
     await expect(page.getByTestId('ide-agent-panel')).toBeVisible({ timeout: 15_000 });
-    await expect(page.getByTestId('ide-project-tree')).toHaveCount(0);
-    const editorW = (await page.locator('.ide-editor-area').first().boundingBox())?.width ?? 0;
-    expect(editorW).toBeGreaterThanOrEqual(700);
+    // The shared side rules (design.md §2) at the IDE's width: the explorer stays (the list
+    // pane clamps), the agent is inline while the editor keeps 640 px (IDE_EDITOR_MIN), else
+    // a sheet over it — at 1280 beside the Navigator and the explorer, a sheet.
+    await expect(page.getByTestId('ide-project-tree')).toBeVisible();
+    await expect(page.getByTestId('ide-agent')).toHaveClass(/sheet/);
     await shot(page, '04-agent-1280-dark.png');
-    // Closing the agent brings the explorer back.
-    await page.getByTestId('ide-toggle-agent').click();
-    await expect(page.getByTestId('ide-project-tree')).toBeVisible({ timeout: 10_000 });
+    await page.keyboard.press('Escape');
+    await expect(page.getByTestId('ide-agent-panel')).toBeHidden();
+    await expect(page.getByTestId('ide-project-tree')).toBeVisible();
   });
 
   test('agent empty state, settings memory and an empty local history', async ({ page }) => {
@@ -166,7 +168,7 @@ test.describe('Desktop IDE — tool windows', () => {
     await page.keyboard.press('Meta+,');
     const modal = page.getByTestId('ide-settings-modal');
     await expect(modal).toBeVisible({ timeout: 10_000 });
-    await expect(page.getByTestId('ide-settings-nav-editor.font')).toHaveClass(/is-active/);
+    await expect(page.getByTestId('ide-settings-nav-editor.font')).toHaveClass(/selected/);
     const search = page.locator('.st-search-box').first();
     const searchBox = await search.boundingBox();
     const leftBox = await page.locator('.st-left').first().boundingBox();
@@ -176,7 +178,7 @@ test.describe('Desktop IDE — tool windows', () => {
     await page.keyboard.press('Escape');
     await expect(modal).toHaveCount(0);
     await page.keyboard.press('Meta+,');
-    await expect(page.getByTestId('ide-settings-nav-vcs.git')).toHaveClass(/is-active/, { timeout: 10_000 });
+    await expect(page.getByTestId('ide-settings-nav-vcs.git')).toHaveClass(/selected/, { timeout: 10_000 });
     await page.keyboard.press('Escape');
 
     // I1-16: the agent's empty state names the file and offers prompts that fill the draft.
