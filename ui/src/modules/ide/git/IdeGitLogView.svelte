@@ -11,8 +11,8 @@
   import LoadState from '../../../lib/components/LoadState.svelte';
   import PaneDivider from '../../../lib/components/PaneDivider.svelte';
   import { loadErrorText } from '../../../lib/loadError';
+  import ListPane from '../../../lib/components/side/ListPane.svelte';
   import PhoneBack from '../../../lib/components/side/PhoneBack.svelte';
-  import { listNav } from '../../../lib/components/side/listNav';
   import { WIDE_LIST_PANE, loadPaneW, paneKey, paneStorage } from '../../../lib/components/side/paneKeys';
   import { viewport } from '../../../lib/stores/viewport.svelte';
   import { git } from '../../../lib/stores/git.svelte';
@@ -296,11 +296,11 @@
     </div>
   {:else if mode === 'log' || (mode === 'file' && relFilePath)}
     <div class="gl-split">
-      <!-- A list pane inside the tool window: the shared look (app.css .side-list), not
-           ListPane — that one binds to the page's ListDetail (the explorer). -->
-      <aside class="side-list gl-left" class:phone style:inline-size={phone ? undefined : `${listW}px`} aria-label="Commits" hidden={phone && phoneOpen}>
-        <header class="side-pane-head"><h2 class="sph-title">Commits</h2><span class="sph-count">{filteredCommits.length}</span></header>
-        <div class="side-pane-search gl-filters">
+      <!-- A list pane inside the tool window: a standalone ListPane (its own
+           header; the page's list is the explorer). -->
+      <div class="gl-left" class:phone style:inline-size={phone ? undefined : `${listW}px`} hidden={phone && phoneOpen}>
+      <ListPane name="Commits" count={filteredCommits.length}>
+        {#snippet searchRow()}<div class="gl-filters">
           {#if mode === 'log'}
             <select
               class="gl-branch-select"
@@ -327,9 +327,8 @@
               data-testid="ide-git-log-search"
             />
           </div>
-        </div>
+        </div>{/snippet}
 
-        <div class="side-pane-body gl-commits" use:listNav>
           <LoadState what="commits" loading={logLoading} error={logError} empty={filteredCommits.length === 0} variant="compact">
             {#snippet emptyView()}
               <EmptyState
@@ -360,8 +359,8 @@
               </div>
             {/each}
           </LoadState>
-        </div>
-      </aside>
+      </ListPane>
+      </div>
 
       {#if !phone}<PaneDivider bind:width={listW} storageKey={paneKey('ide', 'gitLog', 'w')} min={WIDE_LIST_PANE.min} max={WIDE_LIST_PANE.max} defaultWidth={380} label="Resize commits" />{/if}
 
@@ -418,7 +417,7 @@
   .gl-jump-input { inline-size: 56px; block-size: 22px; padding-inline: 6px; font-size: var(--fs-xs); color: var(--text); background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-s); }
   .gl-blame-wrap { flex: 1; min-block-size: 0; overflow: auto; }
   .gl-split { display: flex; flex: 1; min-block-size: 0; min-inline-size: 0; overflow: hidden; }
-  .gl-left { flex-shrink: 0; }
+  .gl-left { flex-shrink: 0; display: flex; flex-direction: column; min-block-size: 0; }
   .gl-left.phone { flex: 1; }
   .gl-left[hidden], .gl-right[hidden] { display: none; }
   .gl-filters { display: flex; align-items: center; gap: 6px; }

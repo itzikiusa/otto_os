@@ -8,7 +8,7 @@
 // pick (pageNav) is checked on its own below.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -119,4 +119,12 @@ test('the page header takes the NEARER list: depth wins over the order the panes
   assert.equal(pageNav.back?.label, 'Files');
   outer();
   assert.equal(pageNav.back, null);
+});
+
+test('no module copies the list-pane chrome: a second-level list is a standalone ListPane', () => {
+  const modules = new URL('../src/modules/', import.meta.url);
+  const copies = readdirSync(modules, { recursive: true, encoding: 'utf8' })
+    .filter((f) => f.endsWith('.svelte'))
+    .filter((f) => /class="side-list[\s"]|class="side-pane-head[\s"]/.test(readFileSync(new URL(f, modules), 'utf8')));
+  assert.deepEqual(copies, []);
 });

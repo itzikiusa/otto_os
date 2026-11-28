@@ -7,7 +7,7 @@
   import LoadState from '../../../lib/components/LoadState.svelte';
   import PaneDivider from '../../../lib/components/PaneDivider.svelte';
   import SideRow from '../../../lib/components/side/SideRow.svelte';
-  import { listNav } from '../../../lib/components/side/listNav';
+  import ListPane from '../../../lib/components/side/ListPane.svelte';
   import { LIST_PANE, loadPaneW, paneKey, paneStorage } from '../../../lib/components/side/paneKeys';
   import { copyWithToast } from '../../../lib/clipboard';
   import { plural } from '../../../lib/plural';
@@ -99,11 +99,10 @@
       {:else}
         <div class="usg-split">
           {#if usageGroups.length > 1 && !viewport.isPhone}
-            <!-- A list pane inside the tool window: the shared look (app.css .side-list),
-                 not ListPane — that one binds to the page's ListDetail (the explorer). -->
-            <aside class="side-list usg-files" style:inline-size={`${filesW}px`} aria-label="Files with usages">
-              <header class="side-pane-head"><h2 class="sph-title">Files</h2><span class="sph-count">{usageGroups.length}</span></header>
-              <div class="side-pane-body" use:listNav>
+            <!-- A list pane inside the tool window: a standalone ListPane (its own
+                 header; the page's list is the explorer). -->
+            <div class="usg-files" style:inline-size={`${filesW}px`}>
+              <ListPane name="Files" count={usageGroups.length}>
                 <SideRow title="All files" icon="layers" selected={selectedFile === null} onclick={() => (selectedFile = null)}>
                   {#snippet trailing()}{filteredUsages.length}{/snippet}
                 </SideRow>
@@ -112,8 +111,8 @@
                     {#snippet trailing()}{g.items.length}{/snippet}
                   </SideRow>
                 {/each}
-              </div>
-            </aside>
+              </ListPane>
+            </div>
             <PaneDivider bind:width={filesW} storageKey={paneKey('ide', 'usages', 'w')} min={LIST_PANE.min} max={LIST_PANE.max} defaultWidth={240} label="Resize files with usages" />
           {/if}
 
