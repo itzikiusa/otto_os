@@ -157,8 +157,7 @@
     void browser.loadAnnotations(url);
   });
 
-  // The Detail pane: Marks (auto-opens when the page has marks and fits inline)
-  // and the Agent (remembered open); URL-bar toggles, tabs, ⌥⌘B and ✕ override.
+  // Detail pane: Marks (auto when it fits inline) and the Agent (remembered; first while open).
   let marksRailOverride = $state<boolean | null>(null);
   let marksSheet = $state(false);
   let lastMarksTabId = $state<string | null>(null);
@@ -175,11 +174,12 @@
   const showMarksRail = $derived(
     canShowMarksRail && (marksRailOverride ?? (browser.annotations.length > 0 && !marksSheet)),
   );
-  let paneView = $state<'marks' | 'agent'>('marks');
-  const agentShown = $derived(!embedded && ui.browserAgentOpen && (!marksSheet || paneView === 'agent'));
-  const view = $derived(!agentShown ? 'marks' : !showMarksRail ? 'agent' : paneView);
+  let paneView = $state<'marks' | 'agent'>('agent');
+  let agentPicked = $state(false); // a sheet (no room inline) opens only when asked for
+  const agentShown = $derived(!embedded && ui.browserAgentOpen && (!marksSheet || agentPicked));
+  const view = $derived(agentShown && (paneView === 'agent' || !showMarksRail) ? 'agent' : 'marks');
   function showView(v: 'marks' | 'agent', on = true): void {
-    if (v === 'marks') marksRailOverride = on; else ui.setBrowserAgentOpen(on);
+    if (v === 'marks') marksRailOverride = on; else ui.setBrowserAgentOpen((agentPicked = on));
     paneView = v;
   }
   const toggleView = (v: 'marks' | 'agent') => showView(v, !(view === v && (v === 'marks' ? showMarksRail : agentShown)));
@@ -863,7 +863,6 @@
 
 <style>
   .browser {
-    container-type: inline-size;
     display: flex;
     flex-direction: column;
     height: 100%;
@@ -885,11 +884,6 @@
   }
   @media (max-width: 640px), (max-height: 500px) {
     .web-pane {
-      flex-direction: column;
-    }
-  }
-  @container (max-width: 640px) {
-    .body {
       flex-direction: column;
     }
   }

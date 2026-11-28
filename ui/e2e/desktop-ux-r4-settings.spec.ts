@@ -226,5 +226,7 @@ test('tablet access administration gives group fields usable width beside both n
  await page.route('**/api/v1/users', r => r.fulfill({ json: users })); await page.route('**/api/v1/users/*/grants', r => r.fulfill({ json: { grants: [] } })); await page.route('**/api/v1/workspaces/*/members', r => r.fulfill({ json: [] }));
  await page.goto('/#/settings/users'); await page.getByRole('button', { name: 'By user', exact: true }).click(); await expect(page.getByRole('group', { name: 'Set the role in every workspace' })).toBeVisible(); await page.screenshot({ path: '/tmp/otto-ux-r4-settings-users-tablet.png' });
  await page.goto('/#/settings/access-groups'); await expect(page.getByLabel('Group name', { exact: true })).toHaveValue(groups[0].name); await page.screenshot({ path: '/tmp/otto-ux-r4-settings-groups-tablet-before.png' });
+ // No room beside the Settings nav for the groups list and the form: the nested list pushes (‹ Groups).
+ if (!(await page.locator('fieldset.detail').isVisible())) await page.getByRole('button', { name: groups[0].name, exact: true }).click();
  expect((await page.locator('fieldset.detail').boundingBox())!.width).toBeGreaterThan(280); await expectNoHorizontalOverflow(page); await page.screenshot({ path: '/tmp/otto-ux-r4-settings-groups-tablet.png' });
 });

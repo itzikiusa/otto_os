@@ -580,7 +580,7 @@
   .chips {
     overflow-x: auto;
     scrollbar-width: none;
-    mask-image: linear-gradient(to right, #000 calc(100% - 24px), transparent);
+    mask-image: linear-gradient(to right, var(--text) calc(100% - 24px), transparent);
   }
   .fchip {
     white-space: nowrap;

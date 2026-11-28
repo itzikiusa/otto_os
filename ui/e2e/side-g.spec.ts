@@ -235,6 +235,45 @@ for (const s of ['light', 'dark'] as const) {
   });
 }
 
+for (const s of ['light', 'dark'] as const) {
+  test.describe(`Browser Detail pane (${s})`, () => {
+    test.describe('desktop', () => {
+      test.use({ viewport: DESKTOP, isMobile: false, hasTouch: false });
+      test('Agent view beside the page, ⌥⌘B closes and reopens it', async ({ page }) => {
+        await prime(page, s);
+        await page.addInitScript(() => localStorage.setItem('otto_right_open', '0'));
+        await openPage(page, 'browser');
+        const agent = page.getByRole('region', { name: 'Browser agent' });
+        await expect(agent).toBeVisible({ timeout: 20_000 });
+        await shot(page, `browser-desktop-${s}`);
+        await page.getByTestId('browser-pane-close').click();
+        await expect(agent).toBeHidden();
+        await page.getByRole('button', { name: 'Show agent', exact: true }).click();
+        await expect(agent).toBeVisible();
+      });
+    });
+    test.describe('phone', () => {
+      test.use({ viewport: PHONE, isMobile: true, hasTouch: true });
+      test('the agent opens as a full-width sheet only when asked', async ({ page }) => {
+        await prime(page, s);
+        await openPage(page, 'browser');
+        const agent = page.getByRole('region', { name: 'Browser agent' });
+        await expect(page.getByPlaceholder('e.g. https://example.com')).toBeVisible({ timeout: 20_000 });
+        await expect(agent).toBeHidden();
+        await expectNoHorizontalOverflow(page);
+        await page.getByRole('button', { name: 'More browser tools' }).tap();
+        await page.getByRole('menuitem', { name: 'Show agent' }).tap();
+        await expect(agent).toBeVisible();
+        // A full-width sheet on a phone (wait for it to finish sliding in).
+        await expect.poll(async () => Math.round((await agent.boundingBox())?.x ?? -1)).toBeLessThanOrEqual(1);
+        await shot(page, `browser-phone-agent-${s}`);
+        await page.getByTestId('browser-pane-close').tap();
+        await expect(agent).toBeHidden();
+      });
+    });
+  });
+}
+
 // Workflows need a live run: one workflow, a run whose second step keeps
 // running, shared by the size tests below.
 test.describe('Workflows run and editor', () => {

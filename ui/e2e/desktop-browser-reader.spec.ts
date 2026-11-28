@@ -127,6 +127,9 @@ test('send-to-session posts the annotation id + chosen session', async ({ page }
   await page.getByLabel('Note for this mark').fill('send me');
   await page.getByRole('button', { name: 'Save mark' }).click();
   await expect(page.locator('.notes-rail')).toContainText('send me');
+  // Marks share the Browser's Detail pane with the agent: show the Marks view.
+  const marksTab = page.getByRole('tab', { name: /^Marks/ });
+  if (await marksTab.isVisible()) await marksTab.click();
 
   const row = page.locator('.notes-rail .row', { hasText: 'send me' });
   const sendReq = page.waitForRequest(

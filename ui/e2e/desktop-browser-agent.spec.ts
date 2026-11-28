@@ -75,6 +75,7 @@ async function markHeading(page: Page, note: string): Promise<void> {
 /** The agent is the Browser's Detail pane (Agent view): open it when the
  *  window is too narrow for it to open by itself. */
 async function showAgent(page: Page): Promise<void> {
+  await expect(page.getByPlaceholder('e.g. https://example.com')).toBeVisible({ timeout: 15_000 });
   const show = page.getByRole('button', { name: 'Show agent', exact: true });
   if (await show.isVisible()) await show.click();
 }
@@ -146,6 +147,7 @@ test('browser page: dock starts detached, attaches a session, ask sends page + m
 });
 
 test('browser page: "New agent" creates a session bound to the dock without leaving the page', async ({ page }) => {
+  await page.addInitScript(() => localStorage.setItem('otto_right_open', '0'));
   await page.goto('/#/browser');
   await expect(page.locator('.shell')).toBeVisible({ timeout: 15_000 });
   await showAgent(page);
