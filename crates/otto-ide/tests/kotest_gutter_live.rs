@@ -24,6 +24,9 @@ struct Live {
     app: Router,
     root: String,
     env: Value,
+    target: Value,
+    /// SSH: the container that runs the build (its JUnit XML and processes are read there).
+    docker: Option<String>,
     _tmp: tempfile::TempDir,
 }
 
@@ -36,8 +39,42 @@ async fn live(var: &str) -> Option<Live> {
     let (_ctx, app) = build_test_app(tmp.path().join("data"), &tmp.path().join("state.db")).await;
     Some(Live {
         app,
+        target: json!({ "kind": "local", "root": root }),
         root,
         env: serde_json::from_str(&env).unwrap(),
+        docker: None,
+        _tmp: tmp,
+    })
+}
+
+/// An SSH target: `OTTO_LIVE_KOTEST_SSH='{"host","port","user","identity_file","root","docker","env"}'`.
+async fn live_ssh() -> Option<Live> {
+    let Ok(cfg) = std::env::var("OTTO_LIVE_KOTEST_SSH") else {
+        eprintln!("skip: set OTTO_LIVE_KOTEST_SSH");
+        return None;
+    };
+    let cfg: Value = serde_json::from_str(&cfg).unwrap();
+    let tmp = tempfile::tempdir().unwrap();
+    let (ctx, app) = build_test_app(tmp.path().join("data"), &tmp.path().join("state.db")).await;
+    let spec: otto_ide::types::IdeSshSpec = serde_json::from_value(json!({
+        "connection_id": "kotest-ssh", "name": "kotest-ssh", "host": cfg["host"],
+        "port": cfg["port"], "user": cfg["user"], "identity_file": cfg["identity_file"],
+    }))
+    .unwrap();
+    ctx.ssh_connections.lock().unwrap().insert(
+        "kotest-ssh".into(),
+        common::TestSshEntry {
+            owner_user_id: None,
+            spec,
+        },
+    );
+    let root = cfg["root"].as_str().unwrap().to_string();
+    Some(Live {
+        app,
+        target: json!({ "kind": "ssh", "root": root, "connection_id": "kotest-ssh" }),
+        root,
+        env: cfg["env"].clone(),
+        docker: cfg["docker"].as_str().map(str::to_string),
         _tmp: tmp,
     })
 }
@@ -48,7 +85,48 @@ impl Live {
     }
 
     fn target(&self) -> Value {
-        json!({ "kind": "local", "root": self.root })
+        self.target.clone()
+    }
+
+    /// In the SSH container: (test cases, skipped) of the JUnit XML under `dir`.
+    fn remote_xml(&self, dir: &str, spec: &str) -> (usize, usize) {
+        let docker = self.docker.as_deref().unwrap();
+        let count = |pat: &str| {
+            let out = std::process::Command::new("docker")
+                .args([
+                    "exec",
+                    docker,
+                    "sh",
+                    "-c",
+                    &format!(
+                        "grep -c '{pat}' {}/{dir}/TEST-com.acme.{spec}.xml",
+                        self.root
+                    ),
+                ])
+                .output()
+                .unwrap();
+            String::from_utf8_lossy(&out.stdout)
+                .trim()
+                .parse::<usize>()
+                .unwrap_or(0)
+        };
+        (count("<testcase "), count("<skipped"))
+    }
+
+    fn remote_jvms(&self) -> Vec<String> {
+        let out = std::process::Command::new("docker")
+            .args(["exec", self.docker.as_deref().unwrap(), "ps", "-eo", "args"])
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .filter(|l| {
+                l.contains("Gradle Test Executor")
+                    || l.contains("surefirebooter")
+                    || l.contains("jdwp=transport")
+            })
+            .map(str::to_string)
+            .collect()
     }
 
     async fn gutter(&self, spec: &str) -> Vec<Value> {
@@ -493,4 +571,98 @@ async fn kotest_5_keeps_spec_items_with_the_note() {
         items[0]["note"],
         "Single-test runs need Kotest 6.1+ (this project uses 5.9.1)."
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore]
+async fn kotest_ssh_runs_and_debugs_one_test() {
+    let Some(mut l) = live_ssh().await else {
+        return;
+    };
+    let base = l.root.clone();
+    for (tool, dir, xml) in [
+        ("Gradle", "fg", "build/test-results/test"),
+        ("Maven", "fm", "target/surefire-reports"),
+    ] {
+        l.root = format!("{base}/{dir}");
+        l.target["root"] = json!(l.root);
+        let items = labels(&l.gutter("LoginFunSpec").await);
+        eprintln!("S0 {tool} LoginFunSpec gutter over SSH: {items:?}");
+        assert!(
+            !items.iter().any(|x| x.contains('\'')),
+            "no item for a name with ' on SSH"
+        );
+        for (spec, label, _) in &DEEPEST[..3] {
+            let run = l.run(&l.item(spec, label).await).await;
+            let (cases, skipped) = l.remote_xml(xml, spec);
+            eprintln!(
+                "S1 {tool} {spec} '{label}': status={} remote XML ran={} (of {cases}) cmd={}",
+                run["status"],
+                cases - skipped,
+                run["output"][0]
+            );
+            assert_eq!(run["status"], "passed", "{}", tail(&run));
+            assert_eq!(cases - skipped, 1, "only the chosen test ran");
+        }
+        let item = l
+            .item("LoginFunSpec", "a user -- logs in -- sees dashboard")
+            .await;
+        let file = l.spec("LoginFunSpec");
+        let (status, resp) = l
+            .start_debug(&item, vec![(file.clone(), 13), (file.clone(), 17)])
+            .await;
+        assert!(status < 300, "{resp}");
+        let id = resp["session"]["id"].as_str().unwrap().to_string();
+        let s = l.next_stop(&id).await;
+        eprintln!(
+            "S-D1 {tool}: state={} at {}:{} error={}",
+            s["state"], s["paused_file"], s["paused_line"], s["error"]
+        );
+        assert_eq!(s["state"], "paused");
+        assert_eq!(s["paused_line"], 13);
+        let v = l.eval(&id, "size").await;
+        eprintln!("S-D1 {tool}: evaluate size = {v}");
+        assert_eq!(v, "2");
+        l.command(&id, "continue").await;
+        let s = l.next_stop(&id).await;
+        eprintln!(
+            "S-D1 {tool}: after continue state={} line={}",
+            s["state"], s["paused_line"]
+        );
+        assert_eq!(s["state"], "terminated");
+        tokio::time::sleep(Duration::from_secs(4)).await;
+        let left = l.remote_jvms();
+        eprintln!("S-D1 {tool}: remote test JVMs left: {left:?}");
+        assert!(left.is_empty());
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore]
+async fn kotest_debug_reports_a_build_that_fails_first() {
+    let Some(l) = live("OTTO_LIVE_KOTEST_GRADLE").await else {
+        return;
+    };
+    let item = l.item("CalcStringSpec", "adds numbers").await;
+    let broken = format!("{}/src/test/kotlin/com/acme/Broken.kt", l.root);
+    std::fs::write(&broken, "package com.acme\nval x: Int = \"not an int\"\n").unwrap();
+    let (_, resp) = l.start_debug(&item, Vec::new()).await;
+    let s = l.next_stop(resp["session"]["id"].as_str().unwrap()).await;
+    std::fs::remove_file(&broken).unwrap();
+    let err = s["error"].as_str().unwrap_or_default().to_string();
+    eprintln!(
+        "B1: state={} error={}",
+        s["state"],
+        err.lines().next().unwrap_or("")
+    );
+    assert_eq!(s["state"], "error");
+    assert!(
+        err.starts_with("The Gradle build failed before tests started."),
+        "{err}"
+    );
+    assert!(
+        err.contains("BUILD FAILED") || err.contains("Compilation error"),
+        "{err}"
+    );
+    assert!(test_jvms().is_empty());
 }
