@@ -1,13 +1,17 @@
 // What the page's header shows for its panes (design.md §3, §7): on a phone
 // the Back to the list a ListDetail pushed from ("‹ Threads"); elsewhere the
 // "Show <pane>" button while the user has hidden a list pane. Each mounted
-// ListDetail registers one entry; PageHeader reads the innermost one that
-// applies, so a list inside another list's content (Settings › Access
-// groups) gets the Back first and the outer list's Back after it.
+// ListDetail registers one entry; PageHeader reads the innermost (deepest) one
+// that applies, so a list inside another list's content (Settings › Access
+// groups) gets the Back first and the outer list's Back after it. Depth, not
+// registration order: Svelte runs a child's $effect before its parent's, so a
+// nested ListDetail mounted with the page claims first.
 import { untrack } from 'svelte';
 import { keyContext } from '../../keys';
 import type { PaneHeader } from './context';
 export interface PaneNavEntry {
+  /** ListDetail nesting: 0 = the page's list, 1 = one in its content, … */
+  depth: number;
   /** Is this pane's page on screen (an inner ListDetail inside an outer one's hidden content is not)? */
   active(): boolean;
   /** Phone: the list this content was pushed from, or null while the list is the page. */
@@ -44,14 +48,16 @@ class PageNav {
     };
   }
 
+  /** The deepest active entry that has a value (the later one on a tie). */
   private first<T>(pick: (e: PaneNavEntry) => T | null): T | null {
-    for (let i = this.entries.length - 1; i >= 0; i--) {
-      const e = this.entries[i];
-      if (!e.active()) continue;
+    let best: T | null = null;
+    let depth = -1;
+    for (const e of this.entries) {
+      if (e.depth < depth || !e.active()) continue;
       const v = pick(e);
-      if (v) return v;
+      if (v) [best, depth] = [v, e.depth];
     }
-    return null;
+    return best;
   }
 
   get back(): { label: string; onclick: () => void } | null {

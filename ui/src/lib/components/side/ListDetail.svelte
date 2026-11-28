@@ -15,6 +15,10 @@
   //                     list's scroll and the content's state.
   //   empty             no pane at all: the content (the page's EmptyState)
   //                     owns the page.
+  //   nesting           the ListPane in `list` is this list (ListHost); a
+  //                     ListPane in the content stands alone (own header, no
+  //                     Hide, no push); a ListDetail in the content is a second
+  //                     level (phone: two pushes, Back names the nearer list).
   //   nested, no room   a ListDetail inside another's content whose row can't
   //                     hold the list (min) + 480 pushes like a phone, its Back
   //                     in PageHeader at every size (paneKeys nestedPush).
@@ -32,7 +36,8 @@
   import { viewport } from '../../stores/viewport.svelte';
   import { pageNav } from './pageNav.svelte';
   import { LIST_PANE, WIDE_LIST_PANE, fitPaneMax, loadPaneHidden, loadPaneW, nestedPush, paneKey, paneStorage, savePaneHidden, type PaneLegacy } from './paneKeys';
-  import { LIST_DETAIL, type ListDetailCtx, type PaneHeader } from './context';
+  import ListHost from './ListHost.svelte';
+  import { LIST_DETAIL, LIST_HOST, type ListDetailCtx, type PaneHeader } from './context';
 
   interface Props {
     /** Key scheme: otto.pane.<module>.<pane>.{w,hidden}. */
@@ -89,10 +94,12 @@
   }
 
   const visible = (): boolean => (parent ? parent.contentVisible() : true);
-  setContext<ListDetailCtx>(LIST_DETAIL, {
+  const depth = (parent?.depth ?? -1) + 1;
+  const ctx: ListDetailCtx = {
     get name() {
       return name;
     },
+    depth,
     get canHide() {
       return !phone && !empty;
     },
@@ -107,10 +114,15 @@
         if (header === h) header = null;
       };
     },
-  });
+  };
+  setContext(LIST_DETAIL, ctx);
+  // Only the ListPane in `list` is this list (ListHost); one in the content or
+  // the Detail pane is on its own.
+  setContext(LIST_HOST, null);
 
   $effect(() =>
     pageNav.claim({
+      depth,
       active: visible,
       back: () => (phone && open && !empty ? { label: name, onclick: onback } : null),
       show: () => (!phone && hidden && !empty ? { label: name, onclick: () => setHidden(false) } : null),
@@ -123,7 +135,7 @@
 <div class="ld" class:phone bind:clientWidth={rowW} data-testid={testid}>
   {#if !empty}
     <div class="ld-list" hidden={!listShown} style:inline-size={phone ? undefined : `${Math.min(width, max)}px`}>
-      {@render list()}
+      <ListHost {ctx}>{@render list()}</ListHost>
     </div>
     {#if listShown && !phone}
       <PaneDivider bind:width storageKey={paneKey(module, pane, 'w')} min={range.min} {max} defaultWidth={fallback} label="Resize {name}" />

@@ -12,16 +12,18 @@
   // Clear, one action, ⋯). Loading = skeleton rows, error = compact LoadState
   // with Retry, both inside the pane; an EMPTY list is not a ListPane state —
   // ListDetail `empty` drops the pane and the page's EmptyState owns the page.
-  // Inside a ListDetail the name comes from it; on its own (a pane that is not
-  // a list/detail page) pass `name`. On a phone, where the list is the page,
-  // its header moves into PageHeader (☰ · name count · primary · ⋯, or the
-  // views in the name's place).
+  // As a ListDetail's `list` the name comes from it; on its own (a pane that
+  // is not a list/detail page, or a second-level list inside a page's content:
+  // the IDE's Git log) pass `name` — it keeps its own header, has no Hide and
+  // never pushes (give it its own ListDetail for that). On a phone, where the
+  // page's list is the page, its header moves into PageHeader (☰ · name count
+  // · primary · ⋯, or the views in the name's place).
   import { getContext, type Snippet } from 'svelte';
   import Icon, { type IconName } from '../Icon.svelte';
   import LoadState from '../LoadState.svelte';
   import { ctxMenu, type MenuItem } from '../../contextmenu.svelte';
   import { listNav } from './listNav';
-  import { LIST_DETAIL, type ListDetailCtx } from './context';
+  import { LIST_HOST, type ListDetailCtx } from './context';
 
   interface Props {
     /** The pane's name (defaults to the ListDetail's). */
@@ -52,7 +54,7 @@
   }
   let { name, count = null, primary, menu, views, selection, searchRow, filterRow, footer, loading = false, error = null, onretry, as = 'aside', rows, testid, children }: Props = $props();
 
-  const ld = getContext<ListDetailCtx | undefined>(LIST_DETAIL);
+  const ld = getContext<ListDetailCtx | null | undefined>(LIST_HOST);
   const label = $derived(name ?? ld?.name ?? '');
   const canHide = $derived(!!ld?.canHide);
   // A phone showing the list as the page: PageHeader draws this header.

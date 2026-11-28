@@ -302,7 +302,7 @@ Rules:
   | Block | What it does |
   |---|---|
   | `ListDetail` | the page layout: list pane + content (+ `detail`); split, divider, hide / show and ⌘B, tablet clamp, phone push and Back, the empty rule |
-  | `ListPane` | the pane: header (name · count · one primary · ⋯ with "Hide"), `searchRow`, `filterRow`, `views` (the views as the header), `selection`, body (`use:listNav`), `footer`, loading / error |
+  | `ListPane` | the pane: header (name · count · one primary · ⋯ with "Hide"), `searchRow`, `filterRow`, `views` (the views as the header), `selection`, body (`use:listNav`), `footer`, loading / error. It is a ListDetail's list only in that ListDetail's `list` snippet; elsewhere (a second-level list in the content) it stands alone — pass `name`; nest a ListDetail for a second push |
   | `SideSection` / `SideRow` | a folding 22 px section head; the one row (line / two-line / tree indent, ⋯ menu, long-press) |
   | `DetailPane` | the right pane about the selected thing: title or `views`, ONE `action`, ⋯, Close, `footer`; inline and resizable, or a right sheet (full width on a phone); ⌥⌘B with `ontoggle` |
   | `PhoneBack` | the one phone Back ("‹ Threads"); PageHeader draws it from ListDetail |
