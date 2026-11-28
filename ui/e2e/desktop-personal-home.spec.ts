@@ -111,12 +111,13 @@ test('Focus keeps one conversation with agent switching and contextual sheets �
   await page.getByTestId('pa-composer').evaluate((el) => el.setAttribute('data-continuity-probe', 'original'));
 
   await page.getByRole('button', { name: 'Routines', exact: true }).click();
-  const routines = page.getByRole('dialog', { name: 'Routines · Scout', exact: true });
+  // Routines is the page's Detail pane beside the chat (✕ or the button closes it).
+  const routines = page.getByTestId('pa-routines-pane');
   await expect(routines.getByTestId('pa-routines')).toContainText('Morning brief');
   await expect(routines.getByTestId('pa-routines')).toContainText('next ');
   await expect(routines.getByTestId('pa-activity')).toContainText('Working…');
   await expectFullyInViewport(page, routines);
-  await page.keyboard.press('Escape');
+  await page.getByTestId('pa-routines-pane-close').click();
   await expect(routines).toHaveCount(0);
   await expect(page.getByRole('button', { name: 'Routines', exact: true })).toBeFocused();
   await expect(page.getByTestId('pa-composer')).toHaveAttribute('data-continuity-probe', 'original');
@@ -200,7 +201,7 @@ test('phone Focus keeps settings, memory, history and nested routine forms usabl
     await expectFullyInViewport(page, form.getByRole('button', { name: 'Add routine', exact: true }));
     await page.screenshot({ path: info.outputPath(`pa-phone-routine-${width}.png`) });
     await form.getByRole('button', { name: 'Cancel', exact: true }).click();
-    await expect(page.getByRole('dialog', { name: 'Routines · Scout', exact: true })).toBeVisible();
+    await expect(page.getByRole('dialog', { name: 'Routines', exact: true })).toBeVisible();
     await page.keyboard.press('Escape');
     await expect(page.getByTestId('pa-composer')).toHaveValue('Keep my phone draft');
   }

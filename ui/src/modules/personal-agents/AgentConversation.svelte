@@ -187,7 +187,7 @@
       <AutomateTasksTabs active="agents" />
     {/snippet}
     {#snippet actions()}
-      <button type="button" class="btn small ghost" data-keep data-testid="pa-panel-toggle" onclick={() => router.go(`personal-agents/${agent.id}/routines`)}>Routines</button>
+      <button type="button" class="btn small ghost" data-keep data-testid="pa-panel-toggle" aria-pressed={router.parts[2] === 'routines'} title="Routines (⌥⌘B)" onclick={() => router.go(router.parts[2] === 'routines' ? `personal-agents/${agent.id}` : `personal-agents/${agent.id}/routines`)}>Routines</button>
       <button type="button" class="btn small ghost" data-keep onclick={() => router.go(`personal-agents/${agent.id}/history`)}>History</button>
       <button type="button" class="icon-btn focus-settings" data-keep aria-label="Settings for {agent.name}" title="Settings" data-icon="gear" onclick={() => router.go(`personal-agents/${agent.id}/about`)}><Icon name="gear" size={14} /></button>
       <button type="button" class="icon-btn" data-keep aria-label="More for {agent.name}" title="More" onclick={more}><Icon name="more" size={14} /></button>

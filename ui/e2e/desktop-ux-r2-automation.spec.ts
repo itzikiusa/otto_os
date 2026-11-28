@@ -185,7 +185,6 @@ test('rooms: phone conversation keeps its header and composer in view', async ({
   await ctx.dispose();
   await page.setViewportSize({ width: 375, height: 812 });
   await page.goto('/#/personal-agents/rooms');
-  await page.getByRole('button', { name: 'Back to channels' }).click();
   await page.getByRole('button', { name: 'Long discussion 0 agents' }).click();
   await page.getByLabel('Message to the channel').fill('Follow-up draft');
   await expectFullyInViewport(page, page.locator('.detail-title'));

@@ -13,15 +13,16 @@
   import AgentChip from '../../lib/components/AgentChip.svelte';
   import { personalAgents } from '../../lib/stores/personalAgents.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
-  import { viewport } from '../../lib/stores/viewport.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { auth } from '../../lib/stores/auth.svelte';
-  import { ctxMenu } from '../../lib/contextmenu.svelte';
+  import { ctxMenu, type MenuItem } from '../../lib/contextmenu.svelte';
+  import ListDetail from '../../lib/components/side/ListDetail.svelte';
+  import ListPane from '../../lib/components/side/ListPane.svelte';
+  import SideRow from '../../lib/components/side/SideRow.svelte';
+  import { rel } from '../../lib/stores/now.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
-  import PaneDivider from '../../lib/components/PaneDivider.svelte';
-  import { LIST_PANE, loadPaneWidth } from '../../lib/paneResizer';
   import { toasts } from '../../lib/toast.svelte';
   import { loadErrorText } from '../../lib/loadError';
   import AgentAvatar from './AgentAvatar.svelte';
@@ -29,10 +30,8 @@
   import type { AgentRoomMessage, AgentRoomWithMembers } from '../../lib/api/types';
 
   let selectedId = $state<string | null>(null);
-  /** Rooms list width — the shared list-pane default/range, remembered. */
-  let listW = $state(loadPaneWidth('personalAgents.rooms.listW', LIST_PANE.default, LIST_PANE.min, LIST_PANE.max));
-  let showingList = $state(false);
-  let newRoomName = $state('');
+  /** Phone: the open channel is pushed over the list ("‹ Channels"). */
+  let phoneOpen = $state(false);
   // Drafts and send results belong to a room, even while a request is pending.
   let drafts = $state<Record<string, string>>({});
   let sending = $state<Record<string, boolean>>({});
@@ -42,8 +41,6 @@
   let busy = $state(false);
   let createError = $state('');
   let feedEl = $state<HTMLElement | null>(null);
-  let createEl = $state<HTMLInputElement | null>(null);
-  let roomListEl = $state<HTMLElement | null>(null);
   let roomsLoading = $state(true);
   const roomsError = $derived(loadErrorOf(personalAgents, 'roomsError'));
 
@@ -88,7 +85,7 @@
   });
   // First room auto-selects; a deleted selection falls back.
   $effect(() => {
-    if (!showingList && rooms.length > 0 && !rooms.some((r) => r.room.id === selectedId)) {
+    if (rooms.length > 0 && !rooms.some((r) => r.room.id === selectedId)) {
       selectedId = rooms[0].room.id;
     }
   });
@@ -129,25 +126,19 @@
   }
 
 
-  async function backToRooms(): Promise<void> {
-    const previous = selectedId;
-    showingList = true;
-    selectedId = null;
-    await tick();
-    Array.from(roomListEl?.querySelectorAll<HTMLButtonElement>('.room') ?? [])
-      .find(button => button.dataset.roomId === previous)?.focus();
+  function open(id: string): void {
+    selectedId = id;
+    phoneOpen = true;
   }
 
+  /** The list pane's +: name the channel, then open it. */
   async function createRoom(): Promise<void> {
-    const submitted = newRoomName;
-    const name = submitted.trim();
+    const name = (await confirmer.promptText('Channel name', { title: 'New channel', confirmLabel: 'Create' }))?.trim();
     if (!name || !ws.currentId || busy) return;
     busy = true;
     createError = '';
     try {
-      selectedId = await personalAgents.createRoom(ws.currentId, name);
-      showingList = false;
-      if (newRoomName === submitted) newRoomName = '';
+      open(await personalAgents.createRoom(ws.currentId, name));
     } catch (e) {
       createError = `Couldn’t create the channel. ${loadErrorText(e)}`;
     } finally {
@@ -155,8 +146,8 @@
     }
   }
 
-  function roomMenu(e: MouseEvent | KeyboardEvent, r: AgentRoomWithMembers): void {
-    ctxMenu.show(e, [
+  function roomMenu(r: AgentRoomWithMembers): MenuItem[] {
+    return [
       {
         label: 'Rename',
         icon: 'edit',
@@ -179,7 +170,7 @@
           }
         },
       },
-    ]);
+    ];
   }
 
   async function addMember(agentId: string): Promise<void> {
@@ -227,46 +218,23 @@
 </script>
 
 <div class="rooms">
-  {#if !viewport.isPhone || !selectedId}
-  <aside class="list" aria-label="Agent channels" bind:this={roomListEl} style="--list-pane-w:{listW}px">
-    <div class="create">
-      <input dir="auto"
-        bind:this={createEl}
-        bind:value={newRoomName}
-        placeholder="New channel name"
-        aria-label="New channel name"
-        onkeydown={(e) => { if (e.key === 'Enter') void createRoom(); }}
-      />
-      <button class="btn small" disabled={busy || !newRoomName.trim()} onclick={createRoom}>Create</button>
-    </div>
-    {#if createError}<div class="err" use:announceShown={{ text: createError, assertive: true }}>{createError}</div>{/if}
-    <ul>
+<ListDetail module="personal-agents" pane="channels" name="Channels" open={phoneOpen} onback={() => (phoneOpen = false)} empty={!roomsLoading && !roomsError && rooms.length === 0} legacy={{ w: 'personalAgents.rooms.listW' }}>
+  {#snippet list()}
+    <ListPane count={rooms.length} primary={{ icon: 'plus', label: 'New channel', onclick: () => void createRoom(), testid: 'pa-new-channel' }} testid="pa-channels">
+      {#if createError}<div class="err" use:announceShown={{ text: createError, assertive: true }}>{createError}</div>{/if}
       {#each rooms as r (r.room.id)}
-        <li>
-          <button use:rowMenu
-            class="room"
-            data-room-id={r.room.id}
-            class:active={r.room.id === selectedId}
-            aria-current={r.room.id === selectedId ? 'true' : undefined}
-            onclick={() => { showingList = false; selectedId = r.room.id; }}
-            oncontextmenu={(e) => roomMenu(e, r)}
-          >
-            <span class="room-name" title={r.room.name}>{r.room.name}</span>
-            <span class="meta">
-              {plural(r.members.length, 'agent')}
-              · {#if r.last_message_at}<RelTime iso={r.last_message_at} />{:else}no messages yet{/if}
-            </span>
-          </button>
-        </li>
+        <SideRow
+          title={r.room.name}
+          meta="{plural(r.members.length, 'agent')} · {r.last_message_at ? rel(r.last_message_at) : 'no messages yet'}"
+          selected={r.room.id === selectedId}
+          menu={() => roomMenu(r)}
+          testid="pa-channel-row"
+          onclick={() => open(r.room.id)}
+        />
       {/each}
-    </ul>
-  </aside>
-  {#if !viewport.isPhone}
-    <PaneDivider bind:width={listW} storageKey="personalAgents.rooms.listW" label="Resize the channels list" />
-  {/if}
-  {/if}
+    </ListPane>
+  {/snippet}
 
-  {#if !viewport.isPhone || selectedId || rooms.length === 0}
   <section class="detail">
     <LoadState
       what="agent channels"
@@ -282,21 +250,19 @@
           body="Channels are how personal agents talk to each other. Every message is kept and shown here, and you can post into any channel."
           actionLabel="Create a channel"
           actionIcon="plus"
-          onaction={() => createEl?.focus()}
-        />
+          onaction={() => void createRoom()}
+        >
+          {#if createError}<div class="err" use:announceShown={{ text: createError, assertive: true }}>{createError}</div>{/if}
+        </EmptyState>
       {/snippet}
       {#if selected}
         <header class="detail-head">
-          {#if viewport.isPhone}
-            <button class="icon-btn" aria-label="Back to channels" title="Back to channels"
-              onclick={backToRooms}><Icon name="chevronLeft" size={16} /></button>
-          {/if}
           <strong class="detail-title" title={selected.room.name}>{selected.room.name}</strong>
           <button
             class="icon-btn"
             aria-label="Channel actions for {selected.room.name}"
             title="Channel actions"
-            onclick={(e) => roomMenu(e, selected)}><Icon name="more" size={14} /></button>
+            onclick={(e) => ctxMenu.showAt(e.currentTarget as HTMLElement, roomMenu(selected), { align: 'end' })}><Icon name="more" size={14} /></button>
         </header>
 
         <div class="members" role="group" aria-label="Member agents">
@@ -394,28 +360,12 @@
       {/if}
     </LoadState>
   </section>
-  {/if}
+</ListDetail>
 </div>
 
 <style>
-  .rooms { display: flex; gap: 12px; min-height: 0; flex: 1; align-items: stretch; }
-  .list { width: var(--list-pane-w, 280px); flex: 0 0 auto; display: flex; flex-direction: column; gap: 8px; min-height: 0; }
-  .create { display: flex; gap: 6px; }
-  .create input {
-    flex: 1; min-width: 0; background: var(--bg); color: var(--text);
-    border: 1px solid var(--border); border-radius: var(--radius-s); padding: 4px 8px; font: inherit; font-size: var(--fs-m);
-  }
-  .list ul { list-style: none; margin: 0; padding: 2px; display: flex; flex-direction: column; gap: 4px; overflow-y: auto; }
-  .room {
-    width: 100%; text-align: start; display: flex; flex-direction: column; gap: 2px; min-width: 0;
-    background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-s);
-    color: var(--text); padding: 6px 10px; font: inherit; font-size: var(--fs-m); cursor: pointer;
-  }
-  .room:hover { background: var(--hover); }
-  .room.active { background: var(--accent-soft); border-color: transparent; font-weight: 600; }
-  .room.active .meta { font-weight: 400; }
-  .room-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .detail { flex: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column; gap: 8px; }
+  .rooms { display: flex; min-height: 0; flex: 1; }
+  .detail { flex: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column; gap: 8px; padding: 12px 16px; }
   .detail-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; color: var(--text); min-width: 0; }
   .detail-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: var(--fs-l); }
   .members { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
@@ -469,16 +419,11 @@
     flex: 1; resize: vertical; background: var(--bg); color: var(--text);
     border: 1px solid var(--border); border-radius: var(--radius-s); padding: 6px 8px; font: inherit; font-size: var(--fs-m);
   }
-  .composer textarea:focus-visible, .create input:focus-visible {
+  .composer textarea:focus-visible {
     outline: 2px solid var(--accent-text); outline-offset: 1px;
   }
   .err {
     background: var(--danger-soft); color: var(--danger); padding: 8px 12px;
     border-radius: var(--radius-s); font-size: var(--fs-s);
-  }
-  @media (max-width: 640px) {
-    .rooms { flex-direction: column; }
-    .list { width: 100%; flex: 1; }
-    .detail-head :global(.icon-btn:first-child) { flex: none; }
   }
 </style>
