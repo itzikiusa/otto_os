@@ -10,7 +10,7 @@
   //            otto.pane.<module>.<pane>.w; Esc closes, focus returns.
   //   sheet    otherwise (and always on a phone, or a phone on its side —
   //            viewport.navDrawer): a right sheet over the content — full
-  //            width there — with the shell Drawer's
+  //            width on a phone — with the shell Drawer's
   //            backdrop, focus trap and Esc.
   //
   // `control` (a DetailOpen) instead of open / onclose / ontoggle: open beside
@@ -174,7 +174,7 @@
 {/snippet}
 
 {#if sheet}
-  <Drawer {open} side="right" label={title} width={viewport.navDrawer ? '100vw' : 'min(92vw, 420px)'} bare {onclose}>
+  <Drawer {open} side="right" label={title} width={viewport.isPhone ? '100vw' : 'min(92vw, 420px)'} bare {onclose}>
     <div class="detail-pane sheet" data-testid={testid}>
       {@render head()}
       <div class="dp-body">{@render children()}</div>

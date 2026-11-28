@@ -3,12 +3,12 @@ import { apiCtx, seedWorkspace } from './seed';
 import { openPage } from './helpers';
 
 // A phone on its side (viewport.navDrawer: a short touch screen) follows the
-// phone rule for a Detail pane (design.md §3): a sheet, closed until asked for,
-// full width when it opens — never inline and already open beside the content.
+// phone rule for a Detail pane (design.md §3): a sheet, closed until asked for —
+// never inline and already open beside the content.
 
 test.use({ serviceWorkers: 'block' });
 
-test('a phone on its side: Design details is a closed sheet, full width when asked', async ({ page }, info) => {
+test('a phone on its side: Design details is a closed sheet, opened when asked', async ({ page }, info) => {
   test.skip(!/phone-landscape/.test(info.project.name), 'a phone on its side');
   const { ctx, base } = await apiCtx();
   const wsId = await seedWorkspace(ctx, base, 'Landscape details');
@@ -26,7 +26,6 @@ test('a phone on its side: Design details is a closed sheet, full width when ask
   await expect(details).toBeHidden();
   await expect(toggle).toHaveAttribute('aria-pressed', 'false');
   await toggle.tap();
+  await expect(page.getByRole('dialog', { name: 'Design details' })).toBeVisible();
   await expect(details).toBeVisible();
-  const box = (await details.boundingBox())!;
-  expect(box.width, 'full width, like a phone').toBeGreaterThan(page.viewportSize()!.width - 2);
 });
