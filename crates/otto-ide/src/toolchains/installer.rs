@@ -18,7 +18,13 @@ use super::{
     system_search_dirs_with_shell, ToolchainManager,
 };
 
-const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(600);
+/// A download fails when no byte arrives for this long, not after a total
+/// deadline: an 870 MB LLVM archive takes over 10 minutes below ~12 Mbit/s.
+#[cfg(not(test))]
+const DOWNLOAD_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
+#[cfg(test)]
+const DOWNLOAD_IDLE_TIMEOUT: Duration = Duration::from_secs(1);
+const DOWNLOAD_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 const LOCAL_CMD_TIMEOUT: Duration = Duration::from_secs(600);
 
 pub(super) struct InstallerProcessGroupGuard {
@@ -72,7 +78,8 @@ pub(super) async fn download_https_to_file_capped(
     let client = if mgr.allows_test_loopback() && url.starts_with("http://127.0.0.1:") {
         reqwest::Client::builder()
             .user_agent("otto-ide/0.2")
-            .timeout(DOWNLOAD_TIMEOUT)
+            .connect_timeout(DOWNLOAD_CONNECT_TIMEOUT)
+            .read_timeout(DOWNLOAD_IDLE_TIMEOUT)
             .build()
             .map_err(|e| format!("http client: {e}"))?
     } else {
@@ -85,7 +92,8 @@ pub(super) async fn download_https_to_file_capped(
         otto_netguard::guarded_client_builder()
             .https_only(true)
             .user_agent("otto-ide/0.2")
-            .timeout(DOWNLOAD_TIMEOUT)
+            .connect_timeout(DOWNLOAD_CONNECT_TIMEOUT)
+            .read_timeout(DOWNLOAD_IDLE_TIMEOUT)
             .build()
             .map_err(|e| format!("http client: {e}"))?
     };

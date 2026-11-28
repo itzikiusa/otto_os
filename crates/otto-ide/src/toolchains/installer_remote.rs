@@ -545,6 +545,41 @@ mod tests {
         drop(server);
     }
 
+    #[tokio::test]
+    async fn a_slow_steady_download_finishes_past_the_idle_timeout() {
+        // SEC6-5: a large archive on a slow link takes longer than any total deadline.
+        use crate::toolchains::installer::download_https_to_file_capped;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let mut req = [0u8; 1024];
+            let _ = sock.read(&mut req).await;
+            let _ = sock
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 6\r\nConnection: close\r\n\r\n")
+                .await;
+            // One byte every 400 ms: 2.4 s in all, never idle for the test's 1 s.
+            for b in b"llvm!\n" {
+                tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+                let _ = sock.write_all(&[*b]).await;
+            }
+        });
+        let tmp = tempfile::tempdir().unwrap();
+        let mgr = ToolchainManager::new(tmp.path().join("data"));
+        mgr.allow_test_loopback
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        let dest = tmp.path().join("llvm.tar.zst");
+        let url = format!("http://127.0.0.1:{port}/llvm.tar.zst");
+        download_https_to_file_capped(&mgr, "job_slow", &url, &dest, None, 10, 64)
+            .await
+            .expect("a slow but steady download completes");
+        assert_eq!(std::fs::read(&dest).unwrap(), b"llvm!\n");
+        drop(server);
+    }
+
     #[test]
     fn remote_install_scripts_avoid_unverified_curl_pipes_and_cap_downloads() {
         let platform = TargetPlatform::host();
