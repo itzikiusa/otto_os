@@ -99,18 +99,21 @@ test('Settings sections remain reachable and titled at desktop and phone widths'
       const back = page.getByRole('button', { name: 'Back to Settings' });
       const search = page.getByRole('searchbox', { name: 'Filter settings' });
       if (width <= 640) {
-        // The layout switches a moment after the resize, and the desktop
-        // filter box is still on screen until it does: wait for the phone
-        // layout itself, then leave an open section.
-        await expect(page.locator('.settings.at-section, .settings.at-list')).toBeVisible();
-        if (await page.locator('.settings.at-section').count()) await back.click();
-        await expect(page.locator('.settings.at-list')).toBeVisible();
+        // Phone: an open section is pushed over the list with ‹ Settings in
+        // its header; go back to the list (the layout switches a moment after
+        // the resize, so wait for one of the two).
+        await expect(back.or(search)).toBeVisible();
+        if (await back.isVisible()) await back.click();
+        await expect(search).toBeVisible();
       }
       await search.fill(label);
       await nav.getByRole('button', { name: new RegExp(`^${label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`) }).first().click();
       // The list's hidden body already titles Appearance: wait for the section itself.
-      if (width <= 640) await expect(page.locator('.settings.at-section')).toBeVisible();
-      await expect(page.locator('.settings-body h1.ph-title')).toHaveText(label);
+      // A phone pushes the section with ‹ Settings in its header row; a section
+      // that holds its own list (Access groups, Context library) shows that
+      // list's name there, so the title is checked where it always shows.
+      if (width <= 640) await expect(back).toBeVisible();
+      else await expect(page.locator('.settings-body h1.ph-title')).toHaveText(label);
     }
   }
 });

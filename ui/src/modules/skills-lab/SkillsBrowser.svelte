@@ -569,11 +569,22 @@
     font: inherit;
     outline: none;
   }
+  /* One filter row (design §3): the chips scroll sideways, never wrap. */
   .chips,
   .chip-group {
     display: flex;
-    flex-wrap: wrap;
+    flex-wrap: nowrap;
     gap: 4px;
+    flex: none;
+  }
+  .chips {
+    overflow-x: auto;
+    scrollbar-width: none;
+    mask-image: linear-gradient(to right, #000 calc(100% - 24px), transparent);
+  }
+  .fchip {
+    white-space: nowrap;
+    flex: none;
   }
   .fchip {
     display: inline-flex;

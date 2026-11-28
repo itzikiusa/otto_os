@@ -20,7 +20,6 @@
   import ListDetail from '../../lib/components/side/ListDetail.svelte';
   import ListPane from '../../lib/components/side/ListPane.svelte';
   import SideRow from '../../lib/components/side/SideRow.svelte';
-  import { onTabKey } from '../../lib/tabKeys';
   let groups = $state<AccessGroup[]>([]),
     roles = $state<AccessRole[]>([]),
     users = $state<User[]>([]);
@@ -249,6 +248,16 @@
   }
 </script>
 
+<!-- The shared row look, drawn here so a row is named by its title and is
+     disabled while a save is in flight (selection locks until it returns). -->
+{#snippet row(title: string, meta: string | null | undefined, tip: string, on: boolean, pick: () => void)}
+  <div class="side-row" class:two-line={!!meta} class:selected={on}>
+    <button type="button" class="side-row-main" data-side-row aria-label={title} title={tip} aria-current={on ? 'true' : undefined} disabled={busy} onclick={pick}>
+      <span class="side-row-text"><span class="side-row-title" dir="auto">{title}</span>{#if meta}<span class="side-row-meta" dir="auto">{meta}</span>{/if}</span>
+    </button>
+  </div>
+{/snippet}
+
 <div class="settings-section">
   <PageHeader
     title={sectionLabel('access-groups')}
@@ -256,11 +265,11 @@
   >
     {#snippet tabs()}
       {#if auth.isRoot}
-        <div class="segmented" role="tablist" tabindex="-1" aria-label="Show" onkeydown={onTabKey}>
-          <button role="tab" tabindex={tab === 'groups' ? 0 : -1} aria-selected={tab === 'groups'} class:active={tab === 'groups'} onclick={() => { tab = 'groups'; error = ''; }}>
+        <div class="segmented" role="group" aria-label="Show">
+          <button class:active={tab === 'groups'} aria-pressed={tab === 'groups'} onclick={() => { tab = 'groups'; error = ''; }}>
             Groups <span class="count">{groups.length}</span>
           </button>
-          <button role="tab" tabindex={tab === 'presets' ? 0 : -1} aria-selected={tab === 'presets'} class:active={tab === 'presets'} onclick={() => { tab = 'presets'; error = ''; }}>
+          <button class:active={tab === 'presets'} aria-pressed={tab === 'presets'} onclick={() => { tab = 'presets'; error = ''; }}>
             Role presets <span class="count">{roles.length}</span>
           </button>
         </div>
@@ -281,7 +290,7 @@
               <SideRow title={name.trim() || 'New group'} meta="Not created yet" selected onclick={() => {}} />
             {/if}
             {#each groups as group (group.id)}
-              <SideRow title={group.name} meta={group.description || undefined} tip={group.description ?? group.name} selected={selected?.id === group.id} onclick={() => void chooseGroup(group)} />
+              {@render row(group.name, group.description, group.description ?? group.name, selected?.id === group.id, () => void chooseGroup(group))}
             {/each}
           </ListPane>
         {/snippet}
@@ -357,7 +366,7 @@
               <SideRow title={roleName.trim() || 'New preset'} meta="Not created yet" selected onclick={() => {}} />
             {/if}
             {#each roles as role (role.id)}
-              <SideRow title={role.name} meta={resourceLabels[role.kind]} selected={roleId === role.id} onclick={() => void chooseRole(role)} />
+              {@render row(role.name, resourceLabels[role.kind], role.name, roleId === role.id, () => void chooseRole(role))}
             {/each}
           </ListPane>
         {/snippet}

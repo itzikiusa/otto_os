@@ -189,7 +189,9 @@
     const mv = moves[e.key];
     if (mv === undefined) return;
     e.preventDefault();
-    const current = (document.activeElement as HTMLElement | null)?.dataset?.guide ?? (inSearch ? undefined : selectedId);
+    // The row the key was pressed on (the list pane's own walk may already have
+    // moved focus to the next row before this delegated handler runs).
+    const current = inSearch ? undefined : ((e.target as HTMLElement).dataset?.guide ?? selectedId);
     const next = inSearch && mv === 1 && !current ? step(undefined, 'first') : step(current, mv);
     if (!next) return;
     // Arrow browsing replaces the history entry (Back leaves the page, not

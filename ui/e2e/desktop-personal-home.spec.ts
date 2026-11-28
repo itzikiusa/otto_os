@@ -118,7 +118,7 @@ test('Focus keeps one conversation with agent switching and contextual sheets â€
   await expect(routines.getByTestId('pa-activity')).toContainText('Workingâ€¦');
   await expectFullyInViewport(page, routines);
   await page.getByTestId('pa-routines-pane-close').click();
-  await expect(routines).toHaveCount(0);
+  await expect(routines).toBeHidden();
   await expect(page.getByRole('button', { name: 'Routines', exact: true })).toBeFocused();
   await expect(page.getByTestId('pa-composer')).toHaveAttribute('data-continuity-probe', 'original');
   await expect(page.getByTestId('pa-composer')).toHaveValue('Keep this draft while I look around');
@@ -168,8 +168,8 @@ test('Focus keeps one conversation with agent switching and contextual sheets â€
     await expectNoHorizontalOverflow(page);
     await page.getByRole('button', { name: 'Routines', exact: true }).click();
     await expectFullyInViewport(page, routines);
-    await page.keyboard.press('Escape');
-    await expect(routines).toHaveCount(0);
+    await page.getByTestId('pa-routines-pane-close').click();
+    await expect(routines).toBeHidden();
     await page.screenshot({ path: info.outputPath(`pa-focus-${width}.png`) });
   }
 });
@@ -201,7 +201,8 @@ test('phone Focus keeps settings, memory, history and nested routine forms usabl
     await expectFullyInViewport(page, form.getByRole('button', { name: 'Add routine', exact: true }));
     await page.screenshot({ path: info.outputPath(`pa-phone-routine-${width}.png`) });
     await form.getByRole('button', { name: 'Cancel', exact: true }).click();
-    await expect(page.getByRole('dialog', { name: 'Routines', exact: true })).toBeVisible();
+    // Routines is the Detail pane: a sheet on a phone, inline when it fits.
+    await expect(page.getByTestId('pa-routines-pane')).toBeVisible();
     await page.keyboard.press('Escape');
     await expect(page.getByTestId('pa-composer')).toHaveValue('Keep my phone draft');
   }

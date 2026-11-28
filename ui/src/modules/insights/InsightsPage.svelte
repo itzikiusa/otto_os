@@ -461,7 +461,7 @@
         <button class="icon-btn" data-overflow="-1" data-icon="gear" data-label="Schedule settings" onclick={() => router.go('settings/insights')} aria-label="Schedule settings" title="Schedule settings">
           <Icon name="gear" size={14} />
         </button>
-        {#if canRun && (s.reports.length > 0 || s.loading)}
+        {#if canRun && (s.reports.length > 0 || s.loading) && !viewport.navDrawer}
           <select class="input run-period" bind:value={s.runChoice} disabled={s.loading || !!s.loadError || s.running || !!s.pollRunId} aria-label="Period to report on" title="Period to report on">
             {#each RUN_OPTIONS as o (o.value)}<option value={o.value}>{o.label}</option>{/each}
           </select>

@@ -322,7 +322,7 @@
             {:else}
               {#each groups as g (g.id)}
                 <div class="side-section" role="group" aria-label={g.label}>
-                  <div class="side-section-head"><h3 class="ssh-title settings-nav-heading" aria-hidden="true">{g.label}</h3></div>
+                  <div class="side-section-head"><span class="ssh-title settings-nav-heading" aria-hidden="true">{g.label}</span></div>
                   {#each g.items as s (s.id)}
                     {@render navRow(s)}
                   {/each}

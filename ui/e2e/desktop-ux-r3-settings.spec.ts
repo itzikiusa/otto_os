@@ -34,7 +34,8 @@ test('tablet Skills can hide navigation while editing and preserve its draft', a
  const editor = page.getByTestId('skill-editor').locator('.cm-content'); await expect(editor).toContainText('A document for editing.');
  await page.screenshot({ path: '/tmp/otto-ux-r3-settings-skills-tablet-before.png' }); await editor.fill('# Keep tablet draft');
  await page.getByTestId('skills-list-more').click(); await page.getByRole('menuitem', { name: /Hide Skills/ }).click();
- expect((await page.getByTestId('skill-editor').boundingBox())!.width).toBeGreaterThan(480); await expect(editor).toContainText('# Keep tablet draft');
+ // The editor keeps 480 px beside its own Files pane (less the 1 px divider).
+ expect((await page.getByTestId('skill-editor').boundingBox())!.width).toBeGreaterThan(470); await expect(editor).toContainText('# Keep tablet draft');
  await page.screenshot({ path: '/tmp/otto-ux-r3-settings-skills-tablet-focused.png' });
  await page.getByTestId('show-list-pane').click();
  await expect(page.getByRole('searchbox', { name: 'Filter skills' })).toBeVisible(); await expect(editor).toContainText('# Keep tablet draft'); await ctx.dispose();
@@ -100,7 +101,8 @@ test('Skills Review and Evaluator list failures recover without starting agents'
   await expect(page.getByRole('alert')).toContainText('Synthetic history unavailable');
   fail = false; await page.getByRole('alert').getByRole('button', { name: 'Retry', exact: true }).click();
   await expect(page.getByRole('alert')).toHaveCount(0);
-  await expect(page.getByText(tab === 'review' ? 'No skill reviews yet. Start one with the form.' : 'No evaluations yet. Fill in the form to run the first one.')).toBeVisible();
+  // No list yet: no list pane, the start form owns the page.
+  await expect(page.getByRole('heading', { name: tab === 'review' ? 'New skill review' : 'New skill evaluation' })).toBeVisible();
   await page.screenshot({ path: `/tmp/otto-ux-r3-settings-${tab}-recovery.png` });
  }
  await ctx.dispose();

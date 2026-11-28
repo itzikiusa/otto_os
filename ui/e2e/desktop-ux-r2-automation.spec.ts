@@ -131,6 +131,8 @@ test.describe('loaded automation visual and interaction fixtures', () => {
       };
       await page.goto('/#/personal-agents/rooms');
       if (rtl) await page.evaluate(() => document.documentElement.dir = 'rtl');
+      // A phone opens on the channels list: open the first channel.
+      if (width <= 640) await page.getByTestId('pa-channel-row').first().click();
       await expect(page.getByRole('log', { name: 'Channel messages' }).getByText('Decision 8:', { exact: false })).toBeVisible();
       await page.getByLabel('Message to the channel').fill('Draft kept while reading the discussion');
       await shot('rooms');
