@@ -773,4 +773,4 @@ export interface IdeDebugVariablesResp { variables: IdeVariable[]; }
 export interface IdeDebugEvaluateResp { result: string; var_type?: string | null; variables_reference: number; }
 export interface IdeDebugSetVariableResp { value: string; var_type?: string | null; variables_reference: number; }
 /** GET /ide/debug/sessions/{id}/port?port= — the debuggee listens there (an agent start's `ready_port`). */
-export interface IdeDebugPortResp { open: boolean; }\n
+export interface IdeDebugPortResp { open: boolean; }
