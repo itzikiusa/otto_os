@@ -172,8 +172,8 @@
        New is its one action, Duplicate under its ⋯. -->
   <div class="env-cfg-rail">
     <ListPane
-      name="Saved run configurations"
-      count={savedConfigs.length}
+      name="Configurations"
+      count={savedConfigs.length + detectedConfigs.length}
       primary={{ icon: 'plus', label: 'New configuration', onclick: onnew }}
       menu={cfgDraft.name ? () => [{ label: 'Duplicate Configuration', icon: 'copy', action: onduplicate }] : undefined}
     >

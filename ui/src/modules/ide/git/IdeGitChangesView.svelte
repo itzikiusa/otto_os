@@ -254,7 +254,7 @@
     >
       <span class={`gc-status mono ${badgeClass(c)}`}>{badgeLetter(c)}</span>
       <span class="side-row-text">
-        <span class="side-row-title"><span class={badgeClass(c)}>{ideBasename(c.path)}</span>{#if dirPart}<span class="gc-dir"> {dirPart}</span>{/if}</span>
+        <span class="side-row-title"><span class={badgeClass(c)}>{ideBasename(c.path)}</span>{#if dirPart}<span class="gc-dir">{dirPart}</span>{/if}</span>
       </span>
     </button>
     {#if section === 'staged'}
@@ -400,7 +400,7 @@
 
 <style>
   .gc-split { flex: 1; min-block-size: 0; min-inline-size: 0; display: flex; overflow: hidden; background: var(--surface); }
-  .gc-left { display: flex; flex-direction: column; flex-shrink: 0; min-block-size: 0; }
+  .gc-left { display: flex; flex-direction: column; flex-shrink: 0; min-block-size: 0; min-inline-size: 0; }
   .gc-left.phone { flex: 1; }
   .gc-left[hidden], .gc-right[hidden] { display: none; }
   .gc-pad { padding: 12px; }
@@ -411,7 +411,7 @@
   .is-add { color: var(--success); }
   .is-del { color: var(--danger); }
   .is-untracked { color: var(--warning); }
-  .gc-dir { font-size: var(--fs-xs); color: var(--text-dim); font-weight: 400; }
+  .gc-dir { margin-inline-start: 6px; font-size: var(--fs-xs); color: var(--text-dim); font-weight: 400; }
   .gc-composer { flex: 1; display: flex; flex-direction: column; gap: 6px; padding-block: 8px; }
   .gc-msg { resize: none; font-size: var(--fs-xs); min-block-size: 44px; padding: 6px 8px; }
   .gc-composer-bar { display: flex; align-items: center; gap: 8px; }

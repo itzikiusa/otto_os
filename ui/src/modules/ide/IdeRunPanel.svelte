@@ -524,7 +524,7 @@
   }
   .run-devsrv-url { color: var(--accent-text); font-weight: 500; flex-shrink: 1; min-inline-size: 0; max-inline-size: 240px; }
   .run-flex { flex: 1; min-block-size: 0; min-inline-size: 0; display: flex; overflow: hidden; }
-  .run-tree { flex-shrink: 0; display: flex; flex-direction: column; min-block-size: 0; }
+  .run-tree { flex-shrink: 0; display: flex; flex-direction: column; min-block-size: 0; min-inline-size: 0; }
   .run-tree.phone { flex: 1; }
   .run-tree[hidden], .run-log-pane[hidden] { display: none; }
   .run-filter-empty { display: flex; flex-direction: column; align-items: center; gap: 6px; padding: 20px 12px; font-size: var(--fs-s); }
