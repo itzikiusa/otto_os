@@ -481,14 +481,14 @@
       <Icon name="search" size={14} />
       <input bind:this={searchEl} type="search" dir="auto" bind:value={query} placeholder="Filter sessions…" aria-label="Search sessions, branches, workspaces" data-testid="agents-search" />
       {#if query}
-        <button type="button" class="icon-btn" aria-label="Clear search" title="Clear search" onclick={clearSearch}><Icon name="x" size={12} /></button>
+        <button type="button" class="icon-btn ai-tool" aria-label="Clear search" title="Clear search" onclick={clearSearch}><Icon name="x" size={12} /></button>
       {/if}
       {#if selectMode || selectable.length > 0}
-        <button type="button" class="icon-btn" class:on={selectMode} aria-pressed={selectMode} aria-label="Select sessions" title={selectMode ? 'Done selecting' : 'Select sessions to tile, archive or delete'} data-testid="agents-select-toggle" onclick={() => setSelectMode(!selectMode)}>
+        <button type="button" class="icon-btn ai-tool" class:on={selectMode} aria-pressed={selectMode} aria-label="Select sessions" title={selectMode ? 'Done selecting' : 'Select sessions to tile, archive or delete'} data-testid="agents-select-toggle" onclick={() => setSelectMode(!selectMode)}>
           <Icon name={selectMode ? 'check' : 'square'} size={14} />
         </button>
       {/if}
-      <button type="button" class="icon-btn" class:on={ws.allWorkspaces || sessionOrder.mode !== 'recent' || ws.needsYouFilter} aria-haspopup="menu" aria-label="Show and sort sessions" title="Showing {ws.allWorkspaces ? 'all workspaces' : 'this workspace'} · {sortLabel}" data-testid="agents-sort-toggle" onclick={sortMenu}>
+      <button type="button" class="icon-btn ai-tool" class:on={ws.allWorkspaces || sessionOrder.mode !== 'recent' || ws.needsYouFilter} aria-haspopup="menu" aria-label="Show and sort sessions" title="Showing {ws.allWorkspaces ? 'all workspaces' : 'this workspace'} · {sortLabel}" data-testid="agents-sort-toggle" onclick={sortMenu}>
         <Icon name="filter" size={14} />
       </button>
     </div>
@@ -615,7 +615,7 @@
     font-size: var(--fs-m);
     outline: none;
   }
-  .ai-search .icon-btn {
+  .ai-tool {
     flex: none;
   }
   .on {
@@ -700,7 +700,7 @@
       block-size: 46px;
       padding-inline-end: 0;
     }
-    .ai-search .icon-btn {
+    .ai-tool {
       inline-size: 44px;
       block-size: 44px;
     }

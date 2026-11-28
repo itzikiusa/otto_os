@@ -10,6 +10,7 @@
   // pane (a Grid pane, a phone with the keyboard up), never the window, and
   // always leaves the composer room.
   import { announceEdge } from '../../../lib/announce.svelte';
+  import { isTouchFirst } from '../../../lib/enterSends';
   import type { ApprovalDecision, RuntimeRequest } from '../../../lib/api/types';
   import Icon from '../../../lib/components/Icon.svelte';
   import { isMacPlatform } from '../../../lib/keys';
@@ -48,15 +49,7 @@
   const question = $derived(cur?.kind === 'question' ? (requests.find((r) => r.id === cur.id) ?? null) : null);
   const headline = $derived(cur ? attentionHeadline(cur, agent) : '');
   const mac = isMacPlatform();
-  let hover = $state(true);
-  $effect(() => {
-    if (typeof matchMedia !== 'function') return;
-    const mq = matchMedia('(hover: hover) and (pointer: fine)');
-    hover = mq.matches;
-    const on = (): void => void (hover = mq.matches);
-    mq.addEventListener('change', on);
-    return () => mq.removeEventListener('change', on);
-  });
+  const hover = !isTouchFirst();
 
   // A new request takes focus — its primary action, or a question's first
   // field — unless the person is typing in the composer or works elsewhere

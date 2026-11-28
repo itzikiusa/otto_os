@@ -61,8 +61,11 @@ test.beforeEach(async ({ page }, info) => {
 test('a Codex runtime thread streams, asks inline, queues a follow-up and stops', async ({ page }, info) => {
   await page.goto('/#/threads');
   // Other specs' threads (any workspace) may open first; start a new one.
-  await page.getByTestId('threads-new-btn').click();
+  // With no thread anywhere there is no list pane: the new-thread stage IS the page.
   const stage = page.getByTestId('new-thread-stage');
+  const newBtn = page.getByTestId('threads-new-btn');
+  await expect(stage.or(newBtn).first()).toBeVisible({ timeout: 30_000 });
+  if (!(await stage.isVisible())) await newBtn.click();
   await expect(stage).toBeVisible({ timeout: 30_000 });
 
   // Pick Codex in the one agent panel; runtime threads have no access-mode switch.
@@ -219,8 +222,10 @@ test('a Codex runtime thread streams, asks inline, queues a follow-up and stops'
   await expect.poll(waitingIds, { timeout: 30_000 }).toContain(bgId);
   await page.goto('/#/threads');
 
-  // Phone width: the timeline and composer fit.
+  // Phone width: #/threads is the list (the open thread stays marked); a tap
+  // pushes it, and the timeline and composer fit.
   await page.setViewportSize({ width: 390, height: 844 });
+  await page.locator('[data-testid="threads-sidebar"] .tr-row.selected .tr-main').first().click();
   await expect(thread.getByTestId('runtime-composer')).toBeVisible();
   await expectNoHorizontalOverflow(page);
 });

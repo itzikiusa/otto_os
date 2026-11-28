@@ -20,6 +20,7 @@
   import { ui } from '../../lib/stores/ui.svelte';
   import { viewport } from '../../lib/stores/viewport.svelte';
   import { keyboard } from '../../lib/stores/keyboard.svelte';
+  import { isTouchFirst } from '../../lib/enterSends';
   import { trackComposerFocus, typingChrome } from './threadsTyping'; import { consumeThreadDraftHandoff } from './recapThreadConsumer';
   import { SCRATCH_WORKSPACE_ID, ws } from '../../lib/stores/workspace.svelte';
   import ThreadCanvas from './ThreadCanvas.svelte';
@@ -48,16 +49,14 @@
   import { threads, type ThreadsLayoutMode } from './threadsStore.svelte';
   import { initialThreadId } from './threadNav.svelte';
 
-  let stageWidth = $state(1280);
   let centerWidth = $state(1000);
   let roomSessionId = $state<string | null>(null);
 
-  // Menus and the floating card read "compact" (a phone, a tablet, a narrow
-  // stage). The thread list and the inspector follow the shared rules instead
-  // (ListDetail / DetailPane): a column while there is room, push / a sheet below.
-  const compact = $derived(
-    viewport.isPhone || viewport.isTablet || (stageWidth > 0 && stageWidth < 860),
-  );
+  // Menus and the floating card read "compact" (a phone or a tablet; the card
+  // also needs a whole reading column beside it, threadDetails.ts). The thread
+  // list and the inspector follow the shared rules instead (ListDetail /
+  // DetailPane): a column while there is room, push / a sheet below.
+  const compact = $derived(viewport.isPhone || viewport.isTablet);
   // Until the inspector's chunk decides (DetailPane: inline or a sheet), the
   // old guess picks which open flag its toggle drives.
   onMount(() => untrack(() => threads.setInspectorCompact(compact)));
@@ -376,7 +375,7 @@
         terminalOpen: threadsChrome.terminalOpen,
         cardOn: cardRoom ? threadsChrome.cardVisible : null,
         threadId: focused?.id ?? null,
-        compact, touch: typeof matchMedia === 'function' && matchMedia('(hover: none) and (pointer: coarse)').matches,
+        compact, touch: isTouchFirst(),
         // A phone on its side is tablet-wide but still the phone: no hand-off to itself.
         phone: viewport.isPhone || viewport.isShort,
         sidebarVisible: !viewport.isPhone && !pageNav.show,
@@ -491,7 +490,7 @@
   </PageHeader>
 
   <PageBody width="full" padded={false} fill>
-    <div class="th-workspace" class:compact bind:clientWidth={stageWidth}>
+    <div class="th-workspace" class:compact>
       <ListDetail
         module="threads"
         name="Threads"

@@ -1,5 +1,6 @@
 <script lang="ts">
   import { tick } from 'svelte';
+  import { isTouchFirst } from '../../lib/enterSends';
   import { api, authedBlobUrl, isAbortError } from '../../lib/api/client';
   import { copyWithToast } from '../../lib/clipboard';
   import CodeEditor from '../../lib/components/CodeEditor.svelte';
@@ -20,7 +21,7 @@
   // The shared file preview (Markdown, JSON tree, table, image) — the IDE's too.
   const FilePreviewLazy = lazyComponent(() => import('../../lib/components/FilePreview.svelte'));
   // A touch screen has no double-click: its empty state says "Tap".
-  const touch = typeof matchMedia === 'function' && matchMedia('(hover: none)').matches;
+  const touch = isTouchFirst();
 
   interface Props {
     rootPath: string;
