@@ -1,9 +1,9 @@
 <script lang="ts">
-  // The Browser page's agent: the agent's live SHELL (the same Terminal as
-  // Agents, reused — exactly like Canvas's ConversationPanel, the DB
-  // Assistant, and the inline PR-review / workflow terminals) docked under
-  // the page, plus an ask bar that submits page + marks + question turns into
-  // it. readOnly is FALSE — the user types directly to the agent here (a real
+  // The Browser page's agent — the Agent view of the page's Detail pane
+  // (beside Marks): the agent's live SHELL (the same Terminal as Agents,
+  // reused — exactly like Canvas's ConversationPanel, the DB Assistant, and
+  // the inline PR-review / workflow terminals) plus an ask bar that submits
+  // page + marks + question turns into it. readOnly is FALSE — the user types directly to the agent here (a real
   // two-way session), and can also ask through the bar so the agent gets the
   // page and marks as context. The bound session is an ordinary agent session
   // (it also appears in Agents), remembered per workspace.
@@ -18,18 +18,14 @@
   import { browser } from '../../lib/stores/browser.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { ui } from '../../lib/stores/ui.svelte';
-  import { paneResizer, RESIZE_TITLE_VERTICAL } from '../../lib/paneResizer';
-  import { startMouseDrag } from '../../lib/dragCursor';
   import { toasts } from '../../lib/toast.svelte';
   import { ctxMenu, type MenuItem } from '../../lib/contextmenu.svelte';
   import { agentProviders, defaultAgentProvider } from '../../lib/providers';
-  import { viewport } from '../../lib/stores/viewport.svelte';
 
   const sessionId = $derived(browser.agentSessionId);
   const session = $derived(sessionId ? (ws.getSession(sessionId) ?? null) : null);
   const status = $derived(sessionId ? (ws.statusMap[sessionId] ?? session?.status ?? null) : null);
   const readOnly = $derived(ws.myRole === 'viewer');
-  const open = $derived(ui.browserAgentOpen);
   /** The one shared session state (lib/status.ts) — same dot and words as Agents. */
   const sState = $derived(
     session
@@ -95,52 +91,10 @@
     ctxMenu.show(e, items, { filter: items.length > 8, filterPlaceholder: 'Filter sessions…' });
   }
 
-  // Drag the dock's top edge to resize it (persisted).
-  let resizing = $state(false);
-  function startResize(e: MouseEvent): void {
-    resizing = true;
-    const startY = e.clientY;
-    const startH = ui.browserAgentH;
-    // Overlay cursor + one write per frame (lib/dragCursor.ts).
-    startMouseDrag(e, {
-      cursor: 'row-resize',
-      onMove: (ev) => ui.setBrowserAgentH(startH + (startY - ev.clientY)),
-      onEnd: () => (resizing = false),
-    });
-  }
 </script>
 
-<aside
-  class="assistant"
-  class:open={open && !!sessionId}
-  class:resizing
-  style={open && sessionId ? `height:${ui.browserAgentH}px` : undefined}
-  aria-label="Browser agent"
->
-  {#if open && sessionId && !viewport.isPhone}
-    <!-- paneResizer makes it the focusable window splitter and wires the drag + double-click reset. -->
-    <div
-      class="resize-handle"
-      role="separator"
-      aria-label="Resize the browser agent"
-      title={RESIZE_TITLE_VERTICAL}
-      use:paneResizer={{ onDragStart: startResize, value: ui.browserAgentH, min: 160, max: 900, orientation: 'horizontal', invert: true, onChange: (h) => ui.setBrowserAgentH(h), onReset: () => ui.setBrowserAgentH(280), text: (v) => `${Math.round(v)} pixels tall` }}
-    ></div>
-  {/if}
-
+<section class="assistant" aria-label="Browser agent">
   <header class="head">
-    {#if sessionId}
-      <button
-        class="icon-btn collapse"
-        onclick={() => ui.setBrowserAgentOpen(!open)}
-        title={open ? 'Collapse agent' : 'Expand agent'}
-        aria-label={open ? 'Collapse agent' : 'Expand agent'}
-        aria-expanded={open}
-      >
-        <Icon name={open ? 'chevronDown' : 'chevronUp'} size={12} />
-      </button>
-    {/if}
-    <span class="title"><Icon name="terminal" size={14} /> Agent</span>
     {#if session}
       {#if hasProviderIcon(session.provider)}<ProviderIcon provider={session.provider ?? ''} size={13} />{/if}
       <span class="name" title={session.title}>{session.title}</span>
@@ -173,7 +127,7 @@
     {/if}
   </header>
 
-  {#if open && sessionId}
+  {#if sessionId}
     <!-- The live, fully-interactive shell of the bound agent (the SAME Terminal
          as Agents). readOnly is FALSE — the user types directly to it. -->
     <div class="agent-shell otto-force-dark">
@@ -183,65 +137,28 @@
     </div>
   {/if}
 
-  <AskBar {sessionId} terminalVisible={open && !!sessionId} unboundHint="Attach or start an agent to ask about this page." />
-</aside>
+  <AskBar {sessionId} terminalVisible={!!sessionId} unboundHint="Attach or start an agent to ask about this page." />
+</section>
 
 <style>
   .assistant {
-    position: relative;
+    flex: 1;
     display: flex;
     flex-direction: column;
-    flex: none;
     min-height: 0;
-    border-top: 1px solid var(--border);
-    background: var(--surface);
     color: var(--text);
-  }
-  .assistant.open {
-    /* height is set inline from ui.browserAgentH (drag-resizable), capped so
-       short landscape / mobile viewports never let the dock swallow the page. */
-    min-height: 140px;
-    max-height: 48vh;
-  }
-  @media (max-height: 500px) {
-    .assistant.open {
-      max-height: 40vh;
-      min-height: 110px;
-    }
-    .head {
-      min-height: 32px;
-      padding: 4px 10px;
-    }
-  }
-  .resize-handle {
-    position: absolute;
-    top: -3px;
-    inset-inline: 0;
-    height: 6px;
-    cursor: row-resize;
-    z-index: var(--z-sticky);
-  }
-  .resize-handle:hover,
-  .assistant.resizing .resize-handle {
-    background: var(--accent-line);
   }
   .head {
     display: flex;
     align-items: center;
     gap: 8px;
-    padding: 6px 12px;
-    border-bottom: 1px solid var(--border);
+    flex-wrap: wrap;
+    padding-block: 6px;
+    padding-inline: 16px 12px;
+    border-bottom: 1px solid var(--separator);
     flex: none;
     min-height: 40px;
     min-width: 0;
-  }
-  .title {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    font-size: var(--fs-m);
-    font-weight: 600;
-    flex-shrink: 0;
   }
   .name {
     min-width: 0;
@@ -278,10 +195,6 @@
     cursor: pointer;
     text-transform: capitalize;
   }
-  .collapse {
-    width: 24px;
-    height: 24px;
-  }
   .agent-shell {
     flex: 1 1 auto;
     min-height: 0;
@@ -295,12 +208,5 @@
   .agent-shell > :global(*) {
     flex: 1 1 auto;
     min-height: 0;
-  }
-  /* Phone: the ask bar's placeholder already says nothing is attached, so the
-     label goes and the actions keep one row. */
-  @media (max-width: 640px) {
-    .no-session {
-      display: none;
-    }
   }
 </style>

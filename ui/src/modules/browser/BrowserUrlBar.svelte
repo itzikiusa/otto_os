@@ -23,6 +23,7 @@
     mirroredSim: SimDevice | null;
     canShowMarksRail?: boolean;
     showMarksRail?: boolean;
+    showAgent?: boolean;
   }
 
   export interface BrowserUrlBarActions {
@@ -42,6 +43,8 @@
     summarize: () => void;
     vaultSave: (e: MouseEvent) => void;
     toggleMarksRail?: () => void;
+    /** The page's agent (the Detail pane's Agent view). */
+    toggleAgent?: () => void;
   }
 </script>
 
@@ -315,6 +318,10 @@
     >
       <Icon name="key" size={14} />
     </button>
+  {/if}
+  {#if actions.toggleAgent}
+    <button class="icon-btn tool" class:active={!!tools.showAgent} onclick={actions.toggleAgent} aria-pressed={!!tools.showAgent}
+      aria-label={tools.showAgent ? 'Hide agent' : 'Show agent'} title={tools.showAgent ? 'Hide agent (⌥⌘B)' : 'Show agent (⌥⌘B)'}><Icon name="assistant" size={14} /></button>
   {/if}
   {#if browser.activeTab}
     {#if tools.canShowMarksRail && actions.toggleMarksRail}

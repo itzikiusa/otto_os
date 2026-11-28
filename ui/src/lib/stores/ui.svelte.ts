@@ -70,7 +70,6 @@ const LS = {
   termToolbar: 'otto_term_toolbar',
   browserPanelVersion: 'otto_browser_panel_version',
   browserAgentOpen: 'otto_browser_agent_open',
-  browserAgentH: 'otto_browser_agent_h',
   /** Legacy single threshold — migrated once into `dbAutoVertical`, then removed. */
   dbAutoVerticalCols: 'otto_db_auto_vertical_cols',
   dbAutoVertical: 'otto_db_auto_vertical_by_engine',
@@ -193,10 +192,8 @@ class UiStore {
   browserPanelVersion: BrowserPanelVersion = $state(
     lsGet(LS.browserPanelVersion) === 'v1' ? 'v1' : 'v2',
   );
-  /** Browser page: the embedded agent dock (terminal + ask bar) is expanded. */
+  /** Browser page: the agent (terminal + ask bar, the Detail pane's Agent view) is shown. */
   browserAgentOpen = $state(lsGet(LS.browserAgentOpen) !== '0'); // default open
-  /** Browser page: the agent dock's height in px (drag-resizable). */
-  browserAgentH = $state(Math.min(900, Math.max(160, Number(lsGet(LS.browserAgentH)) || 280)));
   // Git graph list pane width in detail mode.
   gitGraphListWidth = $state(clampGitGraphList(Number(lsGet(LS.gitGraphListWidth)) || 420));
   // Git graph LEFT refs sidebar width (drag-resizable; default matches the CSS 220px).
@@ -594,10 +591,6 @@ class UiStore {
   setBrowserAgentOpen(on: boolean): void {
     this.browserAgentOpen = on;
     lsSet(LS.browserAgentOpen, on ? '1' : '0');
-  }
-  setBrowserAgentH(px: number): void {
-    this.browserAgentH = Math.min(900, Math.max(160, Math.round(px)));
-    lsSet(LS.browserAgentH, String(this.browserAgentH));
   }
 
   setTheme(theme: ThemeName): void {
