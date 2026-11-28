@@ -10,8 +10,13 @@
   import { api } from '../../../lib/api/client';
   import type {
     IdeMlAcceleratorInfo,
+    IdeNotebookExecuteReq,
     IdeNotebookExecuteResp,
+    IdeNotebookInputReq,
     IdeNotebookKernelInfo,
+    IdeNotebookKernelsReq,
+    IdeNotebookOkResp,
+    IdeNotebookSessionReq,
     IdeNotebookKernelStatus,
     IdeNotebookKernelsResp,
     IdeNotebookStreamEvent,
@@ -33,6 +38,7 @@
   import {
     addNotebookCell,
     applyNotebookStreamOutput,
+    canRestartKernel,
     changeNotebookCellType,
     clearNotebookOutputs,
     deleteNotebookCell,
@@ -86,6 +92,8 @@
 
   const selected = $derived(kernels.find((k) => k.id === selectedKernelId));
   const isJupyter = $derived(selected?.kind === 'jupyter');
+  const busy = $derived(runningCellId !== null || runningAll);
+  const canRestart = $derived(canRestartKernel({ readOnly, busy, jupyter: isJupyter }));
   const kernelDebugger = $derived(
     isJupyter && (kernelStatus?.kernel_id === selectedKernelId ? Boolean(kernelStatus?.debugger) : Boolean(selected?.debugger)),
   );
@@ -190,7 +198,7 @@
       const resp = await api.post<IdeNotebookKernelsResp>('/ide/notebooks/kernels', {
         target: ide.target,
         notebook_path: targetPath,
-      });
+      } satisfies IdeNotebookKernelsReq);
       if (path !== targetPath) return;
       kernels = resp.kernels ?? [];
       accelerators = resp.accelerators ?? [];
@@ -225,7 +233,7 @@
     return ok;
   }
 
-  function kernelBody(origPath: string): Record<string, unknown> {
+  function kernelBody(origPath: string): IdeNotebookSessionReq {
     return {
       target: ide.target,
       notebook_path: origPath,
@@ -263,7 +271,7 @@
           ...kernelBody(origPath),
           code,
           run_id: runId,
-        }),
+        } satisfies IdeNotebookExecuteReq),
     });
   }
 
@@ -292,10 +300,10 @@
   async function interruptKernel(): Promise<void> {
     runningAll = false;
     try {
-      const resp = await api.post<{ ok: boolean; message?: string }>('/ide/notebooks/interrupt', {
+      const resp = await api.post<IdeNotebookOkResp>('/ide/notebooks/interrupt', {
         target: ide.target,
         notebook_path: path,
-      });
+      } satisfies IdeNotebookSessionReq);
       if (resp.ok) toasts.info('Interrupt sent to the kernel');
       else kernelError = resp.message ?? 'The kernel didn’t stop. Restart it to stop the cell.';
     } catch (e) {
@@ -304,6 +312,16 @@
   }
 
   async function restartKernel(thenRunAll = false): Promise<void> {
+    // A busy Jupyter cell can be stopped this way (Interrupt failed, or it waits on input):
+    // say what is lost first. The daemon ends the waiting cell.
+    if (busy) {
+      const ok = await confirmer.ask('Restart the kernel? The running cell stops and variables are lost.', {
+        title: 'Restart kernel?',
+        confirmLabel: 'Restart',
+        danger: true,
+      });
+      if (!ok) return;
+    }
     runningAll = false;
     const origPath = path;
     if (!(await ensureTrusted())) return;
@@ -324,7 +342,7 @@
     const value = inputValue;
     inputReq = null;
     try {
-      await api.post('/ide/notebooks/input', { target: ide.target, notebook_path: path, value });
+      await api.post<IdeNotebookOkResp>('/ide/notebooks/input', { target: ide.target, notebook_path: path, value } satisfies IdeNotebookInputReq);
     } catch (e) {
       toastError('Couldn’t send input', e);
     }
@@ -354,9 +372,8 @@
   }
 
   function openMore(e: MouseEvent): void {
-    const busy = runningCellId !== null || runningAll;
     const items: MenuItem[] = [
-      { label: 'Restart & Run All', icon: 'refresh', disabled: readOnly || busy, action: () => void restartKernel(true) },
+      { label: 'Restart & Run All', icon: 'refresh', disabled: !canRestart, action: () => void restartKernel(true) },
     ];
     if (selected?.kind === 'builtin') {
       items.push({ label: 'Install ipykernel…', icon: 'download', action: () => void installIpykernel() });
@@ -377,7 +394,7 @@
         const resp = await api.post<IdeNotebookVariablesResp>('/ide/notebooks/variables', {
           target: ide.target,
           notebook_path: origPath,
-        });
+        } satisfies IdeNotebookSessionReq);
         if (path === origPath) variables = resp.variables ?? [];
       } catch {
         /* keep last known variables */
@@ -447,7 +464,7 @@
       <button
         type="button"
         class="btn small ghost"
-        disabled={readOnly || runningCellId !== null}
+        disabled={!canRestart}
         onclick={() => void restartKernel()}
         title="Restart kernel (outputs stay)"
         aria-label="Restart kernel"

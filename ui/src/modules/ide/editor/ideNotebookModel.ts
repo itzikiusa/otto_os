@@ -120,6 +120,13 @@ function nextCellId(): string {
   return `cell-${Date.now().toString(36)}-${cellSeq}`;
 }
 
+/** Restart (and Restart & Run All) stay available while a cell runs on a Jupyter
+ *  kernel: when Interrupt can't stop it, restarting is the way out (the daemon
+ *  ends the waiting cell). The built-in kernel keeps them off while busy. */
+export function canRestartKernel(o: { readOnly: boolean; busy: boolean; jupyter: boolean }): boolean {
+  return !o.readOnly && (!o.busy || o.jupyter);
+}
+
 export function stripAnsiCodes(raw: string): string {
   // eslint-disable-next-line no-control-regex
   return raw.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '');
