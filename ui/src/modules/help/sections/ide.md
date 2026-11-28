@@ -64,4 +64,4 @@ summary: Multi-language IDE with rectangular & multi-cursor editing, LSP navigat
 
 - **Threads** — Inspect agent changes and jump straight into **IDE** at the exact file and line via **Open in IDE**.
 - **Git** — Review diffs, stage hunks and open pull requests once your changes pass tests.
-- **Connections** — Manage SSH hosts available as remote IDE targets.
+- **Connections** — Manage SSH hosts available as remote IDE targets.\n
