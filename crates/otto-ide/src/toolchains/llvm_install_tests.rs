@@ -264,6 +264,31 @@ async fn serve(
 }
 
 #[tokio::test]
+async fn an_install_removes_staging_an_interrupted_install_left() {
+    // SEC6-7: a daemon quit mid-install leaves cpp/.staging-<job>; nothing reads it.
+    let tmp = tempfile::tempdir().unwrap();
+    let mgr = ToolchainManager::new(tmp.path().join("data"));
+    let root = tmp.path().join("toolchains");
+    let stale = root.join("cpp/.staging-tcjob_gone/LLVM-23.1.5-macOS-ARM64/bin");
+    std::fs::create_dir_all(&stale).unwrap();
+    std::fs::write(stale.join("clang"), "x").unwrap();
+    let entry = CatalogSdkEntry {
+        version: "0.0.0".into(),
+        label: "LLVM 0.0.0".into(),
+        lts: false,
+        os: String::new(),
+        arch: String::new(),
+        url: String::new(),
+        size_hint: None,
+        sha256: None,
+    };
+    // Any outcome: the stale staging goes first.
+    let _ = install_llvm_local(&mgr, "tcjob_now", &root, &entry).await;
+    assert!(!root.join("cpp/.staging-tcjob_gone").exists());
+    assert!(root.join("cpp").is_dir(), "only the staging folder goes");
+}
+
+#[tokio::test]
 async fn a_tampered_archive_is_refused_and_nothing_is_installed() {
     let good = synthetic_archive(None);
     let sha: &'static str = Box::leak(hex::encode(Sha256::digest(&good)).into_boxed_str());

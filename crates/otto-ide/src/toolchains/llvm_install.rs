@@ -29,6 +29,7 @@ pub(super) async fn install_llvm_local(
     root: &Path,
     entry: &CatalogSdkEntry,
 ) -> std::result::Result<String, String> {
+    remove_stale_staging(mgr, &root.join("cpp")).await;
     let platform = TargetPlatform::host();
     let asset = llvm_for(platform)
         .filter(|a| a.version == entry.version)
@@ -49,6 +50,28 @@ pub(super) async fn install_llvm_local(
     let _ = tokio::fs::remove_dir_all(&staging).await;
     let _ = tokio::fs::remove_file(&archive).await;
     res
+}
+
+/// The ~445 MB staging folders an interrupted install (a daemon quit or update
+/// mid-job) left: every `.staging-<job>` whose job is not running. Its archive
+/// in `.downloads` has a fixed name, so the next download overwrites it.
+async fn remove_stale_staging(mgr: &ToolchainManager, cpp: &Path) {
+    let Ok(mut rd) = tokio::fs::read_dir(cpp).await else {
+        return;
+    };
+    while let Ok(Some(e)) = rd.next_entry().await {
+        let name = e.file_name().to_string_lossy().into_owned();
+        let Some(job) = name.strip_prefix(".staging-") else {
+            continue;
+        };
+        let running = mgr
+            .jobs
+            .get(job)
+            .is_some_and(|j| j.status == crate::types::IdeInstallJobStatus::Running);
+        if !running {
+            let _ = tokio::fs::remove_dir_all(e.path()).await;
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
