@@ -1758,10 +1758,7 @@ mod tests {
                 let items = curated_catalog(eco, platform);
                 if matches!(
                     eco,
-                    EcosystemKind::Cpp
-                        | EcosystemKind::Ios
-                        | EcosystemKind::Android
-                        | EcosystemKind::Flutter
+                    EcosystemKind::Ios | EcosystemKind::Android | EcosystemKind::Flutter
                 ) {
                     assert!(
                         items.is_empty(),
