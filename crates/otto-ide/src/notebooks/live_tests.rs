@@ -405,3 +405,38 @@ async fn live_bash_kernel() {
         .shutdown_session("u1", "local:/live", &live.path)
         .await;
 }
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "live: needs OTTO_JUPYTER_LIVE_PYTHON"]
+async fn live_a_restart_during_a_stuck_cell_ends_that_cell() {
+    let Some(py) = live_python() else { return };
+    let live = std::sync::Arc::new(Live::new(
+        ipykernel(&py, InterruptMode::Signal, BTreeMap::new()),
+        base_env(),
+    ));
+    live.run("1").await;
+    // SEC6-1: a cell that ignores SIGINT, run as the UI runs it (no timeout).
+    let l2 = live.clone();
+    let cell = tokio::spawn(async move {
+        let code =
+            "import signal, time\nsignal.signal(signal.SIGINT, signal.SIG_IGN)\ntime.sleep(300)";
+        l2.mgr
+            .execute(&l2.ctx(), &l2.kernel_id, &l2.launch, code, "stuck", None)
+            .await
+    });
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    live.mgr
+        .restart_kernel(&live.ctx(), &live.kernel_id, &live.launch)
+        .await
+        .unwrap();
+    let r = tokio::time::timeout(Duration::from_secs(15), cell)
+        .await
+        .expect("restarting the kernel must end the cell it was running")
+        .unwrap()
+        .unwrap();
+    assert_eq!(r.status, "dead");
+    assert_eq!(text_of(&live.run("40 + 2").await), "42");
+    live.mgr
+        .shutdown_session("u1", "local:/live", &live.path)
+        .await;
+}

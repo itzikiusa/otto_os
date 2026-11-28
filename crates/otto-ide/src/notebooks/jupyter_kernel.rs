@@ -1053,6 +1053,10 @@ impl JupyterKernel {
             t.abort();
         }
         let _ = std::fs::remove_file(&self.conn_file);
+        // A request still waiting (a busy cell's execute has no timeout) ends
+        // now instead of waiting on readers that were just aborted.
+        self.core.set_state("dead", None);
+        lock(&self.core.waiters).clear();
     }
 }
 
