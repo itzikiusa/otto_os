@@ -8,6 +8,7 @@
 // nested ListDetail mounted with the page claims first.
 import { untrack } from 'svelte';
 import { keyContext } from '../../keys';
+import type { MenuItem } from '../../contextmenu.svelte';
 import type { PaneHeader } from './context';
 export interface PaneNavEntry {
   /** ListDetail nesting: 0 = the page's list, 1 = one in its content, … */
@@ -22,6 +23,19 @@ export interface PaneNavEntry {
   toggle(): (() => void) | null;
   /** Phone, the list is the page: the pane's header for the page header. */
   listPage(): PaneHeader | null;
+}
+
+/** Phone, the list is the page: its ⋯ holds the pane's menu, then the page's
+ *  own `more` rows (page-level actions such as Switch context stay reachable).
+ *  Here, not in context.ts: PageHeader on every page needs it, and this
+ *  module is in the shell already, so it adds no chunk of its own per page. */
+export function listPageMenu(pane?: () => MenuItem[], page?: () => MenuItem[]): (() => MenuItem[]) | undefined {
+  if (!pane || !page) return pane ?? page;
+  return () => {
+    const a = pane();
+    const b = page();
+    return a.length && b.length ? [...a, { separator: true }, ...b] : [...a, ...b];
+  };
 }
 
 class PageNav {

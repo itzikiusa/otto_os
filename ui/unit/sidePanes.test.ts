@@ -17,7 +17,13 @@ import {
   savePaneW,
 } from '../src/lib/components/side/paneKeys.ts';
 import { moveIndex, treeStep } from '../src/lib/components/side/listNav.ts';
-import { listPageMenu } from '../src/lib/components/side/context.ts';
+import { loadSource } from './sourceHarness.ts';
+
+// pageNav is a rune module: run it with the source harness (identity runes).
+const { listPageMenu } = loadSource(new URL('../src/lib/components/side/pageNav.svelte.ts', import.meta.url), {
+  svelte: { untrack: (f: () => unknown) => f() },
+  '../../keys': { keyContext: {} },
+});
 
 function mem(seed: Record<string, string> = {}) {
   const m = new Map(Object.entries(seed));
@@ -99,11 +105,13 @@ test('→ / ← open, close, descend and climb a tree (mirrored in RTL)', () => 
 test('a phone list page keeps the page: its ⋯ = the pane menu, then the page more rows', () => {
   const pane = () => [{ label: 'Refresh', action: () => {} }];
   const page = () => [{ label: 'Switch context', action: () => {} }];
-  assert.deepEqual(listPageMenu(pane, page)?.().map((i) => ('label' in i ? i.label : '—')), ['Refresh', '—', 'Switch context']);
+  // (Array.from: the harness runs pageNav in its own realm.)
+  const labels = (m?: () => { label?: string }[]) => Array.from(m?.() ?? [], (i) => ('label' in i ? i.label : '—'));
+  assert.deepEqual(labels(listPageMenu(pane, page)), ['Refresh', '—', 'Switch context']);
   assert.equal(listPageMenu(pane, undefined), pane);
   assert.equal(listPageMenu(undefined, page), page);
   assert.equal(listPageMenu(undefined, undefined), undefined);
-  assert.deepEqual(listPageMenu(() => [], page)?.().map((i) => ('label' in i ? i.label : '—')), ['Switch context'], 'no separator around nothing');
+  assert.deepEqual(labels(listPageMenu(() => [], page)), ['Switch context'], 'no separator around nothing');
 });
 
 test('a nested list with no room beside its content pushes; a top-level one never does', () => {

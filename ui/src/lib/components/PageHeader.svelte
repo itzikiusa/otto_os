@@ -51,8 +51,7 @@
   import { ctxMenu, type MenuItem } from '../contextmenu.svelte';
   import { FitGate, StyleWriter, WidthCache, nodeSig } from './headerFit';
   import HeaderChrome from './side/HeaderChrome.svelte';
-  import { pageNav } from './side/pageNav.svelte';
-  import { listPageMenu } from './side/context';
+  import { listPageMenu, pageNav } from './side/pageNav.svelte';
 
   interface Props {
     title: string;

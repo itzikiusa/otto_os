@@ -16,17 +16,6 @@ export const LIST_DETAIL = Symbol('otto.listDetail');
 /** The ListDetail whose `list` snippet this is (null elsewhere under one). */
 export const LIST_HOST = Symbol('otto.listHost');
 
-/** Phone, the list is the page: its ⋯ holds the pane's menu, then the page's
- *  own `more` rows (page-level actions such as Switch context stay reachable). */
-export function listPageMenu(pane?: () => MenuItem[], page?: () => MenuItem[]): (() => MenuItem[]) | undefined {
-  if (!pane || !page) return pane ?? page;
-  return () => {
-    const a = pane();
-    const b = page();
-    return a.length && b.length ? [...a, { separator: true }, ...b] : [...a, ...b];
-  };
-}
-
 /** A list pane's header, as PageHeader draws it on a phone. */
 export interface PaneHeader {
   name: string;
