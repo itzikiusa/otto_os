@@ -49,6 +49,9 @@
     open: boolean;
     /** Phone Back: return to the list (keep the selection; it stays marked). */
     onback: () => void;
+    /** Phone: the open item's title after "‹ <name>" in PageHeader, when the
+     *  page's header is shared by several views (Git: "#482 Fix the login"). */
+    title?: string;
     /** The list has nothing: no pane; the content (an EmptyState) owns the page. */
     empty?: boolean;
     /** Rich rows (pull requests): 420 · 280–720 instead of 280 · 220–420. */
@@ -63,7 +66,7 @@
     testid?: string;
     children: Snippet;
   }
-  let { module, pane = 'list', name, open, onback, empty = false, wide = false, defaultWidth, legacy, list, detail, testid, children }: Props = $props();
+  let { module, pane = 'list', name, open, onback, title, empty = false, wide = false, defaultWidth, legacy, list, detail, testid, children }: Props = $props();
 
   // svelte-ignore state_referenced_locally
   const range = wide ? WIDE_LIST_PANE : LIST_PANE;
@@ -124,7 +127,7 @@
     pageNav.claim({
       depth,
       active: visible,
-      back: () => (phone && open && !empty ? { label: name, onclick: onback } : null),
+      back: () => (phone && open && !empty ? { label: name, onclick: onback, title } : null),
       show: () => (!phone && hidden && !empty ? { label: name, onclick: () => setHidden(false) } : null),
       toggle: () => (!phone && !empty ? () => setHidden(!hidden) : null),
       listPage: () => (phoneList ? header : null),

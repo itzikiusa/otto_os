@@ -45,6 +45,12 @@ test('phone: list → PR → ‹ Pull requests → another PR; details sheet; �
   await expect(header(page).getByRole('button', { name: 'Open navigator' })).toHaveCount(0);
   await expect(page.locator('.mtopbar'), 'one header row').toHaveCount(0);
   await expect(page.locator('.prw-back'), 'no hand-made back').toHaveCount(0);
+  // ‹ Pull requests · #51 title: the pull request, not the repository switcher (that is under ⋯).
+  await expect(header(page).locator('.ph-title')).toHaveText(/^\s*#51 \S/);
+  await expect(header(page).getByTestId('git-phone-repo')).toHaveCount(0);
+  await header(page).getByRole('button', { name: 'More actions' }).tap();
+  await expect(page.locator('.ctx-menu').getByText('Repository', { exact: true })).toBeVisible();
+  await page.keyboard.press('Escape');
   await shot(page, 'prs-phone-content');
 
   await back.tap();

@@ -142,6 +142,8 @@
   // The page's own `more` rows follow the pane's in that ⋯, and its `tabs`
   // (sections that hold the list: Containers | Images …) stay on the row below.
   const listPage = $derived(phoneRow ? pageNav.listPage : null);
+  // …and on a pushed item the item's own title, when its ListDetail names it.
+  const itemTitle = $derived(phoneRow ? back?.title : undefined);
   const moreItems = $derived(listPage ? listPageMenu(listPage.menu, more) : more);
   // Desktop / tablet: a hidden list pane's "Show <name>" (design.md §7.3).
   const showPane = $derived(pageTop && !viewport.navDrawer ? pageNav.show : null);
@@ -445,11 +447,11 @@
       <div class="ph-titles">
         <div class="ph-title-line">
           {#if listPage?.views}<div class="ph-views">{@render listPage.views()}</div>{:else}
-          <h1 class="ph-title" title={listPage?.name ?? title} bind:this={titleEl}>
+          <h1 class="ph-title" title={listPage?.name ?? itemTitle ?? title} bind:this={titleEl}>
             {#each listPage ? [] : crumbs as c (c.label)}
               <button class="ph-crumb" onclick={c.onclick}>{c.label}</button><span class="ph-sep" aria-hidden="true">/</span>
             {/each}
-            <span class="ph-title-text">{#if listPage}{listPage.name}{:else if titleContent}{@render titleContent()}{:else}{title}{/if}</span>
+            <span class="ph-title-text">{#if listPage}{listPage.name}{:else if itemTitle}{itemTitle}{:else if titleContent}{@render titleContent()}{:else}{title}{/if}</span>
           </h1>{/if}
           {#if listPage}
             {#if listPage.count !== null}<span class="ph-badge" bind:this={badgeEl}>{listPage.count}</span>{/if}

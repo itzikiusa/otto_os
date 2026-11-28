@@ -232,6 +232,7 @@
     module="git"
     pane="prs"
     name="Pull requests"
+    title={tabs.active !== null ? `#${tabs.active} ${titleOf(tabs.active)}`.trim() : undefined}
     wide
     open={phoneOpen}
     onback={() => (phoneOpen = false)}

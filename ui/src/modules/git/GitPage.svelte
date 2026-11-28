@@ -22,6 +22,7 @@
   import LazyMount from '../../lib/components/LazyMount.svelte';
   import { lazyComponent } from '../../lib/lazy-component.svelte';
   import { viewport } from '../../lib/stores/viewport.svelte';
+  import { pageNav } from '../../lib/components/side/pageNav.svelte';
   import { ctxMenu } from '../../lib/contextmenu.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import Icon from '../../lib/components/Icon.svelte';
@@ -165,6 +166,10 @@
   });
   const notFound = $derived(missingRepo !== null && route.repo === missingRepo);
 
+  // Phone, a pull request / file / graph pushed from its list: the header
+  // says "‹ Pull requests · #482 title" (the ListDetail's title) and the
+  // repository switcher moves under ⋯, as on the list page.
+  const pushed = $derived(viewport.navDrawer && !!pageNav.back);
   /** Phone: the title's repo switcher — Focus, the open repos, any other, add. */
   function phoneRepoMenu(e: MouseEvent): void {
     const open = git.openRepoIds.map((id) => git.allRepos.find((r) => r.id === id)).filter((r) => !!r);
@@ -243,10 +248,13 @@
       crumbs={focusView ? [{ label: 'Git', onclick: () => setFocus(false) }] : []}
       class="git-header"
       tabsMin={TABS_MIN}
-      more={activeRepo && !focusView && !notFound ? () => [...(toolbar?.menuItems() ?? []), ...(toolbar ? [{ separator: true }] : []), ...(repoView?.moreMenuItems() ?? [])] : undefined}
+      more={activeRepo && !focusView && !notFound ? () => [...(toolbar?.menuItems() ?? []), ...(toolbar ? [{ separator: true }] : []), ...(repoView?.moreMenuItems() ?? []), ...(pushed ? gitPhoneMenu.items() : [])] : undefined}
     >
       {#snippet titleContent()}
-        {#if viewport.isPhone}
+        {#if pushed}
+          <!-- Phone, an item pushed from a list: the repository switcher is under ⋯. -->
+          {activeRepo?.name ?? 'Git'}
+        {:else if viewport.isPhone}
           <!-- Phone: the repo is the title (a switcher), so the header stays one row. -->
           <button type="button" class="git-phone-repo" aria-haspopup="menu" data-testid="git-phone-repo" onclick={phoneRepoMenu}>
             <span class="git-phone-repo-name">{focusView ? 'Focus' : (activeRepo?.name ?? 'Git')}</span><Icon name="chevronDown" size={14} />

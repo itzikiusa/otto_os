@@ -10,13 +10,19 @@ import { untrack } from 'svelte';
 import { keyContext } from '../../keys';
 import type { MenuItem } from '../../contextmenu.svelte';
 import type { PaneHeader } from './context';
+export interface PaneBack {
+  label: string;
+  onclick: () => void;
+  title?: string;
+}
 export interface PaneNavEntry {
   /** ListDetail nesting: 0 = the page's list, 1 = one in its content, … */
   depth: number;
   /** Is this pane's page on screen (an inner ListDetail inside an outer one's hidden content is not)? */
   active(): boolean;
-  /** Phone: the list this content was pushed from, or null while the list is the page. */
-  back(): { label: string; onclick: () => void } | null;
+  /** Phone: the list this content was pushed from (and the open item's title,
+   *  when the page header is shared), or null while the list is the page. */
+  back(): PaneBack | null;
   /** Desktop / tablet: the hidden pane's name and how to show it, or null. */
   show(): { label: string; onclick: () => void } | null;
   /** ⌘B: hide or show this page's list pane (null on a phone). */
@@ -74,7 +80,7 @@ class PageNav {
     return best;
   }
 
-  get back(): { label: string; onclick: () => void } | null {
+  get back(): PaneBack | null {
     return this.first((e) => e.back());
   }
   get show(): { label: string; onclick: () => void } | null {

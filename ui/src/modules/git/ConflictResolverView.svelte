@@ -243,7 +243,7 @@
       <LoadState what="the merge status" error={loadError} empty variant="page" onretry={() => reloadKey++} />
     </div>
   {:else}
-    <ListDetail module="git" pane="conflicts" name="Conflicts" open={phoneOpen} onback={() => (phoneOpen = false)} empty={allFiles.length === 0}>
+    <ListDetail module="git" pane="conflicts" name="Conflicts" title={selected ? baseName(selected) : undefined} open={phoneOpen} onback={() => (phoneOpen = false)} empty={allFiles.length === 0}>
       {#snippet list()}
         <ListPane count={allFiles.length} menu={() => gitPhoneMenu.items()} testid="conflict-files">
           {#each allFiles as f (f)}
