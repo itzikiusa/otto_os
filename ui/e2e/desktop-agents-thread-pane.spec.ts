@@ -196,20 +196,20 @@ test('⋯ › Details shows the usage read it just asked for', async ({ page }) 
   await expect(page.getByRole('menuitem', { name: /^Usage: 12/ })).toBeVisible({ timeout: 5_000 });
 });
 
-// The right panel heads a focused chat pane with its details card too (A5).
-test('a focused chat pane gets the details card in the right panel', async ({ page }) => {
+// A focused chat pane gets the details card too: the page's Side panel tab "Session" (A5).
+test('a focused chat pane gets the details card in the Side panel', async ({ page }) => {
   await page.goto('/#/agents');
   await expect(row(page, threadId)).toBeVisible({ timeout: 30_000 });
   await row(page, threadId).click();
   await expect(page.getByTestId(`thread-pane-${threadId}`)).toBeVisible({ timeout: 20_000 });
-  await page.locator('.rstrip').getByRole('button', { name: 'Files', exact: true }).click();
+  await page.locator('.rstrip').getByRole('button', { name: 'Session', exact: true }).click();
   const card = page.getByTestId('agents-details-card');
   await expect(card.getByTestId('thread-details-card')).toBeVisible({ timeout: 20_000 });
   await expect(card.getByTestId('details-folder')).toHaveAttribute('title', new RegExp(`${dir.split('/').pop()}$`));
   await shots(page, 'agents-thread-pane-details');
   // Outside a repository the card says so; the Git tab does not say it again (design review 2, N2).
-  await page.locator('.rstrip').getByRole('button', { name: 'Git', exact: true }).click();
   await expect(card).toContainText('Not a git repository', { timeout: 15_000 });
+  await page.locator('.rstrip').getByRole('button', { name: 'Git', exact: true }).click();
   await expect(page.locator('.rpanel')).not.toContainText('isn’t a git repository');
   await expect(page.locator('.rpanel').getByRole('button', { name: 'Open Git module' })).toHaveCount(0);
   await shots(page, 'agents-thread-pane-git');

@@ -32,8 +32,9 @@ test.beforeAll(async () => {
   await ctx.dispose();
 });
 
-// The details card heading the panel is facts + doors on Agents: no Commit row
-// over the commit card, Changes opens the panel's Git tab, a subagent opens
+// The details card is the Agents page's own Side panel tab "Session" (it
+// registers it, as the Vault does): facts + doors, no Commit row (the Git tab's
+// commit card owns that), Changes opens the panel's Git tab, a subagent opens
 // as a pane here — and none of it touches the Threads page's saved inspector.
 test('the details card on Agents: Changes opens the Git tab, a subagent opens here, no second Commit', async ({ page }, info) => {
   test.skip(info.project.name !== 'desktop-browser', 'desktop-browser project only');
@@ -46,7 +47,7 @@ test('the details card on Agents: Changes opens the Git tab, a subagent opens he
   }, wsId);
   await page.goto(`/#/agents/${sid}`);
   await expect(page.locator(`[data-pane-key][data-session="${sid}"]`)).toBeVisible({ timeout: 30_000 });
-  await page.locator('.rstrip').getByRole('button', { name: 'Files', exact: true }).click();
+  await page.locator('.rstrip').getByRole('button', { name: 'Session', exact: true }).click();
   const card = page.getByTestId('agents-details-card');
   await expect(card.getByTestId('details-changes')).toBeVisible({ timeout: 20_000 });
   await expect(card.getByTestId('details-branch')).toBeVisible();
@@ -65,6 +66,7 @@ test('the details card on Agents: Changes opens the Git tab, a subagent opens he
 
   // An idle subagent sits under the card's "Previous · N" fold (only running ones
   // show unfolded): one visible click, then the row opens that thread here as a pane.
+  await page.locator('.rstrip').getByRole('button', { name: 'Session', exact: true }).click();
   await card.getByTestId('details-previous').click();
   await card.getByTestId('details-subagent').filter({ hasText: 'Rivera helper' }).getByRole('button').first().click();
   await expect.poll(() => page.evaluate(() => location.hash)).toBe(`#/agents/${helperId}`);
@@ -124,9 +126,12 @@ test('a dirty session folder: the Git tab is Changes + the commit card; Commit a
   await expect.poll(() => remoteSubject(repo), { timeout: 20_000 }).toBe('feat: ship the commit card');
   await expect(page.getByTestId('commit-card-primary')).toHaveAttribute('data-kind', 'create-pr', { timeout: 15_000 });
 
-  // The folder shows once (the details card); its Open in › Git goes to the full page.
+  // The Git tab names its folder once (the session's); the Session tab's card
+  // Open in › Git goes to the full page.
   await expect(page.getByTestId('git-panel-open')).toHaveCount(0);
-  await expect(page.locator('.rpanel-folder')).toHaveCount(0);
+  await expect(page.locator('.rpanel-folder')).toHaveCount(1);
+  await expect(page.locator('.rpanel-folder')).toContainText('session');
+  await page.locator('.rstrip').getByRole('button', { name: 'Session', exact: true }).click();
   await page.getByTestId('agents-details-card').getByTestId('details-open-in').click();
   await page.getByRole('menuitem', { name: 'Git', exact: true }).click();
   await expect.poll(() => page.evaluate(() => location.hash)).toMatch(/^#\/git\//);
