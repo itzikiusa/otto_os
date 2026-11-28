@@ -7,7 +7,7 @@
   import Icon from '../../../lib/components/Icon.svelte';
   import PaneDivider from '../../../lib/components/PaneDivider.svelte';
   import ListPane from '../../../lib/components/side/ListPane.svelte';
-  import PhoneBack from '../../../lib/components/side/PhoneBack.svelte';
+  import ListDetail from '../../../lib/components/side/ListDetail.svelte';
   import SideRow from '../../../lib/components/side/SideRow.svelte';
   import SideSection from '../../../lib/components/side/SideSection.svelte';
   import { loadPaneW, paneKey, paneStorage, type PaneRange } from '../../../lib/components/side/paneKeys';
@@ -61,7 +61,7 @@
   let watchFormOpen = $state(false);
   let watchInputEl = $state<HTMLInputElement>();
 
-  const phone = $derived(viewport.isPhone);
+  const phone = $derived(viewport.navDrawer);
   const isPaused = $derived(dbg.state === 'paused');
   const scopeKey = (s: IdeScope): string => `${s.name}:${s.variables_reference}`;
   const frameName = $derived(dbg.stack_frames.find((f) => f.id === dbg.active_frame_id)?.name ?? '');
@@ -170,22 +170,13 @@
   const showWatchForm = $derived(watchFormOpen || ide.watches.length === 0);
 </script>
 
-<!-- Two list panes inside the Debug tool window (standalone ListPanes: their
-     own headers; the page's list is the explorer): Frames (the processes of a
+<!-- Two list panes inside the Debug tool window: Frames (the processes of a
      js-debug session, the thread picker, the frames) and Variables (scopes as
-     tree nodes, the Watches section, quick evaluate at the foot). A phone
-     pushes: the frames are the list; a tapped frame shows the variables (and
-     the console after them) with "‹ Frames". -->
-{#if showFrames}
-  {@const fillFrames = !showVariables && !hasTrailingConsole}
-  <section
-    class="dbg-col"
-    class:is-fill={fillFrames || phone}
-    style:inline-size={!fillFrames && !phone ? `${framesW}px` : undefined}
-    hidden={phone && phoneOpen}
-    aria-label="Threads and call stack"
-    data-testid="ide-debug-frames-pane"
-  >
+     tree nodes, the Watches section, quick evaluate at the foot). On a desktop
+     they are standalone ListPanes side by side (the page's list is the
+     explorer); a phone pushes: the frames are the list; a tapped frame shows
+     the variables (and the console after them) with "‹ Frames". -->
+{#snippet framesList()}
     <ListPane name="Frames" count={dbg.stack_frames.length}>
       {#snippet filterRow()}
         {#if dbg.threads.length > 1}
@@ -233,25 +224,8 @@
         {/each}
       {/if}
     </ListPane>
-  </section>
-
-  {#if (showVariables || hasTrailingConsole) && !phone}
-    <PaneDivider bind:width={framesW} storageKey={paneKey('ide', 'dbgFrames', 'w')} min={FRAMES_PANE.min} max={FRAMES_PANE.max} defaultWidth={FRAMES_PANE.default} label="Resize Frames" />
-  {/if}
-{/if}
-
-{#if showVariables}
-  {@const fillVars = !hasTrailingConsole}
-  <section
-    class="dbg-col"
-    class:is-fill={fillVars}
-    class:is-stacked={phone}
-    style:inline-size={!fillVars && !phone ? `${varsW}px` : undefined}
-    hidden={phone && showFrames && !phoneOpen}
-    aria-label="Variables and watches"
-    data-testid="ide-debug-variables-pane"
-  >
-    {#if phone && showFrames}<div class="dbg-back"><PhoneBack label="Frames" onclick={() => (phoneOpen = false)} testid="ide-debug-frames-back" /></div>{/if}
+{/snippet}
+{#snippet varsList()}
     <ListPane name="Variables" menu={variablesMenu}>
       <div role="list" aria-label="Variables">
         {#if dbg.scopes.length === 0}
@@ -327,10 +301,38 @@
       </div>
     </ListPane>
     {#if quickEvalSlot}{@render quickEvalSlot()}{/if}
-  </section>
+{/snippet}
 
-  {#if hasTrailingConsole && !phone}
-    <PaneDivider bind:width={varsW} storageKey={paneKey('ide', 'dbgVars', 'w')} min={VARS_PANE.min} max={VARS_PANE.max} defaultWidth={VARS_PANE.default} label="Resize Variables" />
+{#if phone}
+  <!-- A phone: Frames is the list of a ListDetail nested in the tool window; a
+       tapped frame pushes the variables with "‹ Frames" in the page header
+       (the one Back). Hidden frames (⋯) leave the variables alone. -->
+  <ListDetail module="ide" pane="dbgFrames" name="Frames" open={phoneOpen} onback={() => (phoneOpen = false)} empty={!showFrames}>
+    {#snippet list()}
+      <section class="dbg-col is-fill" aria-label="Threads and call stack" data-testid="ide-debug-frames-pane">{@render framesList()}</section>
+    {/snippet}
+    {#if showVariables}
+      <section class="dbg-col is-fill is-stacked" aria-label="Variables and watches" data-testid="ide-debug-variables-pane">{@render varsList()}</section>
+    {/if}
+  </ListDetail>
+{:else}
+  {#if showFrames}
+    {@const fillFrames = !showVariables && !hasTrailingConsole}
+    <section class="dbg-col" class:is-fill={fillFrames} style:inline-size={!fillFrames ? `${framesW}px` : undefined} aria-label="Threads and call stack" data-testid="ide-debug-frames-pane">
+      {@render framesList()}
+    </section>
+    {#if showVariables || hasTrailingConsole}
+      <PaneDivider bind:width={framesW} storageKey={paneKey('ide', 'dbgFrames', 'w')} min={FRAMES_PANE.min} max={FRAMES_PANE.max} defaultWidth={FRAMES_PANE.default} label="Resize Frames" />
+    {/if}
+  {/if}
+  {#if showVariables}
+    {@const fillVars = !hasTrailingConsole}
+    <section class="dbg-col" class:is-fill={fillVars} style:inline-size={!fillVars ? `${varsW}px` : undefined} aria-label="Variables and watches" data-testid="ide-debug-variables-pane">
+      {@render varsList()}
+    </section>
+    {#if hasTrailingConsole}
+      <PaneDivider bind:width={varsW} storageKey={paneKey('ide', 'dbgVars', 'w')} min={VARS_PANE.min} max={VARS_PANE.max} defaultWidth={VARS_PANE.default} label="Resize Variables" />
+    {/if}
   {/if}
 {/if}
 
@@ -338,9 +340,7 @@
   .dbg-col { display: flex; flex-direction: column; flex-shrink: 0; min-block-size: 0; min-inline-size: 160px; }
   .dbg-col.is-fill { flex: 1; flex-shrink: 1; }
   .dbg-col.is-stacked { flex: 1 0 auto; inline-size: 100%; min-block-size: 50%; }
-  .dbg-col[hidden] { display: none; }
   .dbg-col :global(.side-list) { flex: 1; block-size: auto; }
-  .dbg-back { display: flex; align-items: center; flex-shrink: 0; padding-inline: 4px; border-block-end: 1px solid var(--separator); background: var(--bg-sidebar); }
   .dbg-thread-select { block-size: 24px; inline-size: 100%; font-size: var(--fs-xs); }
   .dbg-thread-one { display: block; font-size: var(--fs-xs); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding-inline: 8px; }
   .dbg-muted { margin: 0; padding: 12px 8px; font-size: var(--fs-s); color: var(--text-dim); }

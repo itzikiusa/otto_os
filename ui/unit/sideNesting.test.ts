@@ -120,3 +120,27 @@ test('the page header takes the NEARER list: depth wins over the order the panes
   outer();
   assert.equal(pageNav.back, null);
 });
+
+test('a nested list that is not on screen claims nothing; ⌘B stays the page list', () => {
+  const { pageNav } = loadSource(new URL('pageNav.svelte.ts', SIDE), { svelte: { untrack: (f: () => unknown) => f() }, '../../keys': { keyContext: {} } });
+  let toolShown = false;
+  const hidden: string[] = [];
+  const entry = (depth: number, label: string, active: () => boolean) => ({
+    depth,
+    active,
+    back: () => ({ label, onclick() {} }),
+    show: () => null,
+    toggle: () => () => hidden.push(label),
+    listPage: () => null,
+  });
+  // The IDE: the explorer (Files) and a tool window's Tests, the tool stacked away.
+  const tests = pageNav.claim(entry(1, 'Tests', () => toolShown));
+  const files = pageNav.claim(entry(0, 'Files', () => true));
+  assert.equal(pageNav.back?.label, 'Files', 'a hidden tool list does not take the Back');
+  toolShown = true;
+  assert.equal(pageNav.back?.label, 'Tests', 'on screen, the nearer list does');
+  pageNav.toggle?.();
+  assert.deepEqual(hidden, ['Files'], '⌘B hides the page list, not the tool list');
+  tests();
+  files();
+});

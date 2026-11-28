@@ -9,13 +9,10 @@
   import LoadState from '../../../lib/components/LoadState.svelte';
   import Modal from '../../../lib/components/Modal.svelte';
   import Tabs, { type TabItem } from '../../../lib/components/Tabs.svelte';
-  import PaneDivider from '../../../lib/components/PaneDivider.svelte';
   import ListPane from '../../../lib/components/side/ListPane.svelte';
-  import PhoneBack from '../../../lib/components/side/PhoneBack.svelte';
-  import { LIST_PANE, loadPaneW, paneKey, paneStorage } from '../../../lib/components/side/paneKeys';
+  import ListDetail from '../../../lib/components/side/ListDetail.svelte';
   import { ctxMenu, type MenuItem } from '../../../lib/contextmenu.svelte';
   import { rowMenu } from '../../../lib/rowMenu';
-  import { viewport } from '../../../lib/stores/viewport.svelte';
   import SimCreateDeviceForm from '../../../lib/simulators/SimCreateDeviceForm.svelte';
   import SimInstallStatusCard from '../../../lib/simulators/SimInstallStatusCard.svelte';
   import SimReadinessCards from '../../../lib/simulators/SimReadinessCards.svelte';
@@ -40,9 +37,7 @@
   let createModalOpen = $state(false);
   let setupOpen = $state(false);
   let urlInput = $state('');
-  // The device list is a list pane in the tool window (shared range and key).
-  let listW = $state(loadPaneW(paneStorage(), 'ide', 'devices', LIST_PANE, undefined, 280));
-  const phone = $derived(viewport.isPhone);
+  // The device list is the list of a ListDetail nested in the tool window.
   let phoneOpen = $state(false);
 
   $effect(() => {
@@ -260,11 +255,12 @@
     {/if}
 
     <div class="sim-split">
-      <!-- A list pane inside the tool window: a standalone ListPane (its own
-           header; the page's list is the explorer). A phone pushes: a tapped
-           device shows its inspector with "‹ Devices". -->
-      <div class="sim-list-col" class:phone style:inline-size={phone ? undefined : `${listW}px`} hidden={phone && phoneOpen}>
-        <ListPane name="Devices" count={filteredDevices.length}>
+      <!-- A list nested in the tool window (the page's list is the explorer).
+           A phone pushes: a tapped device shows its inspector with "‹ Devices"
+           in the page header (the one Back). -->
+      <ListDetail module="ide" pane="devices" name="Devices" open={phoneOpen} onback={() => (phoneOpen = false)}>
+      {#snippet list()}
+        <ListPane count={filteredDevices.length}>
           {#snippet filterRow()}
             <div class="segmented" role="group" aria-label="Filter devices by platform">
               <button type="button" class:active={platformFilter === 'all'} aria-pressed={platformFilter === 'all'} onclick={() => (platformFilter = 'all')}>All</button>
@@ -320,12 +316,9 @@
             {/each}
           {/if}
         </ListPane>
-      </div>
-      {#if !phone}
-        <PaneDivider bind:width={listW} storageKey={paneKey('ide', 'devices', 'w')} min={LIST_PANE.min} max={LIST_PANE.max} defaultWidth={280} label="Resize devices" />
-      {/if}
+      {/snippet}
 
-      <section class="sim-detail-col" aria-label="Selected device inspector" hidden={phone && !phoneOpen}>
+      <section class="sim-detail-col" aria-label="Selected device inspector">
         {#if !selected}
           <div class="sim-detail-empty">
             <EmptyState
@@ -336,7 +329,6 @@
           </div>
         {:else}
           <div class="sim-detail-head">
-            {#if phone}<PhoneBack label="Devices" onclick={() => (phoneOpen = false)} testid="ide-sim-devices-back" />{/if}
             <Tabs
               tabs={detailTabs}
               value={detailTab}
@@ -386,6 +378,7 @@
           {/if}
         {/if}
       </section>
+      </ListDetail>
     </div>
   {/if}
 
@@ -434,9 +427,6 @@
   .sim-bar-spacer { flex: 1; min-inline-size: 4px; }
   .sim-state-wrap { flex: 1; display: flex; align-items: center; justify-content: center; padding: 16px; }
   .sim-split { flex: 1; min-block-size: 0; min-inline-size: 0; display: flex; overflow: hidden; }
-  .sim-list-col { flex-shrink: 0; min-inline-size: 0; min-block-size: 0; display: flex; flex-direction: column; }
-  .sim-list-col.phone { flex: 1; }
-  .sim-list-col[hidden], .sim-detail-col[hidden] { display: none; }
   .sim-detail-col {
     flex: 1; min-inline-size: 0; min-block-size: 0; display: flex; flex-direction: column; overflow: hidden;
   }

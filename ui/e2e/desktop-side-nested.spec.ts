@@ -49,15 +49,17 @@ async function boot(page: Page): Promise<void> {
   await expect(page.getByTestId('ide-page')).toBeVisible({ timeout: 20_000 });
 }
 
-test('the Git log commit list is its own list pane and leaves the explorer alone', async ({ page }) => {
+test('the Git log commit list is a nested list: its ⋯ hides Commits, ⌘B and the explorer ⋯ stay the explorer', async ({ page }) => {
   test.setTimeout(120_000);
   await boot(page);
   await page.getByTestId('ide-git-tab-log').click();
   const commits = page.locator('aside.side-list[aria-label="Commits"]');
   await expect(commits.locator('.side-pane-head .sph-title')).toHaveText('Commits', { timeout: 20_000 });
   await expect(commits.locator('.side-pane-head .sph-count')).toHaveText('2');
-  // No ⋯ of its own (no menu) — and so no "Hide Files" that would hide the explorer.
-  await expect(commits.locator('.side-pane-head [aria-haspopup="menu"]')).toHaveCount(0);
+  // Its own ⋯ hides Commits (a nested ListDetail), never the explorer.
+  await commits.locator('.side-pane-head [aria-haspopup="menu"]').click();
+  await expect(page.getByRole('menuitem')).toHaveText([/Hide Commits/]);
+  await page.keyboard.press('Escape');
   // The keyboard walk is the block's: ↓ moves to the next commit row.
   const rows = commits.getByTestId('ide-git-commit-row');
   await expect(rows).toHaveCount(2);
@@ -70,5 +72,12 @@ test('the Git log commit list is its own list pane and leaves the explorer alone
   await page.getByTestId('ide-project-tree-more').click();
   await expect(page.getByRole('menuitem').first()).toContainText('Hide Files');
   await page.keyboard.press('Escape');
+  await expect(page.getByTestId('ide-project-tree')).toBeVisible();
+  // ⌘B is the page's list pane (the explorer), not the nested one.
+  await page.locator('.gl-head-subject').click();
+  await page.keyboard.press('Meta+b');
+  await expect(page.getByTestId('ide-project-tree')).toBeHidden();
+  await expect(commits).toBeVisible();
+  await page.keyboard.press('Meta+b');
   await expect(page.getByTestId('ide-project-tree')).toBeVisible();
 });

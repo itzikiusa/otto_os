@@ -54,7 +54,7 @@
   // A phone: the Frames list is the tool until a frame is opened (the inspector pushes;
   // the console goes with the variables).
   let framesPushed = $state(false);
-  const consoleHidden = $derived(viewport.isPhone && ideDockPrefs.dbgShowFrames && !framesPushed);
+  const consoleHidden = $derived(viewport.navDrawer && ideDockPrefs.dbgShowFrames && !framesPushed);
 
   // Output chunks → lines. Sequence numbers come from the daemon (`seq`), else
   // from a client counter that follows the window as the daemon trims it.

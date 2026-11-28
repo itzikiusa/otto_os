@@ -1,18 +1,16 @@
 <script lang="ts">
-  // Structured Test Runner & Streaming Output panel: the tests are a list pane
-  // inside the tool window (a standalone ListPane: suites are tree nodes, a
-  // failed test keeps Debug and Fix with Agent and its message), beside
+  // Structured Test Runner & Streaming Output panel: the tests are the list of
+  // a ListDetail nested in the tool window (suites are tree nodes, a failed
+  // test keeps Debug and Fix with Agent and its message), beside
   // `IdeConsoleView` (structured JSON logs, file:line links, wrap, filter). A
   // phone pushes: the tests fill the tool, a tapped test shows the output with
-  // "‹ Tests".
+  // "‹ Tests" in the page header (the one Back).
   import Badge from '../../lib/components/Badge.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import Icon from '../../lib/components/Icon.svelte';
-  import PaneDivider from '../../lib/components/PaneDivider.svelte';
   import ListPane from '../../lib/components/side/ListPane.svelte';
-  import PhoneBack from '../../lib/components/side/PhoneBack.svelte';
+  import ListDetail from '../../lib/components/side/ListDetail.svelte';
   import SideRow from '../../lib/components/side/SideRow.svelte';
-  import { LIST_PANE, loadPaneW, paneKey, paneStorage } from '../../lib/components/side/paneKeys';
   import { ctxMenu } from '../../lib/contextmenu.svelte';
   import { router } from '../../lib/router.svelte';
   import { formatSeconds } from '../../lib/metric-format';
@@ -44,9 +42,7 @@
   let selectedTestKey = $state<string | null>(null);
   let debuggingTestKey = $state<string | null>(null);
   let showTestsPane = $state(true);
-  // The shared list range and key; the old key is read once.
-  let treeW = $state(loadPaneW(paneStorage(), 'ide', 'runTree', LIST_PANE, { w: 'otto.ide.runTreeW' }, 320));
-  const phone = $derived(viewport.isPhone);
+  const phone = $derived(viewport.navDrawer);
   let phoneOpen = $state(false);
 
   let lastActiveId = '';
@@ -182,9 +178,9 @@
   }
 
   function onSelectTest(t: IdeTestResult, key: string): void {
+    phoneOpen = true; // a push (phone, or a tool window too narrow for the list)
     if (phone) {
       selectedTestKey = key;
-      phoneOpen = true;
       return;
     }
     selectedTestKey = selectedTestKey === key ? null : key;
@@ -346,9 +342,9 @@
     {/if}
 
     <div class="run-flex">
-      {#if tests.length > 0 && showTestsPane}
-        <div class="run-tree" class:phone style:inline-size={phone ? undefined : `${treeW}px`} hidden={phone && phoneOpen}>
-          <ListPane name="Tests" count={tests.length}>
+      <ListDetail module="ide" pane="runTree" name="Tests" open={phoneOpen} onback={() => (phoneOpen = false)} empty={!(tests.length > 0 && showTestsPane)} defaultWidth={320} legacy={{ w: 'otto.ide.runTreeW' }}>
+        {#snippet list()}
+          <ListPane count={tests.length}>
             {#snippet searchRow()}
               <div class="input-group">
                 <Icon name="search" size={12} />
@@ -471,25 +467,15 @@
               </div>
             {/if}
           </ListPane>
-        </div>
-
-        {#if !phone}
-          <PaneDivider bind:width={treeW} storageKey={paneKey('ide', 'runTree', 'w')} min={LIST_PANE.min} max={LIST_PANE.max} defaultWidth={320} label="Resize tests" />
-        {/if}
-      {/if}
-
-      <section class="run-log-pane" aria-label="Console output" hidden={phone && tests.length > 0 && showTestsPane && !phoneOpen}>
-        {#if phone && phoneOpen}
-          <header class="run-log-head">
-            <PhoneBack label="Tests" onclick={() => (phoneOpen = false)} testid="ide-run-tests-back" />
-          </header>
-        {/if}
+        {/snippet}
+        <section class="run-log-pane" aria-label="Console output">
         <IdeConsoleView
           sessionKey={shownRun.id}
           lines={consoleLines}
           emptyText={isRunning ? 'Waiting for process output…' : 'Process finished with no console output.'}
         />
-      </section>
+        </section>
+      </ListDetail>
     </div>
   {/if}
 </div>
@@ -524,9 +510,6 @@
   }
   .run-devsrv-url { color: var(--accent-text); font-weight: 500; flex-shrink: 1; min-inline-size: 0; max-inline-size: 240px; }
   .run-flex { flex: 1; min-block-size: 0; min-inline-size: 0; display: flex; overflow: hidden; }
-  .run-tree { flex-shrink: 0; display: flex; flex-direction: column; min-block-size: 0; min-inline-size: 0; }
-  .run-tree.phone { flex: 1; }
-  .run-tree[hidden], .run-log-pane[hidden] { display: none; }
   .run-filter-empty { display: flex; flex-direction: column; align-items: center; gap: 6px; padding: 20px 12px; font-size: var(--fs-s); }
   .run-fix-btn { color: var(--accent-text); }
   .run-icon { display: inline-flex; align-items: center; flex-shrink: 0; }
@@ -534,5 +517,4 @@
   .run-icon.is-bad, .run-test-status.is-bad { color: var(--danger); }
   .run-test-msg { margin: 0 0 2px; padding-block: 6px; padding-inline: 40px 12px; border-radius: var(--radius-s); background: var(--danger-soft); color: var(--danger); font-size: var(--fs-xs); white-space: pre-wrap; overflow-wrap: anywhere; }
   .run-log-pane { flex: 1; min-block-size: 0; min-inline-size: 0; display: flex; flex-direction: column; }
-  .run-log-head { display: flex; align-items: center; flex-shrink: 0; padding-inline: 4px; border-block-end: 1px solid var(--border); }
 </style>

@@ -5,11 +5,19 @@ test.use({ serviceWorkers: 'block' });
 
 // The IDE's tool-window lists on the shared side panes (rc6-side-b2), with REAL
 // taps on a phone: each list (Tests, Changes, Frames, Devices) fills the tool;
-// a tapped item pushes its content with the shared Back; Back returns with the
+// a tapped item pushes its content with the ONE Back — the page header's,
+// naming the nearest list ("‹ Tests"; design.md §3) — and Back returns with the
 // item still marked; another item opens. One Back per screen on the editor; the
 // Run button fits the one header row. Tablet: the list sits beside its content.
 
 const pane = (page: Page, name: string) => page.locator(`aside[aria-label="${name}"]`);
+/** One Back on the screen: the page header's, naming the nearest list. */
+async function back(page: Page, name: string) {
+  const b = page.getByTestId('page-header').first().getByRole('button', { name: `Back to ${name}` });
+  await expect(b).toBeVisible();
+  await expect(page.locator('.phone-back:visible')).toHaveCount(1);
+  return b;
+}
 
 test('phone: Tests, Changes, Frames and Devices push with the shared Back', async ({ page }, info) => {
   test.skip(info.project.name !== 'iphone-portrait', 'phone portrait');
@@ -39,18 +47,19 @@ test('phone: Tests, Changes, Frames and Devices push with the shared Back', asyn
   await openTool(page, 'run');
   const tests = pane(page, 'Tests');
   await expect(tests).toBeVisible();
+  await back(page, 'Files'); // the list is in the tool: the Back is still the explorer's
   await expect(page.getByTestId('ide-test-fix-agent')).toBeVisible();
   await shot(page, 'ide-phone-tests-list');
   await tests.getByRole('treeitem', { name: /TestComputeBonus/ }).tap();
   await expect(tests).toBeHidden();
-  await expect(page.getByTestId('ide-run-tests-back')).toBeVisible();
+  await back(page, 'Tests');
   await expect(page.getByRole('region', { name: 'Console output' })).toContainText('want 330, got 300');
   await shot(page, 'ide-phone-tests-content');
-  await page.getByTestId('ide-run-tests-back').tap();
+  await (await back(page, 'Tests')).tap();
   await expect(tests.getByRole('treeitem', { name: /TestComputeBonus/ })).toHaveAttribute('aria-selected', 'true');
   await tests.getByRole('treeitem', { name: /TestMarshal/ }).tap();
-  await expect(page.getByTestId('ide-run-tests-back')).toBeVisible();
-  await page.getByTestId('ide-run-tests-back').tap();
+  await back(page, 'Tests');
+  await (await back(page, 'Tests')).tap();
 
   // Changes
   await openTool(page, 'git');
@@ -59,13 +68,13 @@ test('phone: Tests, Changes, Frames and Devices push with the shared Back', asyn
   await expect(changes).toContainText('go.mod');
   await shot(page, 'ide-phone-changes-list');
   await changes.locator('[data-side-row]', { hasText: 'go.mod' }).tap();
-  await expect(page.getByTestId('ide-git-changes-back')).toBeVisible();
+  await back(page, 'Changes');
   await shot(page, 'ide-phone-changes-content');
-  await page.getByTestId('ide-git-changes-back').tap();
+  await (await back(page, 'Changes')).tap();
   await expect(changes.locator('[data-side-row]', { hasText: 'go.mod' })).toHaveAttribute('aria-current', 'true');
   await changes.locator('[data-side-row]', { hasText: 'notes.txt' }).tap();
-  await expect(page.getByTestId('ide-git-changes-back')).toBeVisible();
-  await page.getByTestId('ide-git-changes-back').tap();
+  await back(page, 'Changes');
+  await (await back(page, 'Changes')).tap();
 
   // Frames → Variables
   await openTool(page, 'debug');
@@ -73,14 +82,14 @@ test('phone: Tests, Changes, Frames and Devices push with the shared Back', asyn
   await expect(frames).toBeVisible({ timeout: 20_000 });
   await shot(page, 'ide-phone-frames-list');
   await frames.locator('.dbg-frame', { hasText: 'main.main' }).tap();
-  await expect(page.getByTestId('ide-debug-frames-back')).toBeVisible();
+  await back(page, 'Frames');
   await expect(pane(page, 'Variables')).toBeVisible();
   await shot(page, 'ide-phone-frames-content');
-  await page.getByTestId('ide-debug-frames-back').tap();
+  await (await back(page, 'Frames')).tap();
   await expect(frames).toBeVisible();
   await frames.locator('.dbg-frame', { hasText: 'runtime.main' }).tap();
-  await expect(page.getByTestId('ide-debug-frames-back')).toBeVisible();
-  await page.getByTestId('ide-debug-frames-back').tap();
+  await back(page, 'Frames');
+  await (await back(page, 'Frames')).tap();
 
   // Devices
   await openTool(page, 'devices');
@@ -88,16 +97,17 @@ test('phone: Tests, Changes, Frames and Devices push with the shared Back', asyn
   await expect(devices).toBeVisible({ timeout: 20_000 });
   await shot(page, 'ide-phone-devices-list');
   await devices.locator('[data-side-row]', { hasText: 'Pixel 7' }).tap();
-  await expect(page.getByTestId('ide-sim-devices-back')).toBeVisible();
+  await back(page, 'Devices');
   await shot(page, 'ide-phone-devices-content');
-  await page.getByTestId('ide-sim-devices-back').tap();
+  await (await back(page, 'Devices')).tap();
   await expect(devices.locator('[data-side-row]', { hasText: 'Pixel 7' })).toHaveAttribute('aria-current', 'true');
   await devices.locator('[data-side-row]', { hasText: 'iPhone 15' }).tap();
-  await expect(page.getByTestId('ide-sim-devices-back')).toBeVisible();
+  await back(page, 'Devices');
 
-  // The Side panel stays one tap away; ‹ Files back to the list page with ☰.
+  // The Side panel stays one tap away; ‹ Devices, then ‹ Files back to the list page with ☰.
   await expect(header.getByTestId('open-side-panel')).toBeVisible();
-  await header.getByTestId('phone-back').tap();
+  await (await back(page, 'Devices')).tap();
+  await (await back(page, 'Files')).tap();
   await expect(header.getByTestId('open-navigator')).toBeVisible();
 });
 
@@ -110,7 +120,7 @@ test('tablet: each tool list sits beside its content', async ({ page }, info) =>
   for (const [tab, name] of [['run', 'Tests'], ['git', 'Changes'], ['debug', 'Frames'], ['devices', 'Devices']] as const) {
     await openTool(page, tab);
     await expect(pane(page, name)).toBeVisible({ timeout: 20_000 });
-    await expect(page.getByTestId('ide-run-tests-back')).toHaveCount(0);
+    await expect(page.getByRole('button', { name: /^Back to (Tests|Changes|Frames|Devices)$/ })).toHaveCount(0);
     await shot(page, `ide-tablet-${tab}`);
   }
 });

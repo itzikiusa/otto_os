@@ -22,6 +22,9 @@
   //   nested, no room   a ListDetail inside another's content whose row can't
   //                     hold the list (min) + 480 pushes like a phone, its Back
   //                     in PageHeader at every size (paneKeys nestedPush).
+  //   not on screen     a ListDetail with no width (inside a hidden tool tab or
+  //                     a hidden stacked pane) claims nothing in PageHeader:
+  //                     the Back names the nearest list the person can see.
   //
   // Width and hidden persist as otto.pane.<module>.<pane>.{w,hidden}; a page
   // that used other keys passes them once as `legacy`. Open on an item (the
@@ -126,7 +129,7 @@
   $effect(() =>
     pageNav.claim({
       depth,
-      active: visible,
+      active: () => visible() && rowW > 0,
       back: () => (phone && open && !empty ? { label: name, onclick: onback, title } : null),
       show: () => (!phone && hidden && !empty ? { label: name, onclick: () => setHidden(false) } : null),
       toggle: () => (!phone && !empty ? () => setHidden(!hidden) : null),

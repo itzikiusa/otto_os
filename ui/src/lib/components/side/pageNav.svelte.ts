@@ -36,7 +36,7 @@ export interface PaneNavEntry {
   back(): PaneBack | null;
   /** Desktop / tablet: the hidden pane's name and how to show it, or null. */
   show(): { label: string; onclick: () => void } | null;
-  /** ⌘B: hide or show this page's list pane (null on a phone). */
+  /** ⌘B: hide or show this list pane (null on a phone); the page's own list (the shallowest) wins. */
   toggle(): (() => void) | null;
   /** Phone, the list is the page: the pane's header for the page header. */
   listPage(): PaneHeader | null;
@@ -101,9 +101,17 @@ class PageNav {
   get listPage(): PaneHeader | null {
     return this.first((e) => e.listPage());
   }
-  /** The innermost visible list pane's ⌘B, if any. */
+  /** ⌘B: the page's own list pane (the shallowest that has one), not a list
+   *  nested in a tool window or a section (design.md §7: ⌘B is the list pane). */
   get toggle(): (() => void) | null {
-    return this.first((e) => e.toggle());
+    let best: (() => void) | null = null;
+    let depth = Infinity;
+    for (const e of this.entries) {
+      if (e.depth >= depth || !e.active()) continue;
+      const t = e.toggle();
+      if (t) [best, depth] = [t, e.depth];
+    }
+    return best;
   }
 }
 

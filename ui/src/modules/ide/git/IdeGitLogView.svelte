@@ -9,12 +9,9 @@
   import EmptyState from '../../../lib/components/EmptyState.svelte';
   import Icon from '../../../lib/components/Icon.svelte';
   import LoadState from '../../../lib/components/LoadState.svelte';
-  import PaneDivider from '../../../lib/components/PaneDivider.svelte';
   import { loadErrorText } from '../../../lib/loadError';
   import ListPane from '../../../lib/components/side/ListPane.svelte';
-  import PhoneBack from '../../../lib/components/side/PhoneBack.svelte';
-  import { WIDE_LIST_PANE, loadPaneW, paneKey, paneStorage } from '../../../lib/components/side/paneKeys';
-  import { viewport } from '../../../lib/stores/viewport.svelte';
+  import ListDetail from '../../../lib/components/side/ListDetail.svelte';
   import { git } from '../../../lib/stores/git.svelte';
   import { rel } from '../../../lib/stores/now.svelte';
   import BlamePanel from '../../../lib/diff/BlamePanel.svelte';
@@ -43,13 +40,11 @@
     modeSeq = 0,
   }: Props = $props();
 
-  // The commit list is a list pane inside the tool window (rich rows: the wide preset; the old key is read once).
+  // The commits are the list of a ListDetail nested in the tool window (rich rows: `wide`; the old key is read once).
   const LOG_LIMIT = 250;
 
-  let listW = $state(loadPaneW(paneStorage(), 'ide', 'gitLog', WIDE_LIST_PANE, { w: 'otto.ide.gitLogW' }, 380));
-  // A phone pushes: the list fills the tool window; a tapped commit is shown with "‹ Commits".
+  // A phone pushes: the list fills the tool window; a tapped commit is shown with "‹ Commits" in the page header.
   let phoneOpen = $state(false);
-  const phone = $derived(viewport.isPhone);
   let branchFilter = $state<string>('__all__');
   let searchQuery = $state('');
   let branches = $state.raw<RefBranch[]>([]);
@@ -296,10 +291,10 @@
     </div>
   {:else if mode === 'log' || (mode === 'file' && relFilePath)}
     <div class="gl-split">
-      <!-- A list pane inside the tool window: a standalone ListPane (its own
-           header; the page's list is the explorer). -->
-      <div class="gl-left" class:phone style:inline-size={phone ? undefined : `${listW}px`} hidden={phone && phoneOpen}>
-      <ListPane name="Commits" count={filteredCommits.length}>
+      <!-- A list nested in the tool window (the page's list is the explorer). -->
+      <ListDetail module="ide" pane="gitLog" name="Commits" wide open={phoneOpen} onback={() => (phoneOpen = false)} defaultWidth={380} legacy={{ w: 'otto.ide.gitLogW' }}>
+      {#snippet list()}
+      <ListPane count={filteredCommits.length}>
         {#snippet searchRow()}<div class="gl-filters">
           {#if mode === 'log'}
             <select
@@ -360,16 +355,13 @@
             {/each}
           </LoadState>
       </ListPane>
-      </div>
+      {/snippet}
 
-      {#if !phone}<PaneDivider bind:width={listW} storageKey={paneKey('ide', 'gitLog', 'w')} min={WIDE_LIST_PANE.min} max={WIDE_LIST_PANE.max} defaultWidth={380} label="Resize commits" />{/if}
-
-      <section class="gl-right" aria-label="Commit diff" hidden={phone && !phoneOpen}>
+      <section class="gl-right" aria-label="Commit diff">
         {#if !selectedCommit}
           <EmptyState icon="commit" title="Select a commit" body="Pick a commit on the start pane to inspect its changed files and syntax-highlighted diff." headingLevel={2} />
         {:else}
           <header class="gl-commit-head">
-            {#if phone}<PhoneBack label="Commits" onclick={() => (phoneOpen = false)} testid="ide-git-log-back" />{/if}
             <button type="button" class="btn small ghost mono" title="Copy full commit SHA" onclick={() => void copyWithToast(selectedCommit.sha, 'Copied commit SHA')}>
               <Icon name="commit" size={12} />
               <span>{selectedCommit.short_sha}</span>
@@ -405,6 +397,7 @@
           </div>
         {/if}
       </section>
+      </ListDetail>
     </div>
   {/if}
 </div>
@@ -417,9 +410,6 @@
   .gl-jump-input { inline-size: 56px; block-size: 22px; padding-inline: 6px; font-size: var(--fs-xs); color: var(--text); background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-s); }
   .gl-blame-wrap { flex: 1; min-block-size: 0; overflow: auto; }
   .gl-split { display: flex; flex: 1; min-block-size: 0; min-inline-size: 0; overflow: hidden; }
-  .gl-left { flex-shrink: 0; display: flex; flex-direction: column; min-block-size: 0; }
-  .gl-left.phone { flex: 1; }
-  .gl-left[hidden], .gl-right[hidden] { display: none; }
   .gl-filters { display: flex; align-items: center; gap: 6px; }
   .gl-branch-select { max-inline-size: 136px; block-size: 24px; padding-inline: 6px; font-size: var(--fs-xs); color: var(--text); background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--radius-s); }
   .gl-search { flex: 1; min-inline-size: 80px; block-size: 24px; font-size: var(--fs-xs); }

@@ -5,11 +5,9 @@
   import EmptyState from '../../../lib/components/EmptyState.svelte';
   import Icon from '../../../lib/components/Icon.svelte';
   import LoadState from '../../../lib/components/LoadState.svelte';
-  import PaneDivider from '../../../lib/components/PaneDivider.svelte';
   import ListPane from '../../../lib/components/side/ListPane.svelte';
-  import PhoneBack from '../../../lib/components/side/PhoneBack.svelte';
+  import ListDetail from '../../../lib/components/side/ListDetail.svelte';
   import SideSection from '../../../lib/components/side/SideSection.svelte';
-  import { LIST_PANE, loadPaneW, paneKey, paneStorage } from '../../../lib/components/side/paneKeys';
   import { ctxMenu, type MenuItem } from '../../../lib/contextmenu.svelte';
   import { rowMenu as rowMenuAction } from '../../../lib/rowMenu';
   import { api, isAbortError } from '../../../lib/api/client';
@@ -18,7 +16,6 @@
   import { loadErrorText } from '../../../lib/loadError';
   import { plural } from '../../../lib/plural';
   import { git } from '../../../lib/stores/git.svelte';
-  import { viewport } from '../../../lib/stores/viewport.svelte';
   import { toasts } from '../../../lib/toast.svelte';
   import { toastError } from '../../../lib/toastError';
   import DiffViewer from '../../../lib/diff/DiffViewer.svelte';
@@ -37,8 +34,6 @@
   const coarsePointer = typeof window !== 'undefined' && Boolean(window.matchMedia?.('(pointer: coarse)').matches);
 
   // The shared list range and key; the old key is read once.
-  let leftW = $state(loadPaneW(paneStorage(), 'ide', 'gitChanges', LIST_PANE, { w: 'otto.ide.gitChangesW' }, 320));
-  const phone = $derived(viewport.isPhone);
   let phoneOpen = $state(false);
 
   let selectedPath = $state<string | null>(null);
@@ -267,12 +262,12 @@
 {/snippet}
 
 <div class="gc-split" data-testid="ide-git-changes-view">
-  <!-- A list pane inside the tool window: a standalone ListPane (its own
-       header; the page's list is the explorer). A phone pushes: a tapped file
-       shows its diff with "‹ Changes". -->
-  <div class="gc-left" class:phone style:inline-size={phone ? undefined : `${leftW}px`} hidden={phone && phoneOpen}>
+  <!-- The changes are the list of a ListDetail nested in the tool window (the
+       page's list is the explorer). A phone pushes: a tapped file shows its
+       diff with "‹ Changes" in the page header (the one Back). -->
+  <ListDetail module="ide" pane="gitChanges" name="Changes" open={phoneOpen} onback={() => (phoneOpen = false)} defaultWidth={320} legacy={{ w: 'otto.ide.gitChangesW' }}>
+  {#snippet list()}
     <ListPane
-      name="Changes"
       count={status ? changes.length : null}
       loading={!status && !statusError}
       error={!status ? statusError : null}
@@ -338,20 +333,15 @@
         </form>
       {/snippet}
     </ListPane>
-  </div>
+  {/snippet}
 
-  {#if !phone}
-    <PaneDivider bind:width={leftW} storageKey={paneKey('ide', 'gitChanges', 'w')} min={LIST_PANE.min} max={LIST_PANE.max} defaultWidth={320} label="Resize changes" />
-  {/if}
-
-  <section class="gc-right" aria-label="Selected file diff" hidden={phone && !phoneOpen}>
+  <section class="gc-right" aria-label="Selected file diff">
     {#if !selectedPath}
       <div class="gc-empty">
         <p class="dim">Select a modified file to inspect its diff.</p>
       </div>
     {:else}
       <header class="gc-diff-bar">
-        {#if phone}<PhoneBack label="Changes" onclick={() => (phoneOpen = false)} testid="ide-git-changes-back" />{/if}
         <span class="mono gc-diff-path ellipsis" dir="ltr" title={selectedPath}>{selectedPath}</span>
         <span class="gc-target-label dim">{selTarget === 'staged' ? 'staged' : 'working tree'}</span>
         <span class="grow"></span>
@@ -396,13 +386,11 @@
       </div>
     {/if}
   </section>
+  </ListDetail>
 </div>
 
 <style>
   .gc-split { flex: 1; min-block-size: 0; min-inline-size: 0; display: flex; overflow: hidden; background: var(--surface); }
-  .gc-left { display: flex; flex-direction: column; flex-shrink: 0; min-block-size: 0; min-inline-size: 0; }
-  .gc-left.phone { flex: 1; }
-  .gc-left[hidden], .gc-right[hidden] { display: none; }
   .gc-pad { padding: 12px; }
   .gc-empty { flex: 1; display: flex; align-items: center; justify-content: center; padding: 16px; font-size: var(--fs-xs); }
   .gc-mini-btn { block-size: 22px; padding-block: 0; }
