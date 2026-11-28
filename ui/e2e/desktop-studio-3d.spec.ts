@@ -76,6 +76,10 @@ test.beforeAll(async () => {
   await ctx.dispose();
 });
 
+// Wide enough for the Navigator, the Scene list, the viewport's 480 px floor
+// and the Details pane side by side (narrower, Details becomes a sheet).
+test.use({ viewport: { width: 1600, height: 900 } });
+
 test.beforeEach(async ({ page }) => {
   await page.addInitScript((id) => localStorage.setItem('otto_workspace', id as string), wsId);
 });
@@ -86,6 +90,9 @@ async function openScene(page: Page): Promise<void> {
   await expect(page.getByTestId('studio3d')).toBeVisible({ timeout: 30_000 });
   // The viewport booted three (the stats pill renders once it has).
   await expect(page.getByTestId('s3d-stats')).toContainText('2 objects', { timeout: 30_000 });
+  // Details is the Detail pane (inline and open by default at this width).
+  const details = page.locator('.studio3d .details-toggle');
+  if ((await details.getAttribute('aria-pressed')) !== 'true') await details.click();
 }
 
 async function content(): Promise<any> {

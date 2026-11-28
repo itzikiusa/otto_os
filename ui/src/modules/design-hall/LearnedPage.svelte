@@ -54,6 +54,7 @@
   } from './assist/model';
   import { approveRule, rejectRule, rollbackRule } from './assist/ruleActions';
   import EvidencePane from './assist/EvidencePane.svelte';
+  import DetailPane from '../../lib/components/side/DetailPane.svelte';
 
   interface Props {
     tab: LearnedTab;
@@ -547,11 +548,13 @@
           {/if}
         {/if}
       </div>
-      {#if withEvidence && selection}
-        <div class="side">
-          <EvidencePane title={selection.title} rationale={selection.rationale} evidence={selection.evidence} signals={byId} onclose={() => select(null)} />
-        </div>
-      {/if}
+      <!-- The rule's evidence is the page's Detail pane (the selection is in
+           the route): beside the list while it keeps 480 px, else a sheet. -->
+      <DetailPane module="design" pane="evidence" title="Evidence" open={withEvidence && !!selection} onclose={() => select(null)}>
+        {#if selection}
+          <EvidencePane title={selection.title} rationale={selection.rationale} evidence={selection.evidence} signals={byId} />
+        {/if}
+      </DetailPane>
     </div>
   {/if}
 </PageBody>
@@ -579,28 +582,22 @@
   .grow {
     flex: 1;
   }
+  /* The rules list and, at the end of the row, the Evidence Detail pane. */
   .split {
-    display: grid;
-    grid-template-columns: minmax(0, 1fr);
-    gap: 20px;
+    display: flex;
+    align-items: stretch;
+    min-height: 100%;
     container-type: inline-size;
   }
-  .split.with-evidence {
-    grid-template-columns: minmax(0, 1fr) minmax(280px, 380px);
-  }
-  @media (max-width: 1024px) {
-    .split.with-evidence {
-      grid-template-columns: minmax(0, 1fr);
-    }
-  }
   .list {
+    flex: 1;
     display: flex;
     flex-direction: column;
     gap: 10px;
     min-width: 0;
   }
-  .side {
-    min-width: 0;
+  .split.with-evidence .list {
+    padding-inline-end: 20px;
   }
   .callout {
     display: flex;

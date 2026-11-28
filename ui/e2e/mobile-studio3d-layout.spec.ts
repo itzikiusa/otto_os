@@ -162,17 +162,19 @@ test('3D Studio: one toolbar row, finger-sized controls, canvas first, whole mod
   expect.soft(fit.primaries, 'exactly one primary action').toBe(1);
   expect.soft(fit.labels, 'no near-duplicate "Wire" / "Scale" toolbar buttons').not.toContain('Wire');
   expect.soft(fit.labels).not.toContain('Scale');
-  // Touch widths (every project here): the side panes collapse to Scene / Details.
-  await expect.soft(page.locator('.studio3d .scene-toggle')).toBeVisible();
+  // The Details pane has its toolbar toggle; the Scene tools are the list pane.
   await expect.soft(page.locator('.studio3d .details-toggle')).toBeVisible();
 
-  // ── Canvas first: the viewport gets the studio's full width until a pane is opened.
+  // ── Canvas first: the viewport takes all the width the side panes leave
+  // (a phone shows the viewport alone; a tablet keeps the Scene list beside it).
   const share = await page.evaluate(() => {
     const vp = document.querySelector('.s3d-viewport')!.getBoundingClientRect();
     const st = document.querySelector('[data-testid="studio3d"]')!.getBoundingClientRect();
-    return vp.width / st.width;
+    const panes = [...document.querySelectorAll('[data-testid="studio3d"] .ld-list, [data-testid="studio3d"] aside.detail-pane')]
+      .map((e) => e.getBoundingClientRect().width).reduce((a, b) => a + b, 0);
+    return vp.width / (st.width - panes);
   });
-  expect.soft(share, 'the canvas takes the studio width (side panes collapsed)').toBeGreaterThan(0.95);
+  expect.soft(share, 'the canvas takes the room the side panes leave').toBeGreaterThan(0.95);
 
   // ── The model renders, and none of it hides under the viewport tools at the top.
   await expect.poll(async () => (await modelPixels(page)).total, { message: 'the canvas draws the model' }).toBeGreaterThan(200);
@@ -238,23 +240,25 @@ test('3D Studio: one toolbar row, finger-sized controls, canvas first, whole mod
   await page.keyboard.press('Escape');
 
   // ── Details: the inspector says when the environment backdrop covers the background colour.
-  await page.locator('.studio3d .details-toggle').click();
+  if ((await page.locator('.studio3d .details-toggle').getAttribute('aria-pressed')) !== 'true') await page.locator('.studio3d .details-toggle').click();
   await expect(page.getByTestId('s3d-bg-covered')).toBeVisible();
   await expectNoHorizontalOverflow(page);
   // A tab past the pane's edge ("Links") says so with a visible "More tabs" control.
-  const tabsHidden = await page.locator('#s3d-details-panel [role="tablist"]').evaluate((el) => el.scrollWidth > el.clientWidth + 1);
-  if (tabsHidden) await expect.soft(page.locator('#s3d-details-panel').getByTestId('tabs-more'), 'hidden tabs have a visible affordance').toBeVisible();
+  const tabsHidden = await page.locator('[data-testid="s3d-details-panel"] [role="tablist"]').evaluate((el) => el.scrollWidth > el.clientWidth + 1);
+  if (tabsHidden) await expect.soft(page.getByTestId('s3d-details-panel').getByTestId('tabs-more'), 'hidden tabs have a visible affordance').toBeVisible();
   if (coarse) {
-    await expectTouchSized(page, '#s3d-details-panel', '[role="tab"]', 'Details tab');
-    await expectTouchSized(page, '#s3d-details-panel', '.nd, input:not([type="checkbox"], [type="range"], [type="color"], .nd-input), select', 'Inspector field');
+    await expectTouchSized(page, '[data-testid="s3d-details-panel"]', '[role="tab"]', 'Details tab');
+    await expectTouchSized(page, '[data-testid="s3d-details-panel"]', '.nd, input:not([type="checkbox"], [type="range"], [type="color"], .nd-input), select', 'Inspector field');
   }
   await shot(page, 'dark-details-pane');
-  // Scene: the sub-mesh list never scrolls sideways.
-  await page.locator('.studio3d .scene-toggle').click();
+  // Scene (the list pane; ‹ Scene on a phone, after closing the Details sheet):
+  // the sub-mesh list never scrolls sideways.
+  if (await page.getByRole('dialog', { name: 'Details' }).isVisible()) await page.keyboard.press('Escape');
+  if (await page.getByTestId('phone-back').isVisible()) await page.getByTestId('phone-back').click();
   if (coarse) {
     await expectTouchSized(page, '.studio3d .left', '[role="treeitem"], [role="treeitem"] .s3d-icon-btn', 'Hierarchy row');
     // One scroll area: the pane, not the hierarchy and sub-mesh lists inside it as well.
-    expect.soft(await scrollAreas(page, '.studio3d'.concat(' .left')), 'the Scene pane scrolls as a whole').toBe(1);
+    expect.soft(await scrollAreas(page, '[data-testid="studio3d"] .side-list'), 'the Scene pane scrolls as a whole').toBe(1);
   }
   // Truncated sub-mesh names keep their distinguishing end ("… base" / "… body").
   const tails = await page.locator('[data-testid="s3d-mesh-outliner"] .mo-name').evaluateAll((els) =>
@@ -381,11 +385,9 @@ test('3D Studio: tapping a comment pin with Scene open shows Details below the c
   await page.addInitScript((ws) => localStorage.setItem('otto_workspace', ws), s.wsId);
   await openPage(page, `design/a/${encodeURIComponent(sceneId)}`);
   await expect(page.getByTestId('s3d-stats')).toBeVisible({ timeout: 30_000 });
-  await page.locator('.studio3d .scene-toggle').click();
-  await expect(page.getByTestId('s3d-left')).toBeVisible();
   await page.getByTestId('s3d-pin-marker').first().click();
-  // Scene + Details are both open now; Details takes the lower half, the canvas keeps the top.
-  const details = page.locator('#s3d-details-panel');
+  // A phone: the pin opens the Details sheet on Comments, full width; the canvas stays under it.
+  const details = page.getByTestId('s3d-details-panel');
   await expect(details.getByTestId('design-tab-comments')).toHaveAttribute('aria-selected', 'true');
   const box = (await details.boundingBox())!;
   expect(box.width, 'Details spans the screen').toBeGreaterThan(page.viewportSize()!.width - 2);

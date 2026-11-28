@@ -45,6 +45,8 @@
   } from '../../../lib/api/types';
   import StatusPill from '../StatusPill.svelte';
   import AppliedPreview from './AppliedPreview.svelte';
+  import DetailPane from '../../../lib/components/side/DetailPane.svelte';
+  import { scrollBehavior } from '../../../lib/motion';
   import ColorsSection from './ColorsSection.svelte';
   import TypeSection from './TypeSection.svelte';
   import SpaceSection from './SpaceSection.svelte';
@@ -443,8 +445,16 @@
     ['brand-voice', 'Voice'],
   ];
   function jump(target: string): void {
-    const reduced = typeof matchMedia === 'function' && matchMedia('(prefers-reduced-motion: reduce)').matches;
-    document.getElementById(target)?.scrollIntoView({ behavior: reduced ? 'auto' : 'smooth', block: 'start' });
+    document.getElementById(target)?.scrollIntoView({ behavior: scrollBehavior(), block: 'start' });
+  }
+  // "Applied to" is the Detail pane: inline it starts open, as a sheet on request.
+  let previewInline = $state(true);
+  let previewSheet = $state(false);
+  let previewSheetOpen = $state(false);
+  const previewShown = $derived(previewSheet ? previewSheetOpen : previewInline);
+  function setPreview(open: boolean): void {
+    if (previewSheet) previewSheetOpen = open;
+    else previewInline = open;
   }
 
   function onKey(e: KeyboardEvent): void {
@@ -529,6 +539,7 @@
       <StatusPill status={needsApproval && artifact?.status === 'approved' ? 'draft' : (artifact?.status ?? 'draft')} />
     {/snippet}
     {#snippet actions()}
+      <button class="icon-btn" class:on={previewShown} aria-pressed={previewShown} aria-label="Applied to — live preview" title={previewShown ? 'Hide the live preview (⌥⌘B)' : 'Show the live preview: the kit applied to a sample (⌥⌘B)'} onclick={() => setPreview(!previewShown)} data-icon="eye" data-keep data-testid="brand-preview-toggle"><Icon name="eye" size={14} /></button>
       <button class="btn small" data-overflow="2" onclick={() => jump('brand-used')} data-testid="brand-used-btn" data-icon="link">
         <Icon name="link" size={12} /> Used in {usage ? usage.artifact_count : '…'}
       </button>
@@ -549,7 +560,8 @@
     {/snippet}
   </PageHeader>
 
-  <PageBody>
+  <PageBody fill padded={false}>
+    <div class="brand-row"><div class="brand-scroll">
     <div class="brand-grid" data-testid="brand-editor">
       <div class="main">
         <nav class="bnav" aria-label="Brand sections">
@@ -626,9 +638,10 @@
         <ProseSection bind:doc group="voice" {readonly} />
         <UsedIn usage={usage} loading={usageLoading} error={usageError} kitId={id} onretry={() => void loadUsage()} />
       </div>
-      <aside class="side" aria-label="Applied to — live preview">
-        <AppliedPreview {doc} />
-      </aside>
+    </div></div>
+    <DetailPane module="design" pane="brand-preview" title="Applied to — live preview" open={previewShown} onclose={() => setPreview(false)} ontoggle={() => setPreview(!previewShown)} bind:sheet={previewSheet} testid="brand-preview">
+      <div class="preview-body"><AppliedPreview {doc} /></div>
+    </DetailPane>
     </div>
   </PageBody>
 
@@ -649,23 +662,31 @@
 {/if}
 
 <style>
+  /* The editor scrolls; the live preview is the Detail pane at the row's end. */
+  .brand-row {
+    flex: 1;
+    display: flex;
+    min-height: 0;
+  }
+  .brand-scroll {
+    flex: 1;
+    min-width: 0;
+    overflow-y: auto;
+    padding-block: 20px 32px;
+    padding-inline: 24px;
+  }
   .brand-grid {
-    display: grid;
-    grid-template-columns: minmax(0, 1fr) 336px;
-    gap: 24px;
-    max-width: 1360px;
-    margin: 0;
-    align-items: start;
+    max-width: 1024px;
+  }
+  .preview-body {
+    padding-block: 12px 16px;
+    padding-inline: 16px;
   }
   .main {
     display: flex;
     flex-direction: column;
     gap: 32px;
     min-width: 0;
-  }
-  .side {
-    position: sticky;
-    top: 0;
   }
   .bnav {
     display: flex;
@@ -768,12 +789,9 @@
     color: var(--text-dim);
     font-variant-numeric: tabular-nums;
   }
-  @media (max-width: 1024px) {
-    .brand-grid {
-      grid-template-columns: minmax(0, 1fr);
-    }
-    .side {
-      position: static;
+  @media (max-width: 640px) {
+    .brand-scroll {
+      padding: 14px;
     }
   }
 </style>

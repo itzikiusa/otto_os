@@ -14,9 +14,7 @@
     isModelArtifact: boolean;
     canEdit: boolean;
     canComment: boolean;
-    sceneOpen: boolean;
     detailsOpen: boolean;
-    onscene: () => void;
     ondetails: () => void;
     ongenerate: (e: MouseEvent) => void;
     exportItems: () => MenuItem[];
@@ -38,9 +36,7 @@
     isModelArtifact,
     canEdit,
     canComment,
-    sceneOpen,
     detailsOpen,
-    onscene,
     ondetails,
     ongenerate,
     exportItems,
@@ -110,8 +106,8 @@
 </script>
 
 <div class="toolbar" role="toolbar" aria-label="3D tools" bind:clientWidth={width} data-testid="s3d-toolbar">
-  <button class="btn small scene-toggle" class:on={sceneOpen} aria-expanded={sceneOpen} aria-controls="s3d-scene-tools" onclick={onscene}>Scene</button>
-  <button class="btn small details-toggle" class:on={detailsOpen} aria-expanded={detailsOpen} aria-controls="s3d-details-panel" onclick={ondetails}>Details</button>
+  <!-- The Detail pane's toggle (⌥⌘B); the Scene pane is the list pane (⋯ › Hide Scene ⌘B). -->
+  <button class="btn small details-toggle" class:on={detailsOpen} aria-pressed={detailsOpen} aria-label={detailsOpen ? 'Hide details' : 'Show details'} title="Inspector, comments, Otto, versions, links (⌥⌘B)" onclick={ondetails}><Icon name="info" size={12} /> Details</button>
   <button class="btn small primary" onclick={ongenerate} disabled={!canEdit} aria-haspopup="menu" data-testid="s3d-generate">
     <Icon name="sparkle" size={12} /> Generate {#if roomy}<Icon name="chevronDown" size={12} />{/if}
   </button>
@@ -172,10 +168,6 @@
   }
   .grow {
     flex: 1 1 0;
-  }
-  .scene-toggle,
-  .details-toggle {
-    display: none;
   }
   @media (pointer: coarse) {
     .toolbar {

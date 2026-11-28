@@ -230,6 +230,8 @@ test('Voice / TTS Studio renders cleanly in Light & Dark themes, meets coarse-po
   await scriptInput.fill('Hello from Otto mobile studio.');
   await expect(generateBtn).toBeEnabled();
   await generateBtn.click();
+  // A phone shows the editor; the clips are in the list pane behind ‹ Voices.
+  if (await page.getByTestId('phone-back').isVisible()) await page.getByTestId('phone-back').click();
   await expect(page.getByTestId('tts-clip-history')).toBeVisible({ timeout: 30_000 });
   await expect(page.getByTestId('tts-clip-history')).toContainText('Hello from Otto mobile studio.');
   await assertZeroCutOff(page, 'voice studio after macos-say synthesis');
@@ -326,9 +328,13 @@ test('Voice Studio form, voice list, clip count and loading/error states stay co
   await expect.soft(voiceSelect.locator('option')).toHaveCount(5);
   // The Narrator default "Samantha" resolves to the listed variant, not a blank select.
   await expect.soft(voiceSelect).toHaveValue('Samantha (English (US))');
-  const clipList = page.getByTestId('tts-clip-history').locator('li');
+  // The clips are a section of the studio's list pane (‹ Voices on a phone).
+  if (await page.getByTestId('phone-back').isVisible()) await page.getByTestId('phone-back').click();
+  const clipList = page.getByTestId('tts-clip-history').locator('.side-row');
   await expect(clipList.first()).toBeVisible();
-  await expect.soft(page.locator('.tts-history .tts-shead .k')).toHaveText(`Generated clips (${await clipList.count()})`);
+  await expect.soft(page.getByRole('region', { name: 'Generated clips' }).locator('.ssh-count')).toHaveText(String(await clipList.count()));
+  // A clip opens the editor again (a phone pushes it).
+  if (page.viewportSize()!.width <= 640) await clipList.first().locator('.side-row-main').click();
   expect.soft(pageErrors, 'no render error on the Voice Studio').toEqual([]);
 
   // Form: fields beside each other line up (labels and control heights), no
@@ -443,25 +449,15 @@ test('3D Studio mobile panels, Generate modal (Otto Forge / TRELLIS.2 / Hunyuan3
   await expect(page.getByTestId('s3d-generate')).toBeVisible({ timeout: 20_000 });
   await assertZeroCutOff(page, 'studio3d initial');
 
-  // On narrow/short mobile viewports, verify collapsible Scene and Details panels toggle cleanly.
-  const sceneToggle = page.locator('.studio3d .scene-toggle');
-  if (await sceneToggle.isVisible()) {
-    await expect(sceneToggle).toHaveAttribute('aria-expanded', 'false');
-    await sceneToggle.click();
-    await expect(sceneToggle).toHaveAttribute('aria-expanded', 'true');
-    await assertZeroCutOff(page, 'studio3d scene panel open');
-    await sceneToggle.click();
-    await expect(sceneToggle).toHaveAttribute('aria-expanded', 'false');
-  }
+  // The Details pane opens and closes cleanly from its toolbar toggle (a sheet
+  // on a narrow screen, a column beside the viewport where it fits).
   const detailsToggle = page.locator('.studio3d .details-toggle');
-  if (await detailsToggle.isVisible()) {
-    await expect(detailsToggle).toHaveAttribute('aria-expanded', 'false');
-    await detailsToggle.click();
-    await expect(detailsToggle).toHaveAttribute('aria-expanded', 'true');
-    await assertZeroCutOff(page, 'studio3d details panel open');
-    await detailsToggle.click();
-    await expect(detailsToggle).toHaveAttribute('aria-expanded', 'false');
-  }
+  const was = (await detailsToggle.getAttribute('aria-pressed')) === 'true';
+  await detailsToggle.click();
+  await expect(detailsToggle).toHaveAttribute('aria-pressed', String(!was));
+  await assertZeroCutOff(page, 'studio3d details pane toggled');
+  if (await page.getByRole('dialog', { name: 'Details' }).isVisible()) await page.keyboard.press('Escape');
+  else await detailsToggle.click();
 
   // Open Generate modal and verify Otto Forge (local), TRELLIS.2, and Hunyuan3D-Omni territory warning.
   await page.getByTestId('s3d-generate').click();

@@ -65,21 +65,22 @@ test('phone Site Studio exposes each editing panel without squeezing the page', 
   await page.addInitScript(ws => localStorage.setItem('otto_workspace', ws), ws);
   await page.goto(`/#/design/a/${artifact.artifact.id}`);
   await page.getByTestId('site-template').filter({ hasText: 'Landing page' }).click();
-  const panels = page.getByRole('group', { name: 'Site panels' });
-  await expect(panels).toBeVisible();
-  await expect(page.getByRole('region', { name: 'Page canvas', exact: true })).toBeVisible();
-  await panels.getByRole('button', { name: 'Blocks', exact: true }).click();
-  await expect(page.getByRole('complementary', { name: 'Pages, layers and blocks' })).toBeVisible();
+  // A phone: Pages · Layers · Blocks is the list pane (the page); a layer
+  // pushes the canvas, the standard Back returns; the Design inspector is the
+  // details sheet, opened from the bar.
+  const views = page.getByRole('tablist', { name: 'Site panels' });
+  await expect(views).toBeVisible();
+  await views.getByRole('tab', { name: 'Blocks' }).click();
+  await expect(page.getByTestId('site-left')).toBeVisible();
   await expect(page.getByRole('region', { name: 'Page canvas', exact: true })).not.toBeVisible();
   await page.getByTestId('site-tab-layers').click();
   await page.getByTestId('site-layer').filter({ hasText: 'Hero' }).click();
-  await expect(panels.getByRole('button', { name: 'Design', exact: true })).toHaveAttribute('aria-pressed', 'true');
-  await panels.getByRole('button', { name: 'Design', exact: true }).click();
-  // Site Studio's right column is the design's details panel, opened on its Design (inspector) tab.
-  await expect(page.getByRole('complementary', { name: 'Design details', exact: true })).toBeVisible();
-  await expect(page.getByTestId('design-tab-design')).toHaveAttribute('aria-selected', 'true');
-  await panels.getByRole('button', { name: 'Page', exact: true }).click();
   await expect(page.getByRole('region', { name: 'Page canvas', exact: true })).toBeVisible();
+  await page.getByTestId('site-details-toggle').click();
+  const details = page.getByRole('dialog', { name: 'Design details', exact: true });
+  await expect(details).toBeVisible();
+  await expect(page.getByTestId('design-tab-design')).toHaveAttribute('aria-selected', 'true');
+  await details.getByRole('button', { name: 'Close Design details', exact: true }).click();
   const actions = page.getByTestId('site-section-toolbar');
   await expect(actions).toBeVisible();
   await expectFullyInViewport(page, actions, 'phone section actions');
@@ -124,11 +125,7 @@ test('narrow 3D studio keeps scene tools reachable', async ({ page }) => {
   await ctx.dispose();
   await page.addInitScript(ws => localStorage.setItem('otto_workspace', ws), ws);
   await page.goto(`/#/design/a/${artifact.artifact.id}`);
-  const toggle = page.locator('button[aria-controls="s3d-scene-tools"]');
-  await expect(toggle).toBeVisible();
-  await expect(page.getByTestId('s3d-left')).not.toBeVisible();
-  await toggle.click();
+  // A narrow window keeps the Scene tools as the list pane beside the viewport.
   await expect(page.getByTestId('s3d-left')).toBeVisible();
-  await expect(toggle).toHaveAttribute('aria-expanded', 'true');
   await expectNoHorizontalOverflow(page);
 });

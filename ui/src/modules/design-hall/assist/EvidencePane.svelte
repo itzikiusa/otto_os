@@ -17,9 +17,8 @@
     rationale: string;
     evidence: string[];
     signals: Record<string, DesignSignal>;
-    onclose?: () => void;
   }
-  let { title, rationale, evidence, signals, onclose }: Props = $props();
+  let { title, rationale, evidence, signals }: Props = $props();
 
   const items = $derived(
     evidence
@@ -32,13 +31,8 @@
   const day = (iso: string) => new Date(iso).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
 </script>
 
-<aside class="evidence" aria-label="Evidence" data-testid="design-learned-evidence">
-  <div class="head">
-    <span class="k">Evidence</span>
-    {#if onclose}
-      <button class="icon-btn" onclick={onclose} aria-label="Close evidence" title="Close"><Icon name="x" size={12} /></button>
-    {/if}
-  </div>
+<!-- The body of the Learned rules Detail pane ("Evidence"; it owns the title and Close). -->
+<div class="evidence" data-testid="design-learned-evidence">
   <h3>{title}</h3>
   {#if rationale}<p class="why"><Icon name="clock" size={12} /> {rationale}</p>{/if}
   {#if items.length === 0}
@@ -69,7 +63,7 @@
   {#if missing > 0 && items.length > 0}
     <p class="dim">{plural(missing, 'more signal')} beyond the loaded log.</p>
   {/if}
-</aside>
+</div>
 
 <style>
   .evidence {
@@ -77,18 +71,8 @@
     flex-direction: column;
     gap: 8px;
     min-width: 0;
-  }
-  .head {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-  }
-  .k {
-    font-size: var(--fs-xs);
-    font-weight: 600;
-    letter-spacing: 0.06em;
-    text-transform: uppercase;
-    color: var(--text-dim);
+    padding-block: 12px;
+    padding-inline: 16px;
   }
   h3 {
     margin: 0;

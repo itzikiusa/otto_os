@@ -202,6 +202,6 @@ test('at phone width the Details button opens Otto · Versions · Links', async 
   }
   await expect(page.getByTestId('design-find-references')).toBeVisible();
   await expectNoHorizontalOverflow(page);
-  await page.getByRole('button', { name: 'Back to design', exact: true }).click();
+  await page.getByRole('button', { name: 'Close Design details', exact: true }).click();
   await expect(page.getByTestId('design-stage')).toBeVisible();
 });

@@ -87,7 +87,7 @@ for (const [theme, scheme, width, rtl] of [
       await page.getByRole('button', { name: 'Show design details', exact: true }).click();
       await expect(page.getByRole('tablist', { name: 'Details panel' })).toBeVisible();
       await page.getByTestId('design-tab-links').click();
-      await page.getByRole('button', { name: 'Back to design', exact: true }).click();
+      await page.getByRole('button', { name: 'Close Design details', exact: true }).click();
     }
     if (width < 640) {
       const notch = (await page.locator('.device.iphone .notch').boundingBox())!;
