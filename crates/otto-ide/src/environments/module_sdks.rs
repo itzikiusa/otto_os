@@ -289,6 +289,7 @@ fn infer_sdk_kind(
             }
             IdeRunnerKind::JavaMain
             | IdeRunnerKind::JavaJunit
+            | IdeRunnerKind::Kotest
             | IdeRunnerKind::Maven
             | IdeRunnerKind::Gradle => {
                 return SdkKindHint::Java;

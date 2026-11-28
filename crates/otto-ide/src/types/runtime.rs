@@ -73,6 +73,10 @@ pub struct IdeDebugLaunchSpec {
     /// The line of the test's `test(` call (Playwright selects `file:line`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub test_line: Option<u32>,
+    /// Kotest: debug the spec `program` names (empty) or its container / test at this path
+    /// of names, through Gradle or Maven with the debugger attached to the test JVM.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub test_path: Option<Vec<String>>,
     #[serde(default)]
     pub is_test: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]

@@ -55,6 +55,7 @@ pub(super) fn detect_python(path: &str, dir: &str, content: &str, out: &mut Vec<
                     .unwrap_or("__main__")
                     .to_string(),
                 language: "python".into(),
+                note: None,
                 run_spec: IdeQuickRunSpec {
                     runner: IdeRunnerKind::Python,
                     command: Some("python3".into()),
@@ -64,6 +65,7 @@ pub(super) fn detect_python(path: &str, dir: &str, content: &str, out: &mut Vec<
                     test_filter: None,
                     debug_program: Some(path.to_string()),
                     debug_test_name: None,
+                    test_path: None,
                 },
             });
             continue;
@@ -81,6 +83,7 @@ pub(super) fn detect_python(path: &str, dir: &str, content: &str, out: &mut Vec<
                     kind: IdeGutterKind::Suite,
                     label: cls_name.to_string(),
                     language: "python".into(),
+                    note: None,
                     run_spec: IdeQuickRunSpec {
                         runner: IdeRunnerKind::Pytest,
                         command: Some("pytest".into()),
@@ -90,6 +93,7 @@ pub(super) fn detect_python(path: &str, dir: &str, content: &str, out: &mut Vec<
                         test_filter: Some(node_id.clone()),
                         debug_program: Some(path.to_string()),
                         debug_test_name: Some(node_id),
+                        test_path: None,
                     },
                 });
             }
@@ -110,6 +114,7 @@ pub(super) fn detect_python(path: &str, dir: &str, content: &str, out: &mut Vec<
                 kind: IdeGutterKind::Test,
                 label: fn_name.to_string(),
                 language: "python".into(),
+                note: None,
                 run_spec: IdeQuickRunSpec {
                     runner: IdeRunnerKind::Pytest,
                     command: Some("pytest".into()),
@@ -119,6 +124,7 @@ pub(super) fn detect_python(path: &str, dir: &str, content: &str, out: &mut Vec<
                     test_filter: Some(node_id.clone()),
                     debug_program: Some(path.to_string()),
                     debug_test_name: Some(node_id),
+                    test_path: None,
                 },
             });
         }
@@ -411,6 +417,7 @@ fn build_js_test_item(
         kind,
         label: title.to_string(),
         language: lang.to_string(),
+        note: None,
         run_spec: IdeQuickRunSpec {
             runner,
             command: Some(command.into()),
@@ -420,6 +427,7 @@ fn build_js_test_item(
             test_filter: Some(title.to_string()),
             debug_program: supports_debug.then(|| path.to_string()),
             debug_test_name: supports_debug.then(|| debug_name.to_string()),
+            test_path: None,
         },
     }
 }
@@ -500,6 +508,7 @@ pub(super) fn detect_json_task_map(
             kind,
             label: format!("{cmd_bin} {label_sub} {key}"),
             language: "json".into(),
+            note: None,
             run_spec: IdeQuickRunSpec {
                 runner,
                 command: Some(cmd_bin.to_string()),
@@ -509,6 +518,7 @@ pub(super) fn detect_json_task_map(
                 test_filter: Some(key.clone()),
                 debug_program: Some(path.to_string()),
                 debug_test_name: Some(key.clone()),
+                test_path: None,
             },
         });
     }
@@ -566,6 +576,7 @@ pub(super) fn detect_shell(
                         kind: IdeGutterKind::Suite,
                         label: base_name.to_string(),
                         language: "shell".into(),
+                        note: None,
                         run_spec: IdeQuickRunSpec {
                             runner: IdeRunnerKind::Shell,
                             command: Some("bats".into()),
@@ -575,6 +586,7 @@ pub(super) fn detect_shell(
                             test_filter: None,
                             debug_program: Some(path.to_string()),
                             debug_test_name: None,
+                            test_path: None,
                         },
                     });
                 }
@@ -583,6 +595,7 @@ pub(super) fn detect_shell(
                     kind: IdeGutterKind::Test,
                     label: desc.to_string(),
                     language: "shell".into(),
+                    note: None,
                     run_spec: IdeQuickRunSpec {
                         runner: IdeRunnerKind::Shell,
                         command: Some("bats".into()),
@@ -592,6 +605,7 @@ pub(super) fn detect_shell(
                         test_filter: Some(desc.to_string()),
                         debug_program: Some(path.to_string()),
                         debug_test_name: Some(desc.to_string()),
+                        test_path: None,
                     },
                 });
             }
@@ -609,6 +623,7 @@ pub(super) fn detect_shell(
             kind: IdeGutterKind::Main,
             label: base_name.to_string(),
             language: "shell".into(),
+            note: None,
             run_spec: IdeQuickRunSpec {
                 runner: IdeRunnerKind::Shell,
                 command: Some(shell_bin.to_string()),
@@ -618,6 +633,7 @@ pub(super) fn detect_shell(
                 test_filter: None,
                 debug_program: Some(path.to_string()),
                 debug_test_name: None,
+                test_path: None,
             },
         });
     }
@@ -645,6 +661,7 @@ pub(super) fn detect_shell(
                 kind: IdeGutterKind::Main,
                 label: format!("{fn_name}()"),
                 language: "shell".into(),
+                note: None,
                 run_spec: IdeQuickRunSpec {
                     runner: IdeRunnerKind::Shell,
                     command: Some(shell_bin.to_string()),
@@ -654,6 +671,7 @@ pub(super) fn detect_shell(
                     test_filter: Some(fn_name.to_string()),
                     debug_program: Some(path.to_string()),
                     debug_test_name: Some(fn_name.to_string()),
+                    test_path: None,
                 },
             });
         }
@@ -785,6 +803,7 @@ pub(super) fn apply_plugin_detectors(
                     format!("{prefix} {name}")
                 },
                 language: det.language.clone(),
+                note: None,
                 run_spec: IdeQuickRunSpec {
                     runner: det.runner,
                     command: cmd,
@@ -794,6 +813,7 @@ pub(super) fn apply_plugin_detectors(
                     test_filter: filter.clone(),
                     debug_program: Some(path.to_string()),
                     debug_test_name: filter,
+                    test_path: None,
                 },
             });
         }

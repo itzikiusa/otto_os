@@ -17,6 +17,9 @@ pub(in crate::environments) fn apply_runtime_profile_and_module_venv(
     cwd: &str,
     env_map: &mut BTreeMap<String, String>,
 ) {
+    if cfg.runner == IdeRunnerKind::Kotest {
+        env_map.extend(super::runner_kotest::kotest_env(cfg));
+    }
     let spring_csv = csv_list(&cfg.spring_profiles);
     if !spring_csv.is_empty() && !env_map.contains_key("SPRING_PROFILES_ACTIVE") {
         env_map.insert("SPRING_PROFILES_ACTIVE".into(), spring_csv);
@@ -86,7 +89,7 @@ pub(in crate::environments) fn resolve_jvm_build_dir(
     cwd: String,
 ) -> String {
     let (maven, gradle) = match cfg.runner {
-        IdeRunnerKind::JavaJunit => (true, true),
+        IdeRunnerKind::JavaJunit | IdeRunnerKind::Kotest => (true, true),
         IdeRunnerKind::Maven => (true, false),
         IdeRunnerKind::Gradle => (false, true),
         _ => return cwd,
@@ -99,7 +102,7 @@ pub(in crate::environments) fn resolve_jvm_build_dir(
     let Some(module) = module else {
         return cwd;
     };
-    if !has_pom {
+    if !has_pom && cfg.runner != IdeRunnerKind::Kotest {
         cfg.runner = IdeRunnerKind::Gradle;
     }
     module.to_string_lossy().into_owned()

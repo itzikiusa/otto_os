@@ -672,6 +672,7 @@ fn is_allowed_standard_runner_command(runner: IdeRunnerKind, cmd: &str) -> bool 
         IdeRunnerKind::Karma => matches!(cmd, "npx" | "ng" | "karma" | "pnpm" | "yarn"),
         IdeRunnerKind::JavaMain => cmd == "java",
         IdeRunnerKind::JavaJunit | IdeRunnerKind::Maven => matches!(cmd, "mvn" | "./mvnw"),
+        IdeRunnerKind::Kotest => matches!(cmd, "mvn" | "./mvnw" | "gradle" | "./gradlew"),
         IdeRunnerKind::Gradle => matches!(cmd, "gradle" | "./gradlew"),
         IdeRunnerKind::Shell => matches!(cmd, "bash" | "sh" | "bats"),
         IdeRunnerKind::Xcode => matches!(cmd, "xcodebuild" | "swift"),

@@ -401,6 +401,9 @@ pub enum IdeRunnerKind {
     Flutter,
     #[serde(alias = "expo", alias = "rn")]
     ReactNative,
+    /// One Kotest spec, container or test through Gradle or Maven
+    /// ([`IdeQuickRunSpec::test_path`] / [`IdeRunConfig::test_path`]).
+    Kotest,
     /// Debug-only: attach to the Unity Editor that has the project open
     /// (`target_path: "unity://editor"`). Run refuses it.
     UnityAttach,
@@ -426,6 +429,10 @@ pub struct IdeQuickRunSpec {
     pub debug_program: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub debug_test_name: Option<String>,
+    /// Kotest: the bare names from the spec down to the chosen container or test
+    /// (empty: the whole spec). Present only on Kotest items.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub test_path: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -435,6 +442,9 @@ pub struct IdeGutterItem {
     pub label: String,
     pub language: String,
     pub run_spec: IdeQuickRunSpec,
+    /// A one-line note the item's menu shows (why a Kotest spec has no test items).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

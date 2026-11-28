@@ -612,6 +612,10 @@ pub struct IdeRunConfig {
     pub target_path: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub test_filter: Option<String>,
+    /// Kotest: the names from the spec (`test_filter`) down to the container or test to run.
+    /// Carried by gutter runs; a saved configuration does not keep it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub test_path: Vec<String>,
     #[serde(default, alias = "compound_ids", alias = "compoundConfigs")]
     pub compound_configs: Vec<String>,
     #[serde(default)]
@@ -646,6 +650,7 @@ impl Default for IdeRunConfig {
             before_launch: None,
             target_path: None,
             test_filter: None,
+            test_path: Vec::new(),
             compound_configs: Vec::new(),
             auto_detected: false,
             maven_profiles: Vec::new(),

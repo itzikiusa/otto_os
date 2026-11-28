@@ -5,6 +5,7 @@
 use std::collections::HashMap;
 
 use super::kotlin_lex::{lex, Tok, Token};
+use crate::types::{IdeGutterItem, IdeRunnerKind};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct KotestNode {
@@ -52,10 +53,7 @@ fn call_kind(style: Style, name: &str) -> Option<bool> {
     match (style, name) {
         (Fun | Should | Expect, "context")
         | (Describe, "describe" | "context")
-        | (
-            Behavior,
-            "given" | "Given" | "when" | "When" | "and" | "And" | "context" | "Context",
-        )
+        | (Behavior, "given" | "Given" | "when" | "When" | "and" | "And" | "context" | "Context")
         | (Feature, "feature") => Some(true),
         (Fun, "test")
         | (Should, "should")
@@ -75,7 +73,10 @@ enum Frame {
         path: Vec<String>,
     },
     /// A spec's class body (`init { … }`, AnnotationSpec's `@Test fun` methods).
-    ClassBody { style: Style, spec: String },
+    ClassBody {
+        style: Style,
+        spec: String,
+    },
     Other,
 }
 
@@ -116,7 +117,9 @@ fn body_brace(t: &[Token], mut j: usize) -> Option<usize> {
     loop {
         match t.get(j).map(|x| &x.tok) {
             Some(Tok::LBrace) => return Some(j),
-            Some(Tok::Dot) if t.get(j + 1).map(|x| &x.tok) == Some(&Tok::Ident("config".into())) => {
+            Some(Tok::Dot)
+                if t.get(j + 1).map(|x| &x.tok) == Some(&Tok::Ident("config".into())) =>
+            {
                 (t.get(j + 2)?.tok == Tok::LParen).then_some(())?;
                 j = skip_parens(t, j + 2)?;
             }
@@ -255,7 +258,9 @@ pub(crate) fn kotest_tree(src: &str) -> Vec<KotestNode> {
                 }
             }
             Some(Frame::ClassBody { style, spec }) => {
-                if ident(&t, i) == Some("init") && t.get(i + 1).map(|x| &x.tok) == Some(&Tok::LBrace) {
+                if ident(&t, i) == Some("init")
+                    && t.get(i + 1).map(|x| &x.tok) == Some(&Tok::LBrace)
+                {
                     let frame = Frame::Scope {
                         style: *style,
                         spec: spec.clone(),
@@ -300,6 +305,106 @@ pub(crate) fn kotest_tree(src: &str) -> Vec<KotestNode> {
         i += 1;
     }
     out
+}
+
+/// The Kotest version a manifest declares (`io.kotest:kotest-runner-junit5`, `-framework-engine`,
+/// `kotest-bom`, the `io.kotest` Gradle plugin), when it is written out.
+pub(crate) fn kotest_version(manifest: &str, content: &str) -> Option<String> {
+    use crate::deps_inspector::{parse_gradle_version_catalog, parse_pom_dependencies};
+    static RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let is_kotest = |name: &str| {
+        [
+            "kotest-runner-junit5",
+            "kotest-framework-engine",
+            "kotest-bom",
+        ]
+        .iter()
+        .any(|a| name.starts_with(&format!("io.kotest:{a}")))
+    };
+    let items = if manifest.ends_with("pom.xml") {
+        parse_pom_dependencies(std::path::Path::new(manifest), content)
+    } else if manifest.ends_with(".toml") {
+        parse_gradle_version_catalog(content)
+    } else {
+        let re = RE.get_or_init(|| {
+            regex::Regex::new(
+                r#"io\.kotest:kotest-(?:runner-junit5|framework-engine|bom)(?:-jvm)?:(\d[^"')\s]*)|id\s*\(?\s*["']io\.kotest["']\s*\)?\s*version\s*["'](\d[^"']*)"#,
+            )
+            .unwrap()
+        });
+        return re
+            .captures(content)
+            .and_then(|c| c.get(1).or_else(|| c.get(2)))
+            .map(|m| m.as_str().to_string());
+    };
+    items
+        .into_iter()
+        .find(|d| is_kotest(&d.name) && d.current_version.starts_with(|c: char| c.is_ascii_digit()))
+        .map(|d| d.current_version)
+}
+
+/// Kotest 6.1 added selecting nested tests (`--tests 'pkg.Spec.a -- b'`).
+fn selects_nested_tests(version: &str) -> bool {
+    let mut parts = version
+        .split(|c: char| !c.is_ascii_digit())
+        .map(|p| p.parse::<u32>().unwrap_or(0));
+    (parts.next().unwrap_or(0), parts.next().unwrap_or(0)) >= (6, 1)
+}
+
+/// The manifests that may declare a module's Kotest version, nearest first.
+pub(crate) fn kotest_manifests(path: &str) -> Vec<String> {
+    let module = path.rfind("/src/").map_or(path, |i| &path[..i]);
+    let parent = module.rsplit_once('/').map(|(p, _)| p);
+    [Some(module), parent]
+        .into_iter()
+        .flatten()
+        .flat_map(|dir| {
+            [
+                "build.gradle.kts",
+                "build.gradle",
+                "pom.xml",
+                "gradle/libs.versions.toml",
+            ]
+            .map(|f| format!("{dir}/{f}"))
+        })
+        .collect()
+}
+
+/// Keep a Kotest file's container and test items only where they can be selected: the
+/// project's Kotest is 6.1+ (or unknown; the post-run check catches a mismatch), the module
+/// has not shown that it ignores the selection, and (on SSH) the names have no `'`.
+pub(crate) fn gate_kotest_items(
+    items: &mut Vec<IdeGutterItem>,
+    version: Option<&str>,
+    spec_only: bool,
+    ssh: bool,
+) {
+    let note = match version {
+        Some(v) if !selects_nested_tests(v) => Some(format!(
+            "Single-test runs need Kotest 6.1+ (this project uses {v})."
+        )),
+        _ if spec_only => Some(
+            "Kotest ran other tests too here, so this spec runs as a whole until Otto restarts."
+                .to_string(),
+        ),
+        _ => None,
+    };
+    items.retain(|i| {
+        let Some(path) = i
+            .run_spec
+            .test_path
+            .as_ref()
+            .filter(|_| i.run_spec.runner == IdeRunnerKind::Kotest)
+        else {
+            return true;
+        };
+        path.is_empty() || (note.is_none() && !(ssh && path.iter().any(|n| n.contains('\''))))
+    });
+    for i in items.iter_mut() {
+        if i.run_spec.runner == IdeRunnerKind::Kotest {
+            i.note = note.clone();
+        }
+    }
 }
 
 #[cfg(test)]
@@ -427,5 +532,104 @@ abstract class Base : FunSpec({ test("not runnable") { } })
         // A plain string statement inside a StringSpec leaf is not another test.
         let src = "class S : StringSpec({\n  \"a\" { val s = \"b\" { } }\n})\n";
         assert_eq!(paths(src), vec![("a".into(), 2, false)]);
+    }
+
+    #[test]
+    fn manifests_declare_the_kotest_version() {
+        let gradle =
+            r#"dependencies { testImplementation("io.kotest:kotest-runner-junit5:6.2.7") }"#;
+        assert_eq!(
+            kotest_version("/m/build.gradle.kts", gradle).as_deref(),
+            Some("6.2.7")
+        );
+        let bom = r#"testImplementation(platform("io.kotest:kotest-bom:5.9.1"))"#;
+        assert_eq!(
+            kotest_version("/m/build.gradle.kts", bom).as_deref(),
+            Some("5.9.1")
+        );
+        let plugin = r#"plugins { id("io.kotest") version "6.1.0" }"#;
+        assert_eq!(
+            kotest_version("/m/build.gradle.kts", plugin).as_deref(),
+            Some("6.1.0")
+        );
+        let pom = r#"<project><properties><kotest.version>6.2.7</kotest.version></properties>
+<dependencies><dependency>
+<groupId>io.kotest</groupId><artifactId>kotest-runner-junit5-jvm</artifactId><version>${kotest.version}</version>
+</dependency></dependencies></project>"#;
+        assert_eq!(
+            kotest_version("/nowhere/pom.xml", pom).as_deref(),
+            Some("6.2.7")
+        );
+        let toml = "[versions]\nkotest = \"5.9.1\"\n[libraries]\nkotest-runner = { module = \"io.kotest:kotest-runner-junit5\", version.ref = \"kotest\" }\n";
+        assert_eq!(
+            kotest_version("/m/gradle/libs.versions.toml", toml).as_deref(),
+            Some("5.9.1")
+        );
+        assert_eq!(
+            kotest_version("/m/build.gradle.kts", "dependencies { }"),
+            None
+        );
+    }
+
+    fn item(path: Option<Vec<&str>>) -> IdeGutterItem {
+        IdeGutterItem {
+            line: 1,
+            kind: crate::types::IdeGutterKind::Test,
+            label: String::new(),
+            language: "kotlin".into(),
+            note: None,
+            run_spec: crate::types::IdeQuickRunSpec {
+                runner: IdeRunnerKind::Kotest,
+                command: None,
+                args: Vec::new(),
+                cwd: None,
+                target_path: None,
+                test_filter: Some("com.acme.S".into()),
+                debug_program: None,
+                debug_test_name: None,
+                test_path: path.map(|p| p.into_iter().map(String::from).collect()),
+            },
+        }
+    }
+
+    #[test]
+    fn old_kotest_keeps_spec_items_with_the_note() {
+        let mut items = vec![item(Some(vec![])), item(Some(vec!["a", "b"]))];
+        gate_kotest_items(&mut items, Some("5.9.1"), false, false);
+        assert_eq!(items.len(), 1);
+        assert_eq!(
+            items[0].note.as_deref(),
+            Some("Single-test runs need Kotest 6.1+ (this project uses 5.9.1).")
+        );
+        let mut items = vec![item(Some(vec![])), item(Some(vec!["a", "b"]))];
+        gate_kotest_items(&mut items, Some("6.1.0"), false, false);
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].note, None);
+        let mut items = vec![item(Some(vec![])), item(Some(vec!["a"]))];
+        gate_kotest_items(&mut items, None, false, false);
+        assert_eq!(items.len(), 2, "an unknown version keeps the test items");
+    }
+
+    #[test]
+    fn spec_only_modules_and_ssh_apostrophes_drop_test_items() {
+        let mut items = vec![item(Some(vec![])), item(Some(vec!["a"]))];
+        gate_kotest_items(&mut items, Some("6.2.7"), true, false);
+        assert_eq!(items.len(), 1);
+        assert!(items[0].note.is_some());
+        let mut items = vec![item(Some(vec!["it's"])), item(Some(vec!["plain"]))];
+        gate_kotest_items(&mut items, None, false, true);
+        assert_eq!(items.len(), 1);
+        assert_eq!(
+            items[0].run_spec.test_path.as_deref(),
+            Some(&["plain".to_string()][..])
+        );
+    }
+
+    #[test]
+    fn manifests_are_the_module_then_its_parent() {
+        let m = kotest_manifests("/r/app/src/test/kotlin/com/acme/S.kt");
+        assert_eq!(m[0], "/r/app/build.gradle.kts");
+        assert_eq!(m[4], "/r/build.gradle.kts");
+        assert_eq!(m.len(), 8);
     }
 }

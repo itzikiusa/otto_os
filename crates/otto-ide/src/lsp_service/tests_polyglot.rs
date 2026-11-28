@@ -328,13 +328,21 @@ fn kotlin_lsp_gutter_kotest_deps_symbols_and_mixed_jvm_workspace_work() {
             .any(|t| t.kind == IdeGutterKind::Suite && t.label.contains("CalcSpec")),
         "expected Kotest suite gutter target, got: {kotest_targets:?}"
     );
-    // BUG-16: Kotest specs execute at spec-class granularity (no broken JUnit leaf selectors).
-    assert!(
-        kotest_targets
-            .iter()
-            .all(|t| t.kind != IdeGutterKind::Test),
-        "Kotest leaf DSL strings must not emit broken JUnit method gutter items: {kotest_targets:?}"
+    // BUG-16: a Kotest test is addressed by its Kotest path, never as a JUnit method.
+    let leaf = kotest_targets
+        .iter()
+        .find(|t| t.kind == IdeGutterKind::Test)
+        .expect("Kotest test item");
+    assert_eq!(leaf.run_spec.runner, crate::types::IdeRunnerKind::Kotest);
+    assert_eq!(
+        leaf.run_spec.test_filter.as_deref(),
+        Some("com.acme.CalcSpec")
     );
+    assert_eq!(
+        leaf.run_spec.test_path.as_deref(),
+        Some(&["multiplies two ints".to_string()][..])
+    );
+    assert_eq!(leaf.run_spec.debug_test_name, None);
 
     // 4. Gradle Kotlin DSL + Version Catalog (`gradle/libs.versions.toml`) parsing + in-place bump
     let gradle_kts = r#"dependencies {

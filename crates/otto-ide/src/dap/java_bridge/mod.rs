@@ -42,6 +42,9 @@ pub struct JavaJdwpBridgeSpec {
     pub attach_port: Option<u16>,
     pub source_roots: Vec<String>,
     pub source_map: HashMap<String, String>,
+    /// The build that started the JVM this attaches to (Kotest Debug): its output goes to
+    /// the console and it lives as long as the session.
+    pub companion: Option<Arc<BridgeGuard>>,
 }
 
 /// Infer the fully qualified Java or Kotlin JVM class name for `path`.
@@ -150,6 +153,17 @@ pub(crate) async fn spawn_java_jdwp_bridge(
     let guard = BridgeGuard::new();
     let (out_tx, mut out_rx) = mpsc::unbounded_channel::<(String, String)>();
 
+    if let Some(companion) = &spec.companion {
+        if let Some(mut lines) = companion.take_output() {
+            let tx = out_tx.clone();
+            tokio::spawn(async move {
+                while let Some(l) = lines.recv().await {
+                    let _ = tx.send(("stdout".into(), format!("{l}\n")));
+                }
+            });
+        }
+        guard.push_companion(Arc::clone(companion));
+    }
     let remote_port = if let Some(port) = spec.attach_port {
         port
     } else {
@@ -307,6 +321,8 @@ struct JdwpBridgeState {
     config_done: bool,
     initial_resumed: bool,
     is_attach: bool,
+    /// The JVM waits in its VMStart event (`suspend=y`): an attach must resume it too.
+    start_suspended: bool,
     frames: HashMap<i64, CachedFrame>,
     ordered_frames: Vec<Value>,
     var_refs: HashMap<i64, VarExpansion>,
@@ -328,6 +344,7 @@ impl JdwpBridgeState {
             config_done: false,
             initial_resumed: false,
             is_attach,
+            start_suspended: false,
             frames: HashMap::new(),
             ordered_frames: Vec::new(),
             var_refs: HashMap::new(),
@@ -429,7 +446,7 @@ async fn handle_jdwp_composite<W: AsyncWrite + Unpin>(
     st: &mut JdwpBridgeState,
     dap_w: &mut DapWriter<W>,
 ) -> io::Result<bool> {
-    let Ok((_policy, events)) = client.parse_composite(pkt) else {
+    let Ok((policy, events)) = client.parse_composite(pkt) else {
         return Ok(false);
     };
     let mut stop_info: Option<(&'static str, u64, Option<i32>)> = None;
@@ -439,7 +456,8 @@ async fn handle_jdwp_composite<W: AsyncWrite + Unpin>(
         match ev {
             JdwpEvent::VmStart => {
                 st.vm_started = true;
-                if st.config_done && !st.initial_resumed {
+                st.start_suspended |= policy == SUSPEND_ALL;
+                if st.config_done && !st.initial_resumed && (!st.is_attach || st.start_suspended) {
                     st.initial_resumed = true;
                     let _ = client.vm_resume().await;
                 }
@@ -664,7 +682,7 @@ async fn handle_dap_request<W: AsyncWrite + Unpin>(
         }
         "configurationDone" => {
             st.config_done = true;
-            if st.vm_started && !st.initial_resumed && !st.is_attach {
+            if st.vm_started && !st.initial_resumed && (!st.is_attach || st.start_suspended) {
                 st.initial_resumed = true;
                 let _ = client.vm_resume().await;
             }

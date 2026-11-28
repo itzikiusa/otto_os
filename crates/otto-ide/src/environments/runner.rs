@@ -13,6 +13,7 @@ use crate::types::{
     IdeTargetSpec,
 };
 
+use super::runner_cmd::runner_kotest;
 pub(super) use super::runner_cmd::{
     apply_runtime_profile_and_module_venv, build_runner_command, compile_go_run_step,
     compile_java_main_step, has_manual_classpath, is_default_go_command, resolve_jvm_build_dir,
@@ -220,6 +221,7 @@ pub(super) async fn execute_run_task(
     let multi_step = steps.len() > 1;
     let mut last_exit = Some(0);
     let mut last_filter: Option<String> = None;
+    let mut kotest_err: Option<String> = None;
     if let Some(ref nb) = netbridge {
         append_run_line(&handle, nb.summary_banner().await);
     }
@@ -541,14 +543,8 @@ pub(super) async fn execute_run_task(
         if let Some(t) = stderr_task {
             let _ = tokio::time::timeout(Duration::from_millis(250), t).await;
         }
-        if is_local
-            && matches!(wait_res, Some(Ok(_)))
-            && matches!(
-                cfg.runner,
-                IdeRunnerKind::Maven | IdeRunnerKind::Gradle | IdeRunnerKind::JavaJunit
-            )
-        {
-            adopt_junit_xml_results(&handle, &cwd, step_started).await;
+        if is_local && matches!(wait_res, Some(Ok(_))) {
+            kotest_err = adopt_junit_xml_results(&handle, &cfg, &cwd, step_started).await;
         }
 
         match wait_res {
@@ -572,7 +568,7 @@ pub(super) async fn execute_run_task(
                         IdeRunStatus::Failed,
                         Some(code),
                         started.elapsed(),
-                        None,
+                        kotest_err,
                     );
                     evict_finished_runs(&runs);
                     return;
@@ -597,12 +593,13 @@ pub(super) async fn execute_run_task(
         let guard = handle.state.lock().unwrap_or_else(|e| e.into_inner());
         guard.parser.results.is_empty()
     });
-    let (status, err) = match no_match {
-        Some(f) => (
+    let (status, err) = match (kotest_err, no_match) {
+        (Some(e), _) => (IdeRunStatus::Failed, Some(e)),
+        (None, Some(f)) => (
             IdeRunStatus::Failed,
             Some(format!("No tests matched '{f}'")),
         ),
-        None => (IdeRunStatus::Passed, None),
+        (None, None) => (IdeRunStatus::Passed, None),
     };
     end_run(&runs, &handle, status, last_exit, started, err);
 }
@@ -628,8 +625,23 @@ fn is_test_runner(runner: IdeRunnerKind) -> bool {
 }
 
 /// Maven/Gradle print one row per class (or nothing for passing Gradle tests): use the JUnit
-/// XML reports this step wrote, when there are any.
-async fn adopt_junit_xml_results(handle: &ActiveRunHandle, cwd: &str, since: SystemTime) {
+/// XML reports this step wrote, when there are any. A Kotest run then checks that its
+/// selection held ([`runner_kotest::check_kotest_results`]); the error says when it did not.
+async fn adopt_junit_xml_results(
+    handle: &ActiveRunHandle,
+    cfg: &IdeRunConfig,
+    cwd: &str,
+    since: SystemTime,
+) -> Option<String> {
+    if !matches!(
+        cfg.runner,
+        IdeRunnerKind::Maven
+            | IdeRunnerKind::Gradle
+            | IdeRunnerKind::JavaJunit
+            | IdeRunnerKind::Kotest
+    ) {
+        return None;
+    }
     let dir = std::path::PathBuf::from(cwd);
     let collected = tokio::task::spawn_blocking(move || collect_junit_xml_results(&dir, since));
     if let Ok(results) = collected.await {
@@ -638,6 +650,15 @@ async fn adopt_junit_xml_results(handle: &ActiveRunHandle, cwd: &str, since: Sys
             guard.parser.results = results;
         }
     }
+    if cfg.runner != IdeRunnerKind::Kotest {
+        return None;
+    }
+    let src = match cfg.target_path.as_deref() {
+        Some(p) => tokio::fs::read_to_string(p).await.ok(),
+        None => None,
+    };
+    let mut guard = handle.state.lock().unwrap_or_else(|e| e.into_inner());
+    runner_kotest::check_kotest_results(cfg, cwd, src.as_deref(), &mut guard.parser.results)
 }
 
 /// Finish the run and trim the finished-run list.

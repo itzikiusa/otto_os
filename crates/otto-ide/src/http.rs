@@ -582,8 +582,33 @@ async fn detect_gutter<S: IdeCtx>(
                 .content
         }
     };
-    let items =
+    let mut items =
         crate::gutter::detect_gutter_items_with_plugins(&req.path, &content, &ctx.ide().plugins);
+    if items
+        .iter()
+        .any(|i| i.run_spec.runner == crate::types::IdeRunnerKind::Kotest)
+    {
+        let resolved = ctx.ide().targets.resolve(&ctx, &user, &req.target).await?;
+        let mut version = None;
+        for manifest in crate::gutter::kotest::kotest_manifests(&req.path) {
+            if let Ok(f) = ctx.ide().targets.read_file(&resolved, &manifest).await {
+                version = crate::gutter::kotest::kotest_version(&manifest, &f.content);
+                if version.is_some() {
+                    break;
+                }
+            }
+        }
+        let module = req
+            .path
+            .rfind("/src/")
+            .map_or(req.path.as_str(), |i| &req.path[..i]);
+        crate::gutter::kotest::gate_kotest_items(
+            &mut items,
+            version.as_deref(),
+            crate::environments::runner_cmd::runner_kotest::spec_only_module(module),
+            req.target.kind == crate::types::IdeTargetKind::Ssh,
+        );
+    }
     Ok(Json(IdeGutterResp { items }))
 }
 

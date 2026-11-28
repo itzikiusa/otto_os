@@ -18,6 +18,7 @@ pub(crate) mod adapters_env;
 pub(crate) mod adapters_go_py;
 pub(crate) mod adapters_js_tests;
 pub(crate) mod adapters_jvm_js;
+mod adapters_kotest;
 pub(crate) mod adapters_py;
 pub(crate) mod adapters_rust_sh;
 pub(crate) mod adapters_shell;

@@ -211,7 +211,11 @@ impl Lexer {
                 self.code(&mut Vec::new(), true);
                 continue;
             }
-            if c == '$' && self.peek(1).is_some_and(|n| n.is_alphabetic() || n == '_' || n == '`') {
+            if c == '$'
+                && self
+                    .peek(1)
+                    .is_some_and(|n| n.is_alphabetic() || n == '_' || n == '`')
+            {
                 template = true;
             }
             self.bump();

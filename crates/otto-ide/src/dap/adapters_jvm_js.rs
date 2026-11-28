@@ -711,6 +711,9 @@ pub(super) async fn resolve_java_adapter(
     cwd: &str,
     env: BTreeMap<String, String>,
 ) -> Result<ResolvedDapAdapter> {
+    if let Some(path) = &req.launch.test_path {
+        return super::adapters_kotest::resolve_kotest_adapter(req, ctx, cwd, env, path).await;
+    }
     if let Some(dap_port) = env
         .get("OTTO_JAVA_DEBUG_DAP_PORT")
         .and_then(|s| s.parse::<u16>().ok())
@@ -991,6 +994,7 @@ pub(super) async fn resolve_java_adapter(
             attach_port: req.launch.attach_port,
             source_roots,
             source_map,
+            companion: None,
         }),
         initialize_args: json!({
             "adapterID": "java",
