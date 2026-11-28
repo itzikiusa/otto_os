@@ -168,7 +168,7 @@ test.describe('Desktop IDE — tool windows', () => {
     await page.keyboard.press('Meta+,');
     const modal = page.getByTestId('ide-settings-modal');
     await expect(modal).toBeVisible({ timeout: 10_000 });
-    await expect(page.getByTestId('ide-settings-nav-editor.font')).toHaveClass(/is-active/);
+    await expect(page.getByTestId('ide-settings-nav-editor.font')).toHaveClass(/selected/);
     const search = page.locator('.st-search-box').first();
     const searchBox = await search.boundingBox();
     const leftBox = await page.locator('.st-left').first().boundingBox();
@@ -178,7 +178,7 @@ test.describe('Desktop IDE — tool windows', () => {
     await page.keyboard.press('Escape');
     await expect(modal).toHaveCount(0);
     await page.keyboard.press('Meta+,');
-    await expect(page.getByTestId('ide-settings-nav-vcs.git')).toHaveClass(/is-active/, { timeout: 10_000 });
+    await expect(page.getByTestId('ide-settings-nav-vcs.git')).toHaveClass(/selected/, { timeout: 10_000 });
     await page.keyboard.press('Escape');
 
     // I1-16: the agent's empty state names the file and offers prompts that fill the draft.
