@@ -553,6 +553,49 @@ export interface IdeNotebookVariable {
   preview: string;
 }
 
+/** `POST /ide/notebooks/kernels`. */
+export interface IdeNotebookKernelsReq {
+  target: IdeTargetSpec;
+  notebook_path?: string | null;
+}
+
+/** `POST /ide/notebooks/execute`. */
+export interface IdeNotebookExecuteReq {
+  target: IdeTargetSpec;
+  notebook_path: string;
+  code: string;
+  /** A kernel `id` from `/ide/notebooks/kernels` (preferred over `interpreter`). */
+  kernel_id?: string | null;
+  interpreter?: string | null;
+  /** Jupyter: no limit unless given; the built-in kernel: 120 s. */
+  timeout_secs?: number | null;
+  /** Tags this run's events on `/ide/notebooks/stream`. */
+  run_id?: string | null;
+  /** The person accepted starting this workspace kernelspec. */
+  trust_kernel?: boolean;
+}
+
+/** `POST /ide/notebooks/{interrupt,restart,variables,shutdown}` (restart reads the kernel fields). */
+export interface IdeNotebookSessionReq {
+  target: IdeTargetSpec;
+  notebook_path: string;
+  kernel_id?: string | null;
+  interpreter?: string | null;
+  trust_kernel?: boolean;
+}
+
+/** `POST /ide/notebooks/input`: answers the pending `input()` / `getpass()`. */
+export interface IdeNotebookInputReq {
+  target: IdeTargetSpec;
+  notebook_path: string;
+  value: string;
+}
+
+export interface IdeNotebookOkResp {
+  ok: boolean;
+  message?: string | null;
+}
+
 export interface IdeNotebookKernelsResp {
   kernels: IdeNotebookKernelInfo[];
   accelerators: IdeMlAcceleratorInfo[];
