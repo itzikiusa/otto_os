@@ -107,14 +107,16 @@ test.describe('IDE tool windows on phones and tablets', () => {
       await page.getByTestId('ide-dock-tab-git').click();
       const gitView = page.getByTestId('ide-git-changes-view');
       await expect(gitView).toContainText('roadmap.md', { timeout: 15_000 });
-      await gitView.locator('.gc-file-btn', { hasText: 'roadmap.md' }).first().click();
-      await expect(gitView.locator('.gc-diff-scroll')).toContainText('Changed on a phone', { timeout: 15_000 });
       if (p === 'iphone-portrait') {
-        await expect(gitView.getByRole('button', { name: /Side.by.side/i })).toHaveCount(0);
-        // No sideways scrollbar under the rows; a long name ellipsises and its Stage button stays on screen.
-        expect(await gitView.locator('.gc-lists').evaluate((el) => getComputedStyle(el).overflowX), `${p}: change list`).toBe('hidden');
+        // The Changes list is the tool (a phone pushes): no sideways scroll under the rows; a
+        // long name ellipsises and its Stage button stays on screen.
+        const list = gitView.locator('aside[aria-label="Changes"] .side-pane-body');
+        expect(await list.evaluate((el) => el.scrollWidth <= el.clientWidth + 1), `${p}: change list`).toBe(true);
         await expectFullyInViewport(page, gitView.getByRole('button', { name: /^Stage .*a-very-long-untracked/ }), `${p}: Stage on a long row`);
       }
+      await gitView.locator('[data-side-row]', { hasText: 'roadmap.md' }).first().click();
+      await expect(gitView.locator('.gc-diff-scroll')).toContainText('Changed on a phone', { timeout: 15_000 });
+      if (p === 'iphone-portrait') await expect(gitView.getByRole('button', { name: /Side.by.side/i })).toHaveCount(0);
       await expectNoHorizontalOverflow(page);
       await shot(page, `${p}-tools-git-${scheme}.png`);
     }

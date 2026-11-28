@@ -118,14 +118,14 @@ test.describe('Desktop IDE — tool windows', () => {
     expect(execFileSync('git', ['status', '--porcelain'], { cwd: seed.workspaceRoot, encoding: 'utf8' }).trim()).toBe('');
   });
 
-  test('Git diff has one layout control; at 1280 the agent is a Detail pane beside explorer and editor', async ({ page }) => {
+  test('Git diff has one layout control; at 1280 the agent is a sheet, the explorer stays', async ({ page }) => {
     test.setTimeout(90_000);
     appendFileSync(join(seed.workspaceRoot, 'notes', 'roadmap.md'), '\nA second change.\n');
     await bootPolyglotIde(page, seed, 'dark');
     await page.getByTestId('ide-dock-tab-git').click();
     const gitView = page.getByTestId('ide-git-changes-view');
     await expect(gitView).toContainText('roadmap.md', { timeout: 15_000 });
-    await gitView.locator('.gc-file-btn', { hasText: 'roadmap.md' }).first().click();
+    await gitView.locator('[data-side-row]', { hasText: 'roadmap.md' }).first().click();
     await expect(gitView.locator('.gc-diff-scroll')).toContainText('A second change', { timeout: 15_000 });
     await expect(gitView.getByRole('button', { name: /Side-by-side/ })).toHaveCount(0);
     await expect(gitView.getByRole('group', { name: 'Diff layout' })).toHaveCount(1);
@@ -142,13 +142,13 @@ test.describe('Desktop IDE — tool windows', () => {
     await expect(page.getByTestId('ide-project-tree')).toBeVisible();
     await page.getByTestId('ide-toggle-agent').click();
     await expect(page.getByTestId('ide-agent-panel')).toBeVisible({ timeout: 15_000 });
-    // The shared side rules (design.md §2): the explorer stays (the list pane clamps), the
-    // agent is inline while the editor keeps 480 px, else a sheet over it.
+    // The shared side rules (design.md §2) at the IDE's width: the explorer stays (the list
+    // pane clamps), the agent is inline while the editor keeps 640 px (IDE_EDITOR_MIN), else
+    // a sheet over it — at 1280 beside the Navigator and the explorer, a sheet.
     await expect(page.getByTestId('ide-project-tree')).toBeVisible();
-    const editorW = (await page.locator('.ide-editor-area').first().boundingBox())?.width ?? 0;
-    expect(editorW).toBeGreaterThanOrEqual(480);
+    await expect(page.getByTestId('ide-agent')).toHaveClass(/sheet/);
     await shot(page, '04-agent-1280-dark.png');
-    await page.getByTestId('ide-toggle-agent').click();
+    await page.keyboard.press('Escape');
     await expect(page.getByTestId('ide-agent-panel')).toBeHidden();
     await expect(page.getByTestId('ide-project-tree')).toBeVisible();
   });
