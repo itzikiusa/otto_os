@@ -101,46 +101,24 @@ test('add-cluster form fits the viewport and is usable', async ({ page }) => {
   await expect(sheet).toBeHidden();
 });
 
-// Phone-only: the two sections (cluster list + cluster content) are independent
-// collapsible regions. This behavior is gated behind the ≤640px layout, so it
-// only runs on phone-width projects.
-test('phone: sections collapse independently and scroll', async ({ page }) => {
+// Phone-only: the cluster list is the page; a cluster is pushed over it with
+// "‹ Clusters" in the page header, and Back returns with the cluster marked.
+test('phone: the cluster list pushes the cluster and Back returns', async ({ page }) => {
   await page.goto('/#/brokers');
   await expect(page.locator('.brokers-page')).toBeVisible({ timeout: 30_000 });
-  // Collapsible sections are gated behind the ≤640px layout — skip on
-  // tablet/landscape widths where the desktop two-column layout applies.
   const w = await page.evaluate(() => window.innerWidth);
-  test.skip(w > 640, `collapsible sections are a phone-width (≤640px) layout (vw=${w})`);
+  test.skip(w > 640, `push navigation is the phone layout (vw=${w})`);
 
-  const row = page.locator('.cluster .cn', { hasText: 'mobile-test-kafka' }).first();
+  const row = page.locator('.cluster', { hasText: 'mobile-test-kafka' }).first().locator('[data-side-row]');
   await expect(row).toBeVisible({ timeout: 15_000 });
-  await row.click();
+  await row.tap();
   await expect(page.locator('.cluster-head .ph-title')).toBeVisible({ timeout: 15_000 });
-
-  // Cluster-list region must be its own bounded, scrollable section.
-  const listScroll = await page.evaluate(() => {
-    const el = document.querySelector('.cluster-list') as HTMLElement | null;
-    if (!el) return null;
-    const c = getComputedStyle(el);
-    return { overflowY: c.overflowY, maxHeight: c.maxHeight };
-  });
-  expect(listScroll).not.toBeNull();
-  expect(['auto', 'scroll']).toContain(listScroll!.overflowY);
-
-  // Selecting auto-collapses the list (caret toggle). Re-expand it via the
-  // tappable section header, then collapse the content section.
-  const clustersToggle = page.locator('.sec-toggle').first();
-  await expect(clustersToggle).toBeVisible();
-  await clustersToggle.click();
-  await expect(page.locator('.cluster-list')).toBeVisible();
-
-  const contentToggle = page.locator('.content-toggle').first();
-  await expect(contentToggle).toBeVisible();
-  // Collapse the content → its tab bar/body hide, header stays.
-  await contentToggle.click();
-  await expect(page.locator('.tab-body')).toBeHidden();
-  await expect(page.locator('.cluster-head .ph-title')).toBeVisible();
-  // Expand again → tabs come back.
-  await contentToggle.click();
   await expect(page.locator('.tabs')).toBeVisible();
+  await expect(row).toBeHidden();
+  await assertFitsWidth(page);
+
+  await page.getByRole('button', { name: 'Back to Clusters', exact: true }).tap();
+  await expect(row).toBeVisible();
+  await expect(row).toHaveAttribute('aria-selected', 'true');
+  await expect(page.locator('.tabs')).toBeHidden();
 });

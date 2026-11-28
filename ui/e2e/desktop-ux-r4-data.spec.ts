@@ -155,6 +155,7 @@ test('Kafka consume validates selectors before reading and produce preserves fai
   await rows.nth(1).locator('.pos-bar-wrap').click();await expect(page.locator('.msg-detail')).toContainText('Second synthetic customer');
   await rows.nth(0).locator('td').first().click({button:'right'});
   await expect(page.getByRole('button',{name:'Inspect partition 0 offset 1',exact:true})).toHaveAttribute('aria-pressed','true');
+  await page.keyboard.press('Escape'); // close the row menu before dragging across the key
   if (!isMobile) {
     const key=await rows.nth(0).locator('.key').boundingBox();expect(key).not.toBeNull();
     await page.mouse.move(key!.x+3,key!.y+key!.height/2);await page.mouse.down();
@@ -247,6 +248,8 @@ test('Kafka schema tablet gives versions usable width and supports keyboard navi
   await page.route('**/schema-registry/subjects/*/versions/*',r=>{const v=r.request().url().split('/').pop()!;return r.fulfill({json:{subject:'customer-reporting-events-value',version:Number(v),id:Number(v),schema_type:'AVRO',schema:bodies[v]}});});
   let checked:any;await page.route('**/schema-registry/subjects/*/compatibility',r=>{checked=r.request().postDataJSON();return r.fulfill({json:{compatible:true,messages:[]}});});
   await broker(page);await page.locator('.tabs button',{hasText:'Schema Registry'}).click();
+  // A tablet beside the cluster list has no room for both lists: the subjects are the page, a subject is pushed.
+  await page.locator('.srow',{hasText:'customer-reporting-events-value'}).click();await expect(page.getByRole('button',{name:'Back to Subjects',exact:true})).toBeVisible();
   await expect(page.locator('.schema .view .payload')).toContainText('customer_identifier');
   mkdirSync(shots,{recursive:true});await page.screenshot({animations:'disabled',path:`${shots}/schema-tablet.png`});
   const width=await page.locator('.schema .view').evaluate(el=>el.getBoundingClientRect().width);expect(width).toBeGreaterThan(300);
