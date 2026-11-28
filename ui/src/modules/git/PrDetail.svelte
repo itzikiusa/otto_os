@@ -26,6 +26,7 @@
   import { rel } from '../../lib/stores/now.svelte';
   import { pollWhileVisible } from '../../lib/poll';
   import DiffViewer from './DiffViewer.svelte';
+  import { viewport } from '../../lib/stores/viewport.svelte';
   import { prCommitViewedKey, prFilesBridge, prFilesKey } from './prFilesBridge.svelte';
   import PrReviewButtons from './PrReviewButtons.svelte';
   import { myGitHandles } from './myGitHandles.svelte';
@@ -102,7 +103,7 @@
     compactInfoOpen = false;
     try { localStorage.setItem(tabKey(), t); } catch { /* not persisted */ }
     // A short screen (a phone in landscape) is filled by the PR header: bring the code into view.
-    if (t === 'code' && matchMedia('(max-height: 500px)').matches) requestAnimationFrame(() => document.querySelector('.prd-code:not([hidden])')?.scrollIntoView({ block: 'start' }));
+    if (t === 'code' && viewport.isShort) requestAnimationFrame(() => document.querySelector('.prd-code:not([hidden])')?.scrollIntoView({ block: 'start' }));
   }
   $effect(() => prFilesBridge.onReveal(prFilesKey(repoId, number), () => selectTab('code'))); // the workspace Files panel
   $effect(() => onPrWhitespaceChange(() => void loadDiff(repoId, number))); // the Code tab's "Hide whitespace"
