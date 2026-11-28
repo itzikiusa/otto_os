@@ -438,15 +438,13 @@
       <Icon name="chevronDown" size={12} />
     </button>
   {/snippet}
-  {#snippet badge()}
-    <K8sViewSwitch clusterId={cluster.id} view="monitor" />
-  {/snippet}
   {#snippet actions()}
     {#if !viewport.isPhone && (activeTab === 'workloads' || activeTab === 'events')}
       {@render windowPicker()}
     {/if}
   {/snippet}
   {#snippet tabs()}
+    <K8sViewSwitch clusterId={cluster.id} view="monitor" />
     <nav class="tabs" aria-label="Monitor sections">
       {#each TABS as t (t.id)}
         <button class="tab" class:active={activeTab === t.id} onclick={() => goTab(t.id)} aria-current={activeTab === t.id ? 'page' : undefined} data-testid="k8s-monitor-tab-{t.id}">{t.label}</button>

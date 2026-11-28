@@ -247,5 +247,5 @@ test('MCP Control Plane page renders and lists the seeded server', async ({ page
   // The bare module route lands on what waits on you (the Overview).
   await page.goto('/#/mcp');
   await expect(page.getByTestId('mcp-home')).toBeVisible({ timeout: 20_000 });
-  await expect(page.locator('.tabs button[data-testid="mcp-nav-home"]')).toHaveAttribute('aria-selected', 'true');
+  await expect(page.getByTestId('mcp-nav-home')).toHaveAttribute('aria-selected', 'true');
 });

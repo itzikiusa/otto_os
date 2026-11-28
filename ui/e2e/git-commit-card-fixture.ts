@@ -66,7 +66,7 @@ export function remoteSubject(repo: CardRepo): string {
 /** A dirty repository opens on History with its WIP row selected: the commit
  *  card over every change, included, the message drafted. */
 export async function expectWipFirst(page: Page): Promise<void> {
-  await expect(page.locator('.rv-tab[aria-selected="true"]')).toHaveText('History', { timeout: 15_000 });
+  await expect(page.locator('.rv-tabs [role="tab"][aria-selected="true"]')).toHaveText('History', { timeout: 15_000 });
   const wip = page.locator('.wip-row');
   await expect(wip).toHaveAttribute('aria-pressed', 'true', { timeout: 15_000 });
   const card = page.getByTestId('commit-card');

@@ -4,8 +4,8 @@
   import { toastError } from '../../lib/toastError';
   // The everyday git verbs — Fetch · Pull · Push · Stash · Pop — always one
   // visible click away (the owner's rule: frequent actions never hide in ⋯).
-  //   header: the Git page's header row — the repo's state in words, the view
-  //           switch (children), then the five verbs. A tight row turns labels
+  //   header: the Git page's header row — the repo's state in words, then the
+  //           five verbs. A tight row turns labels
   //           into icons (Stash, Pop, Fetch first; Pull and Push last); it
   //           never wraps or moves a verb into ⋯. ⋯ (menuItems) keeps the rare
   //           ones. On a phone the verbs are the 'row' under the header.
@@ -52,9 +52,8 @@
     /** sync: false while the card beside it already offers Push (its primary). */
     push?: boolean;
     /** Header: rendered between the state words and the verbs (the view switch). */
-    children?: import('svelte').Snippet<[views: 'words' | 'icons' | 'menu']>;
   }
-  let { repoId, status, onstatus, onrefresh, variant = 'row', accent = false, tabsMin = 0.5, push = true, onbrowsestashes, children }: Props = $props();
+  let { repoId, status, onstatus, onrefresh, variant = 'row', accent = false, tabsMin = 0.5, push = true, onbrowsestashes }: Props = $props();
 
   let busy = $state('');
   const header = $derived(variant === 'header');
@@ -327,12 +326,11 @@
 
   // ── Header fit: once the repo tabs are at their floor, the row gives way in
   // this order before anything is clipped: the state words (they repeat the
-  // ↑/↓ counts) and "Auto-fetch paused" (⋯ has the toggle), then the view
-  // switch turns to icons, then each verb's label (the icon stays, the word
-  // is its name and title), then the views become one menu button.
+  // ↑/↓ counts) and "Auto-fetch paused" (⋯ has the toggle), then each verb's
+  // label (the icon stays, the word is its name and title).
   // Measured against the header's actions wrap on
   // every resize and whenever a label or count changes.
-  const SQUEEZE = ['state', 'views', 'stash', 'pop', 'fetch', 'pull', 'push', 'viewmenu'];
+  const SQUEEZE = ['state', 'stash', 'pop', 'fetch', 'pull', 'push'];
   let squeeze = $state(0);
   const iconOnly = (v: string): boolean => SQUEEZE.indexOf(v) !== -1 && SQUEEZE.indexOf(v) < squeeze;
   let fetchEl = $state<HTMLButtonElement>();
@@ -504,8 +502,8 @@
 {/if}
 
 {#if header}
-  <!-- The repo's state in words (its tab names the repo and branch), the view
-       switch, then the verbs; the rare ones are in the header's ⋯ (menuItems). -->
+  <!-- The repo's state in words (its tab names the repo and branch), then the
+       verbs; the rare ones are in the header's ⋯ (menuItems). -->
   <span class="git-state" class:squeezed={iconOnly('state')} data-keep title="{status.branch}{status.upstream ? ` · tracks ${status.upstream}` : ''}" data-testid="git-state">
     <span class="git-state-words">{words}</span>
   </span>
@@ -514,7 +512,6 @@
     <button class="btn small ghost git-autofetch-paused" class:squeezed={iconOnly('state')} data-keep data-testid="git-autofetch-paused" onclick={() => git.setAutoFetch(true)}
       title="Auto-fetch is paused — a repo is still fetched once when you open it. Click to resume.">Auto-fetch paused</button>
   {/if}
-  {@render children?.(iconOnly('viewmenu') ? 'menu' : iconOnly('views') ? 'icons' : 'words')}
   {#if showVerbs}{@render verbs()}{/if}
 {:else}
   <div class="verbs" class:phone-row={variant === 'row'} class:sync={variant === 'sync'} role="group" aria-label="Git" data-testid={variant === 'row' ? 'git-verbs-row' : 'git-verbs-sync'}>
@@ -560,13 +557,6 @@
   :global(.ph-actions) .tbtn {
     padding-inline: 8px;
     gap: 4px;
-  }
-  /* The last fit step (the views one menu button): the verbs pack tighter. */
-  :global(.ph-actions:has(.git-views-menu)) .tbtn.icon-only {
-    padding-inline: 4px;
-  }
-  :global(.ph-actions:has(.git-views-menu)) .tbtn.caret {
-    padding-inline: 2px;
   }
   .tbtn:hover:not(:disabled) {
     color: var(--text);

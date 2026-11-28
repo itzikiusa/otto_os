@@ -1,6 +1,6 @@
 <script lang="ts">
   import { untrack } from 'svelte';
-  import Badge from '../../lib/components/Badge.svelte';
+  import Tabs, { type TabItem } from '../../lib/components/Tabs.svelte';
   import { NO_WORKSPACE } from '../../lib/labels';
   import { plural } from '../../lib/plural';
   // MCP Control Plane. It opens on what needs a person (McpHome: waiting
@@ -11,7 +11,6 @@
   // created, decided, consumed, expiry sweep — so no poll runs while the event
   // socket is up; the fallback poll is visible-only and runs only while it is down.
   import { resourceAccess } from '../../lib/stores/resource-access.svelte';
-  import { onTabKey } from '../../lib/tabKeys';
   import PageHeader from '../../lib/components/PageHeader.svelte';
   import PageBody from '../../lib/components/PageBody.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
@@ -171,6 +170,15 @@
     { id: 'activity', label: 'Activity' },
   ];
 
+  const sectionTabs = $derived<TabItem<Section>[]>(
+    SECTIONS.map((s) => ({
+      ...s,
+      testid: `mcp-nav-${s.id}`,
+      count: s.id === 'servers' && wsId && !loading && !loadError ? servers.length : s.id === 'home' && pending > 0 ? pending : undefined,
+      title: s.id === 'home' && pending > 0 ? `${plural(pending, 'approval')} waiting for you` : undefined,
+    })),
+  );
+
   // ⌘K: the page's verbs.
   $effect(() =>
     registry.register('mcp', [
@@ -185,28 +193,13 @@
 </script>
 
 <div class="mcp-page">
-  <PageHeader title="MCP Control Plane">
+  <PageHeader title="MCP Control Plane" tabsPlacement="below">
     {#snippet badge()}
       {#if ws.current}<span class="wsname" title="Workspace: {ws.current.name}">{ws.current.name}</span>{/if}
     {/snippet}
     {#snippet tabs()}
-      <!-- A route-backed tablist (←/→/Home/End move between sections). -->
-      <div class="segmented tabs" role="tablist" aria-label="MCP sections" tabindex="-1" onkeydown={onTabKey}>
-        {#each SECTIONS as s (s.id)}
-          <button
-            class:active={section === s.id}
-            role="tab"
-            aria-selected={section === s.id}
-            tabindex={section === s.id ? 0 : -1}
-            data-testid="mcp-nav-{s.id}"
-            onclick={() => go(s.id)}
-          >
-            {s.label}
-            {#if s.id === 'servers' && wsId && !loading && !loadError}<span class="count">{servers.length}</span>{/if}
-            {#if s.id === 'home' && pending > 0}<Badge tone="warn" testid="mcp-pending-badge" title="{plural(pending, 'approval')} waiting for you" label={String(pending)} />{/if}
-          </button>
-        {/each}
-      </div>
+      <!-- The page's sections: the shared underline tabs, one row under the header (design.md §7.14). -->
+      <Tabs label="MCP sections" tabs={sectionTabs} value={section} onchange={(id) => go(id)} />
     {/snippet}
   </PageHeader>
 
@@ -271,31 +264,9 @@
     text-overflow: ellipsis;
     white-space: nowrap;
   }
-  /* Section switch: the shared segmented control in the page header. */
-  .tabs {
-    flex-wrap: nowrap;
-    flex: none;
-  }
-  .tabs button {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    white-space: nowrap;
-    flex: none;
-  }
-  .count {
-    color: var(--text-dim);
-    font-variant-numeric: tabular-nums;
-  }
   .activity {
     display: flex;
     flex-direction: column;
     gap: 18px;
-  }
-  @media (max-width: 640px) {
-    .tabs button {
-      height: 44px;
-      font-size: var(--fs-m);
-    }
   }
 </style>

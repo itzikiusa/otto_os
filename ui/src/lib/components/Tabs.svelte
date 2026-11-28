@@ -281,6 +281,12 @@
     padding: 4px 8px;
     font-size: var(--fs-xs);
   }
+  /* Touch: a page's (default-size) tabs are finger-sized. */
+  @media (pointer: coarse) {
+    .otabs:not(.small) .otab {
+      min-block-size: 44px;
+    }
+  }
   .otab:hover:not(:disabled) {
     color: var(--text);
   }

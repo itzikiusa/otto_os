@@ -68,23 +68,23 @@ test('dirty repo: History on the WIP row → Commit and push → Create pull req
   // Someone else opens the PR (an agent, the forge) — no reload: back on
   // History the card reads it again and offers it (it used to keep "Create").
   open = [{ number: 42, title: 'Ship the commit card', state: 'open', source_branch: repo.branch, target_branch: 'main', url: 'https://github.com/acme/x/pull/42' }];
-  await page.locator('.rv-tab', { hasText: 'Pull requests' }).click();
-  await page.locator('.rv-tab', { hasText: 'History' }).click();
+  await page.locator('.rv-tabs [role="tab"]', { hasText: 'Pull requests' }).click();
+  await page.locator('.rv-tabs [role="tab"]', { hasText: 'History' }).click();
   await expect(next).toHaveAttribute('data-kind', 'pr', { timeout: 15_000 });
   // Merged meanwhile: no open PR any more, the card follows.
   open = [];
-  await page.locator('.rv-tab', { hasText: 'Pull requests' }).click();
-  await page.locator('.rv-tab', { hasText: 'History' }).click();
+  await page.locator('.rv-tabs [role="tab"]', { hasText: 'Pull requests' }).click();
+  await page.locator('.rv-tabs [role="tab"]', { hasText: 'History' }).click();
   await expect(next).toHaveAttribute('data-kind', 'create-pr', { timeout: 15_000 });
   // With a PR open for the branch the primary opens it (Pull requests view).
   // A reload lands on History's checked-out commit with that step.
   open = [{ number: 42, title: 'Ship the commit card', state: 'open', source_branch: repo.branch, target_branch: 'main', url: 'https://github.com/acme/x/pull/42' }];
   await page.reload();
-  await expect(page.locator('.rv-tab[aria-selected="true"]')).toContainText('History', { timeout: 15_000 });
+  await expect(page.locator('.rv-tabs [role="tab"][aria-selected="true"]')).toContainText('History', { timeout: 15_000 });
   await expect(next).toHaveAttribute('data-kind', 'pr', { timeout: 15_000 });
   await expect(next).toHaveText(/Open pull request/);
   await next.click();
-  await expect(page.locator('.rv-tab[aria-selected="true"]')).toContainText('Pull requests');
+  await expect(page.locator('.rv-tabs [role="tab"][aria-selected="true"]')).toContainText('Pull requests');
 });
 
 // A clean default branch has no pull-request step: History must not mount

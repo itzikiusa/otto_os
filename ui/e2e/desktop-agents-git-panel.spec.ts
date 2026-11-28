@@ -111,7 +111,7 @@ test('a dirty session folder: the Git tab is Changes + the commit card; Commit a
   expect(mb.x + mb.width).toBeLessThanOrEqual(cb.x + cb.width);
   await expect(page.locator('.wip-panel .wp-head')).toHaveCount(0);
   // The whole Git page is gone from the panel: no graph / PR tab set.
-  await expect(page.locator('.rv-tab')).toHaveCount(0);
+  await expect(page.locator('.rv-tabs [role="tab"]')).toHaveCount(0);
   if (SHOTS) for (const s of ['light', 'dark'] as const) {
     await page.emulateMedia({ colorScheme: s });
     await expect(page.locator('html')).toHaveAttribute('data-scheme', s);

@@ -374,7 +374,7 @@
 </script>
 
 <div class="wsp" class:prod={cluster.environment === 'prod'} data-testid="k8s-workspace" bind:this={wspEl}>
-  <PageHeader title={cluster.name} class="k8s-topbar" more={viewport.navDrawer ? () => [{ label: 'All clusters', icon: 'chevronLeft', action: () => router.go('kubernetes') }] : undefined}>
+  <PageHeader title={cluster.name} class="k8s-topbar" tabsPlacement="below" more={viewport.navDrawer ? () => [{ label: 'All clusters', icon: 'chevronLeft', action: () => router.go('kubernetes') }] : undefined}>
   {#snippet leading()}
     <!-- A phone's header already holds the list's ‹ Back: "All clusters" is under ⋯ there. -->
     {#if !viewport.navDrawer}<button class="icon-btn" onclick={() => router.go('kubernetes')} title="All clusters" aria-label="Back to clusters"><Icon name="chevronLeft" size={14} /></button>{/if}

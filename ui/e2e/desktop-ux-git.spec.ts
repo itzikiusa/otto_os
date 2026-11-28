@@ -42,7 +42,7 @@ test.beforeEach(async ({ page }) => {
 async function openRepo(page: Page, tab = 'graph') {
   await page.goto(`/#/git/${repoId}/${tab}`);
   // A tight header turns the views into one menu button (R2-001).
-  await expect(page.locator('.rv-tabs, .git-views-menu').first()).toBeVisible();
+  await expect(page.locator('.rv-tabs').first()).toBeVisible();
 }
 /** Show the HEAD commit (secondSha): a desktop History lands on it; a
  *  tablet (its Detail pane a sheet) needs the tap, and a phone first pushes

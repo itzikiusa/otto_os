@@ -261,14 +261,14 @@ test('graph: Branches is a list pane — a phone pushes the graph, the detail is
 test('changes/history deep links land on their views', async ({ page }) => {
   await page.goto(`/#/git/${repoId}/changes`);
   await expect(page.locator('.gitpage')).toBeVisible({ timeout: 30_000 });
-  await expect(page.locator('.rv-tabs .rv-tab', { hasText: 'History' })).toHaveAttribute('aria-selected', 'true', { timeout: 25_000 });
-  await expect(page.locator('.rv-tabs .rv-tab', { hasText: 'Changes' })).toHaveCount(0);
+  await expect(page.locator('.rv-tabs [role="tab"]', { hasText: 'History' })).toHaveAttribute('aria-selected', 'true', { timeout: 25_000 });
+  await expect(page.locator('.rv-tabs [role="tab"]', { hasText: 'Changes' })).toHaveCount(0);
   // A clean tree: the commit list (on a phone, behind its Branches list), nothing selected.
   await showGraph(page);
   await expectFitsWidth(page);
   await page.goto(`/#/git/${repoId}/history`);
   await showGraph(page);
-  await expect(page.locator('.rv-tabs .rv-tab', { hasText: 'History' })).toHaveAttribute('aria-selected', 'true');
+  await expect(page.locator('.rv-tabs [role="tab"]', { hasText: 'History' })).toHaveAttribute('aria-selected', 'true');
   await expectFitsWidth(page);
 });
 
@@ -434,7 +434,7 @@ test('shell: repo tab strip + new-tab + sub-route nav + toolbar fit', async ({ p
   // a page-level view) renders with all views and never overflows the
   // document (it scrolls within its own strip).
   await expect(page.locator('.rv-tabs')).toBeVisible({ timeout: 15_000 });
-  await expect(page.locator('.rv-tabs .rv-tab')).toHaveText(['History', 'Pull requests', 'Review']);
+  await expect(page.locator('.rv-tabs [role="tab"]')).toHaveText(['History', 'Pull requests', 'Review']);
   // The git verbs (Fetch/Pull/Push/Stash/Pop): a row of their own on a phone,
   // the page header's actions on a tablet.
   await expect(page.getByTestId('git-verbs-row').or(page.locator('.git-header .ph-actions .tbtn')).first()).toBeVisible();
@@ -446,7 +446,7 @@ test('shell: tapping a sub-route tab navigates without overflow', async ({ page 
   await expect(page.locator('.rv-tabs')).toBeVisible({ timeout: 30_000 });
   // Tap the Review view tab → the local-review panel mounts. The switcher may
   // scroll within its own strip, so scroll the tab into view before tapping.
-  const tab = page.locator('.rv-tabs .rv-tab', { hasText: 'Review' });
+  const tab = page.locator('.rv-tabs [role="tab"]', { hasText: 'Review' });
   await tab.scrollIntoViewIfNeeded();
   await tab.click();
   await expect(page.locator('.lrp')).toBeVisible({ timeout: 20_000 });
@@ -459,7 +459,8 @@ test('shell: many open repo tabs scroll instead of overflowing the page', async 
   // Wait for EACH hop's tab to register before the next hop: `.gitpage` is
   // already visible after the first goto, so waiting on it was a no-op and a
   // fast second hash hop raced the tab registration (S12-304, git-mobile:331).
-  const ids = [repoId, dirtyRepoId, conflictRepoId];
+  // The clean repo last: a dirty one opens its WIP sheet over the header on a phone.
+  const ids = [dirtyRepoId, conflictRepoId, repoId];
   const phone = page.viewportSize()!.width <= 640;
   const openCount = (): Promise<number> =>
     page.evaluate(() => (JSON.parse(localStorage.getItem('otto_git_open_tabs') ?? '{}').openRepoIds ?? []).length);
@@ -470,8 +471,10 @@ test('shell: many open repo tabs scroll instead of overflowing the page', async 
     else await expect(page.locator('.git-tab')).toHaveCount(i + 1, { timeout: 15_000 });
   }
   if (phone) {
-    // The title's switcher lists every open repo (one header row, no strip).
-    await page.getByTestId('git-phone-repo').click();
+    // ⋯ › Repository lists every open repo (one header row, no strip; the
+    // graph is pushed, so the switcher is under ⋯ — design.md §7.11).
+    await page.locator('.gitpage > [data-testid="page-header"]').getByRole('button', { name: 'More actions' }).click();
+    await page.locator('.ctx-menu').getByText('Repository', { exact: true }).click();
     await expect(page.locator('.ctx-menu').getByRole('menuitem').filter({ hasText: /e2e|repo/ }).first()).toBeVisible();
     await page.keyboard.press('Escape');
   } else {
