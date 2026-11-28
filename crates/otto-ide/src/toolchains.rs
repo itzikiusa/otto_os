@@ -13,6 +13,8 @@ pub(crate) mod installer_remote;
 pub(crate) mod installer_tools;
 mod jobs;
 mod local_registry;
+mod llvm_install;
+pub(crate) mod llvm_manifest;
 pub(crate) mod remote_probe;
 
 use self::detected::scan_detected_sdks;
@@ -434,6 +436,15 @@ impl ToolchainManager {
                         mark_go_tool_outdated(&mut lsp_status, goroot.as_deref());
                         mark_go_tool_outdated(&mut dap_status, goroot.as_deref());
                     } else if eco == EcosystemKind::Zig {
+                    } else if eco == EcosystemKind::Cpp {
+                        if let Some(clangd) = env_clone
+                            .as_ref()
+                            .and_then(|e| e.cpp_toolchain.as_deref())
+                            .and_then(|tc| discovery::cpp_toolchain_clangd(tc, None))
+                        {
+                            lsp_status.available = true;
+                            lsp_status.path = Some(clangd.to_string_lossy().into_owned());
+                        }
                         let active_zig = installed.iter().find(|s| s.active);
                         let active_path = active_zig.map(|s| PathBuf::from(&s.path));
                         let active_ver = active_zig
@@ -550,9 +561,11 @@ impl ToolchainManager {
                     downloadable: catalogs
                         .get(&eco)
                         .cloned()
+                    // Managed LLVM installs on this Mac only (no remote script yet).
                         .unwrap_or_default()
                         .into_iter()
                         .map(Into::into)
+                        .filter(|_| eco != EcosystemKind::Cpp)
                         .collect(),
                 }
             })

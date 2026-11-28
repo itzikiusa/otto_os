@@ -221,7 +221,9 @@ fn scan_otto_sdks(
         EcosystemKind::Cpp => {
             for dir in read_subdirs(&root.join("cpp/sdks")) {
                 if dir.join("bin/clang++").is_file() || dir.join("bin/clang").is_file() {
-                    let v = dir_name_version(&dir);
+                    let v = dir_name_version(&dir)
+                        .trim_start_matches("llvm-")
+                        .to_string();
                     push_sdk(out, seen, "cpp", &v, &dir, "otto");
                 }
             }
@@ -870,6 +872,23 @@ pub(crate) fn read_zls_bin_version(zls_bin: &Path) -> Option<String> {
     let text = String::from_utf8_lossy(&out.stdout);
     let ver = text.lines().next()?.trim();
     (!ver.is_empty()).then(|| ver.to_string())
+}
+
+/// `<toolchain>/bin/clangd` of the project's selected C/C++ toolchain, when it
+/// ships one: the selected toolchain decides which clangd runs. A toolchain
+/// inside `workspace` is ignored so repository contents never pick the binary.
+pub(crate) fn cpp_toolchain_clangd(toolchain: &str, workspace: Option<&Path>) -> Option<PathBuf> {
+    let base = Path::new(toolchain.trim().trim_end_matches('/'));
+    if !base.is_absolute() || workspace.is_some_and(|w| base.starts_with(w)) {
+        return None;
+    }
+    let home = if base.ends_with("bin") {
+        base.parent()?
+    } else {
+        base
+    };
+    let cand = home.join("bin/clangd");
+    is_executable_file(&cand).then_some(cand)
 }
 
 /// Locate the `zig` executable inside a Zig SDK home (`<home>/zig` or `<home>/bin/zig`).

@@ -710,6 +710,23 @@ pub async fn prepare_lsp_ws_session<C: IdeCtx>(
             }
         }
     }
+    // The project's selected C/C++ toolchain decides which clangd runs.
+    if resolved.lang == "cpp" {
+        if let Some(tc) = ide
+            .environments
+            .cached_project_env_for_module(&resolved_root, Some(&opened_root))
+            .and_then(|e| e.cpp_toolchain)
+        {
+            let ws = Path::new(&opened_root).to_path_buf();
+            if let Ok(Some(clangd)) = tokio::task::spawn_blocking(move || {
+                crate::toolchains::discovery::cpp_toolchain_clangd(&tc, Some(&ws))
+            })
+            .await
+            {
+                launch_cmd = clangd.to_string_lossy().into_owned();
+            }
+        }
+    }
 
     let canon_go_tags = if resolved.lang == "go" {
         let eff_tags = ide

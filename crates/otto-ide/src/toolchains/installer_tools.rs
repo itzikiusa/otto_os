@@ -319,7 +319,7 @@ async fn install_local_cpp_lsp(
     tmp: &Path,
     platform: TargetPlatform,
 ) -> std::result::Result<String, String> {
-    let url = clangd_download_url(platform)?;
+    let (url, sha) = clangd_download_url(platform)?;
     let stage_dir = tmp.join(format!("clangd-stage-{job_id}"));
     let _ = tokio::fs::remove_dir_all(&stage_dir).await;
     let extract_dir = stage_dir.join("extract");
@@ -328,7 +328,7 @@ async fn install_local_cpp_lsp(
         .map_err(|e| e.to_string())?;
     let zip = stage_dir.join("clangd.zip");
     let staged_res = async {
-        download_https_to_file(mgr, job_id, &url, &zip, None, 65).await?;
+        download_https_to_file(mgr, job_id, &url, &zip, Some(sha), 65).await?;
         run_local_cmd(
             mgr,
             job_id,

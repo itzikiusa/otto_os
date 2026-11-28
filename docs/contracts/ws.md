@@ -514,7 +514,9 @@ credentials are refused with 403 (`RootRoute::Lsp`).
     socket is being stopped; the socket closes right after it. `reason`:
     `server_cap` (a new server needed a slot and every server had an open
     editor — the least recently used one went), `build_tags_changed` (the
-    project's Go build tags changed), `shutdown` (the daemon is stopping);
+    project's Go build tags changed), `toolchain_changed` (the project's
+    C/C++ toolchain changed, so another clangd runs), `shutdown` (the daemon
+    is stopping);
     `memory_budget` / `workspace_switched` only ever stop servers with no
     socket attached, so a client does not see them. The RSS budget never
     stops a server a socket is attached to. A client whose editor is still

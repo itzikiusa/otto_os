@@ -363,7 +363,7 @@ impl EcosystemKind {
             Self::Go => "1.24.2",
             Self::Rust => "stable",
             Self::Zig => "0.16.0",
-            Self::Cpp => "19.1.7",
+            Self::Cpp => "23.1.5",
             Self::Dotnet => "9.0.203",
             Self::Node => "22.14.0",
             Self::Python => "3.13",
@@ -516,28 +516,14 @@ pub fn zls_tarball_url(version: &str, platform: TargetPlatform) -> String {
     )
 }
 
-/// Pinned upstream `clangd/clangd` GitHub release tag (decoupled from LLVM SDK
-/// versions because `clangd/clangd` only publishes specific release tags).
-pub const CLANGD_RELEASE_VERSION: &str = "19.1.2";
+pub use crate::toolchains::llvm_manifest::CLANGD_VERSION as CLANGD_RELEASE_VERSION;
 
-pub fn clangd_zip_url(version: &str, platform: TargetPlatform) -> String {
-    let clean = version.trim().trim_start_matches('v');
-    let slug = match platform.os {
-        TargetOs::Macos => "mac",
-        TargetOs::Linux => "linux",
-    };
-    format!("https://github.com/clangd/clangd/releases/download/{clean}/clangd-{slug}-{clean}.zip")
-}
-
-/// Resolve the official `clangd/clangd` release zip URL for `platform`.
-/// Upstream `clangd/clangd` publishes macOS universal and Linux x86_64 zips (no Linux ARM64).
-pub fn clangd_download_url(platform: TargetPlatform) -> Result<String, String> {
-    if platform.os == TargetOs::Linux && platform.arch == TargetArch::Aarch64 {
-        return Err(
-            "Prebuilt clangd archives are not published for Linux arm64; install clangd via your system package manager (`apt install clangd` / `dnf install clang-tools-extra`).".into(),
-        );
-    }
-    Ok(clangd_zip_url(CLANGD_RELEASE_VERSION, platform))
+/// The pinned `clangd/clangd` release zip for `platform` as `(url, sha256)`.
+/// Upstream publishes macOS universal and Linux x86_64 zips (no Linux ARM64).
+pub fn clangd_download_url(platform: TargetPlatform) -> Result<(String, &'static str), String> {
+    crate::toolchains::llvm_manifest::clangd_zip(platform).ok_or_else(|| {
+        "Prebuilt clangd archives are not published for Linux arm64; install clangd via your system package manager (`apt install clangd` / `dnf install clang-tools-extra`).".into()
+    })
 }
 
 pub fn kotlin_compiler_zip_url(version: &str) -> String {
@@ -755,7 +741,31 @@ pub fn curated_catalog(ecosystem: EcosystemKind, platform: TargetPlatform) -> Ve
         // Upstream LLVM release archives exceed the 1 GiB download cap (1.1-1.6 GiB) and
         // vary per platform/version; install Clang/GCC via Xcode CLT, Homebrew, or apt/dnf
         // and use 1-click installs for `clangd` (LSP) and `CodeLLDB` (DAP).
-        EcosystemKind::Cpp => Vec::new(),
+        EcosystemKind::Cpp => crate::toolchains::llvm_manifest::llvm_for(platform)
+            .map(|a| CatalogSdkEntry {
+                version: a.version.to_string(),
+                label: format!(
+                    "LLVM {} — clang, clangd, clang-format, clang-tidy{}",
+                    a.version,
+                    if a.os == TargetOs::Linux {
+                        " (+ lldb-dap)"
+                    } else {
+                        ""
+                    }
+                ),
+                lts: true,
+                os: os.clone(),
+                arch: arch.clone(),
+                url: a.url(),
+                size_hint: Some(format!(
+                    "{} download · {} on disk",
+                    crate::toolchains::llvm_manifest::mb(a.bytes),
+                    crate::toolchains::llvm_manifest::mb(a.installed_bytes)
+                )),
+                sha256: Some(a.sha256.to_string()),
+            })
+            .into_iter()
+            .collect(),
         EcosystemKind::Kotlin => [("2.1.20", true, "76 MB"), ("2.0.21", false, "74 MB")]
             .into_iter()
             .map(|(ver, lts, sz)| CatalogSdkEntry {
@@ -932,9 +942,15 @@ pub fn resolve_sdk_download(
                 sha256: None,
             })
         }
-        EcosystemKind::Cpp => Err(
-            "C/C++ compiler toolchains (Clang / GCC / LLVM) are installed via Xcode Command Line Tools (`xcode-select --install`), Homebrew (`brew install llvm`), or your Linux package manager (`apt install clang` / `dnf install clang`), then auto-detected or added via 'Add Local SDK'.".into(),
-        ),
+        EcosystemKind::Cpp => Err(match crate::toolchains::llvm_manifest::llvm_for(platform) {
+            Some(a) => format!(
+                "Only LLVM {} is available as a managed download for {os}/{arch}. Install other versions with your package manager and add them with Add local toolchain.",
+                a.version
+            ),
+            None => format!(
+                "No managed LLVM build is published for {os}/{arch}. Install clang with your package manager and add it with Add local toolchain."
+            ),
+        }),
         EcosystemKind::Kotlin => {
             let clean = ver.trim_start_matches('v').to_string();
             Ok(CatalogSdkEntry {

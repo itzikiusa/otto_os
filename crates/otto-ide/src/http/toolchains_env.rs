@@ -442,6 +442,7 @@ pub(super) async fn put_environments<S: IdeCtx>(
             req.dotenv_path = prev_env.dotenv_path.clone();
         }
     }
+    let prev_cpp_toolchain = prev_env.cpp_toolchain.clone();
     let prev_nb = prev_env.network_bridge;
     let mut should_evict_nb = false;
     if let Some(ref raw_nb) = req.network_bridge {
@@ -506,6 +507,11 @@ pub(super) async fn put_environments<S: IdeCtx>(
         ctx.ide()
             .lsp_pool
             .sync_project_go_build_tags(&req_target.root, &env);
+    }
+    if req_target.kind == IdeTargetKind::Local && env.cpp_toolchain != prev_cpp_toolchain {
+        ctx.ide()
+            .lsp_pool
+            .evict_local_lang_under_root("cpp", &req_target.root);
     }
     if should_evict_nb {
         ctx.ide().netbridge.evict_user(&user.id);

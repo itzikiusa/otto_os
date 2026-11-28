@@ -117,12 +117,14 @@ pub(super) fn scan_detected_sdks(
         }
         for dir in read_subdirs(&root.join("cpp/sdks")) {
             if dir.join("bin/clang++").is_file() || dir.join("bin/clang").is_file() {
-                let v = dir_name_version(&dir);
+                let v = dir_name_version(&dir)
+                    .trim_start_matches("llvm-")
+                    .to_string();
                 push_det(
                     &mut out,
                     &mut seen,
                     "cpp",
-                    format!("LLVM / Clang {v}"),
+                    format!("LLVM {v} (Otto)"),
                     &v,
                     &dir,
                     "otto",

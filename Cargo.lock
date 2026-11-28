@@ -4562,12 +4562,14 @@ dependencies = [
  "sha2 0.11.1",
  "shell-words",
  "sqlx",
+ "tar",
  "tempfile",
  "tokio",
  "tower",
  "tracing",
  "uuid",
  "zeromq",
+ "zstd",
 ]
 
 [[package]]

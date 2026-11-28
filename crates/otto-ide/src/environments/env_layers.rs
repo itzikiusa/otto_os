@@ -110,7 +110,32 @@ pub(super) fn apply_cpp_toolchain_env(
         } else if gxx.is_file() {
             map.insert("CXX".into(), gxx.to_string_lossy().into_owned());
         }
+        // Otto's managed LLVM is not Apple's clang: it finds the macOS SDK
+        // (headers, libc++, the linker's stubs) only through SDKROOT.
+        #[cfg(target_os = "macos")]
+        if base.contains("/cpp/sdks/llvm-") && !map.contains_key("SDKROOT") {
+            if let Some(sdk) = macos_sdk_path() {
+                map.insert("SDKROOT".into(), sdk);
+            }
+        }
     }
+}
+
+/// `xcrun --show-sdk-path`, asked once per daemon.
+#[cfg(target_os = "macos")]
+#[allow(clippy::disallowed_methods)] // one short xcrun call, cached for the process
+pub(crate) fn macos_sdk_path() -> Option<String> {
+    static SDK: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    SDK.get_or_init(|| {
+        let out = std::process::Command::new("xcrun")
+            .arg("--show-sdk-path")
+            .output()
+            .ok()
+            .filter(|o| o.status.success())?;
+        let sdk = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        (!sdk.is_empty()).then_some(sdk)
+    })
+    .clone()
 }
 
 /// Apply configured project SDK homes (`JAVA_HOME`, `GOROOT`, `RUSTUP_TOOLCHAIN`,
@@ -505,5 +530,31 @@ impl EnvironmentManager {
                     .collect())
             }
         }
+    }
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod cpp_sdkroot_tests {
+    use super::*;
+
+    #[test]
+    fn only_the_managed_llvm_gets_sdkroot_and_a_set_one_wins() {
+        let tmp = tempfile::tempdir().unwrap();
+        let llvm = tmp.path().join("toolchains/cpp/sdks/llvm-23.1.5");
+        std::fs::create_dir_all(llvm.join("bin")).unwrap();
+        std::fs::write(llvm.join("bin/clang++"), "").unwrap();
+        let llvm = llvm.to_string_lossy().into_owned();
+        let apply = |tc: &str, mut map: BTreeMap<String, String>| {
+            apply_cpp_toolchain_env(tc, IdeTargetKind::Local, &mut map, &mut Vec::new());
+            map
+        };
+        let sdk = macos_sdk_path().expect("xcrun --show-sdk-path on this Mac");
+        let managed = apply(&llvm, BTreeMap::new());
+        assert_eq!(managed.get("SDKROOT"), Some(&sdk));
+        assert_eq!(managed["CXX"], format!("{llvm}/bin/clang++"));
+        let clt = apply("/Library/Developer/CommandLineTools/usr", BTreeMap::new());
+        assert!(!clt.contains_key("SDKROOT"));
+        let own = apply(&llvm, BTreeMap::from([("SDKROOT".into(), "/custom".into())]));
+        assert_eq!(own["SDKROOT"], "/custom");
     }
 }

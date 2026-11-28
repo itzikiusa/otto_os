@@ -36,6 +36,9 @@ notify = { version = "8.2.1", default-features = false, features = ["macos_fseve
 bytes = { workspace = true }
 ring = { workspace = true }
 tempfile = { workspace = true }
+# Managed LLVM: stream the pinned `.tar.zst` and unpack only allowlisted members.
+zstd = { version = "0.14.3", default-features = false }
+tar = "0.4"
 # Native Jupyter client (BSD-3-Clause, runtimed): kernelspecs, signed ZeroMQ channels.
 jupyter-zmq-client = { version = "3.0.1", default-features = false, features = ["tokio-runtime", "ring"] }
 jupyter-protocol = "2.0.4"

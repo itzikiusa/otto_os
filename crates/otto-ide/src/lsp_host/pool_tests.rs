@@ -620,3 +620,25 @@ async fn a_source_file_write_reaches_the_server_as_a_watched_file_change() {
     let log = fake.doc_log.lock().unwrap().clone();
     assert!(!log.iter().any(|l| l.ends_with("/src/other.ts")));
 }
+
+#[tokio::test]
+async fn a_changed_cpp_toolchain_stops_only_that_projects_local_clangd() {
+    let (pool, fake) = fake_pool(IDLE_TIMEOUT);
+    let cpp = |root: &str| PoolKey {
+        lang: "cpp".into(),
+        ..key(root)
+    };
+    let mut proj = pool.attach(cpp("/proj"), "clangd", &[]).unwrap();
+    let _other = pool.attach(cpp("/other"), "clangd", &[]).unwrap();
+    let _ts = pool.attach(key("/proj"), "tsls", &[]).unwrap();
+    assert_eq!(pool.live_servers(), 3);
+
+    pool.evict_local_lang_under_root("cpp", "/proj/");
+    let note = recv(&mut proj).await;
+    assert_eq!(note["method"], "otto/lspEvicted");
+    assert_eq!(note["params"]["reason"], "toolchain_changed");
+    assert_eq!(pool.live_servers(), 2, "the other project's clangd and tsls stay");
+
+    let _again = pool.attach(cpp("/proj"), "clangd", &[]).unwrap();
+    assert_eq!(fake.spawns.load(Ordering::SeqCst), 4, "reattach spawns a new server");
+}

@@ -411,9 +411,7 @@ pub(super) async fn install_local_sdk(
             run_local_cmd(mgr, job_id, 58, &zig_bin, &["version"], &[]).await?;
             Ok(dest.to_string_lossy().into_owned())
         }
-        EcosystemKind::Cpp => Err(
-            "C/C++ compiler toolchains (Clang / GCC / LLVM) are installed via Xcode Command Line Tools (`xcode-select --install`), Homebrew (`brew install llvm`), or your Linux package manager (`apt install clang` / `dnf install clang`), then auto-detected or added via 'Add Local SDK'.".into(),
-        ),
+        EcosystemKind::Cpp => super::llvm_install::install_llvm_local(mgr, job_id, root, entry).await,
         EcosystemKind::Kotlin => {
             let archive = tmp.join(format!("kotlin-compiler-{}.zip", entry.version));
             download_https_to_file(mgr, job_id, &entry.url, &archive, exp_sha, 15).await?;
