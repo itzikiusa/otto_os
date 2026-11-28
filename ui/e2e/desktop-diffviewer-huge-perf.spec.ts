@@ -261,7 +261,8 @@ test('WIP diff of a 40k-line rewrite: large-file gate, windowed rows, capped hun
   // History lands on the WIP row of a dirty tree.
   await expect(wipRow).toHaveAttribute('aria-pressed', 'true', { timeout: 15_000 });
   const panel = page.locator('.wip-panel');
-  await panel.locator('.wp-name', { hasText: 'big.ts' }).first().click();
+  // …beside its first (here only) file's diff.
+  await expect(panel.locator('.wp-name', { hasText: 'big.ts' }).first()).toHaveAttribute('aria-expanded', 'true');
   await expect(panel.locator('.wp-diff')).toBeVisible();
   await expect(panel.locator('.dfile-head')).toBeVisible({ timeout: 15_000 });
 
