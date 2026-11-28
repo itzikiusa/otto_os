@@ -549,7 +549,11 @@ async function openResolver(page: Page): Promise<void> {
   // appears. Tap its "Resolve conflicts" to open the resolver.
   const open = page.locator('.merge-banner .btn', { hasText: 'Resolve conflicts' });
   await expect(open).toBeVisible({ timeout: 20_000 });
-  await open.click();
+  await page.waitForLoadState('networkidle').catch(() => {});
+  // A tablet may open History on the WIP changes as a sheet over the banner:
+  // its Conflicts section has the same way in.
+  const fromSheet = page.getByRole('button', { name: 'Open resolver' });
+  await ((await fromSheet.isVisible()) ? fromSheet : open).click();
   await expect(page.locator('.resolver')).toBeVisible({ timeout: 15_000 });
 }
 
