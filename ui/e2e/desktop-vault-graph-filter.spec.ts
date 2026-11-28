@@ -77,7 +77,7 @@ test('type filter narrows the graph without refetching', async ({ page }) => {
   expect(requests.length).toBe(fetchesBefore);
 
   // Reset restores the full graph.
-  await page.locator('.panel .link', { hasText: 'reset' }).first().click();
+  await page.locator('[data-testid="vault-graph-panel"] .link', { hasText: 'reset' }).first().click();
   await expect.poll(() => nodeCount(page), { timeout: 10_000 }).toBe(before);
   expect(requests.length).toBe(fetchesBefore);
 });
@@ -86,24 +86,24 @@ test('service rollup collapses to one node per bundle and drills back open', asy
   await openGraph(page);
   const before = await nodeCount(page);
 
-  await page.locator('.panel select').first().selectOption('service');
+  await page.locator('[data-testid="vault-graph-panel"] select').first().selectOption('service');
   await expect.poll(() => nodeCount(page), { timeout: 10_000 }).toBeLessThan(before / 2);
   const rolled = await nodeCount(page);
   // 24 seeded services + services/ + runbooks/ + bulk/ (+ tag/ghost buckets).
   expect(rolled).toBeGreaterThan(20);
   expect(rolled).toBeLessThan(40);
 
-  await expect(page.locator('.panel .hint')).toContainText('expand that group');
+  await expect(page.locator('[data-testid="vault-graph-panel"] .hint')).toContainText('expand that group');
 });
 
 test('facet lists scroll instead of pushing the panel off-screen', async ({ page }) => {
   await openGraph(page);
 
-  const panel = page.locator('.graph-root .panel');
+  const panel = page.locator('[data-testid="vault-graph-panel"]');
   await expectFullyInViewport(page, panel, 'graph controls panel');
 
   // 27 services is more than fits — the list must cap and scroll, not grow.
-  const facets = page.locator('.panel .facets').first();
+  const facets = page.locator('[data-testid="vault-graph-panel"] .facets').first();
   await expect(facets).toBeVisible();
   const overflows = await facets.evaluate((el) => el.scrollHeight > el.clientHeight + 1);
   expect(overflows, 'seeded services should overflow the facet list').toBe(true);

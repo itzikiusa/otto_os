@@ -34,7 +34,7 @@ test('trash restores a file and edit history compares recoverable versions', asy
   await page.getByTestId('page-header').getByRole('button', { name: 'More actions', exact: true }).click();
   await page.getByRole('menuitem', {name: 'Edit history'}).click();
   await page.getByLabel('History file path', {exact: true}).fill('recovery.md');
-  await page.getByRole('navigation', {name: 'Saved revisions'}).getByRole('button').first().click();
+  await page.getByRole('complementary', {name: 'Edits'}).locator('.side-row-main').first().click();
   await expect(page.getByRole('button', {name: 'Restore before version'})).toBeEnabled();
   await page.getByRole('button', {name: 'Restore before version'}).click();
   await expect(page.getByText('Restored the before version', {exact: true})).toBeVisible();

@@ -26,6 +26,7 @@
   import { registry } from '../../lib/commands.svelte';
   import FileTree from './FileTree.svelte';
   import LazyMount from '../../lib/components/LazyMount.svelte';
+  import { lazyComponent } from '../../lib/lazy-component.svelte';
   import { DocsAgentsLazy, FileViewerLazy, GraphLazy, RecoveryLazy } from './lazyViews';
   import NewNoteDialog from './NewNoteDialog.svelte';
   import NoteView from './NoteView.svelte';
@@ -51,6 +52,33 @@
   let detailsSheet = $state(false);
   let sheetOpen = $state(false);
   const detailsShown = $derived(vault.centerMode === 'note' && !!vault.note && (detailsSheet ? sheetOpen : detailsPref));
+  // The pane's two views: the note's details, or "Refine with Otto" (a live
+  // agent on this note; NoteView's sparkle button and the tree's Review + fix
+  // open it). Another note starts on Details again.
+  let detailView = $state<'details' | 'refine'>('details');
+  const DETAIL_VIEWS = [
+    { id: 'details', label: 'Details' },
+    { id: 'refine', label: 'Refine with Otto' },
+  ] as const;
+  const RefineLazy = lazyComponent(() => import('./RefineDrawer.svelte'));
+  function toggleRefine(): void {
+    if (detailsShown && detailView === 'refine') return setDetails(false);
+    detailView = 'refine';
+    setDetails(true);
+  }
+  $effect(() => {
+    void vault.notePath;
+    untrack(() => (detailView = 'details'));
+  });
+  // "Review + fix" queues a pending refine: open the Refine view on that
+  // note; RefineDrawer consumes it (the person presses Send).
+  $effect(() => {
+    const pending = vault.pendingRefine;
+    if (pending && vault.notePath === pending.path) untrack(() => {
+      detailView = 'refine';
+      setDetails(true);
+    });
+  });
   function setDetails(show: boolean): void {
     if (detailsSheet) {
       sheetOpen = show;
@@ -481,7 +509,7 @@
         {:else if vault.centerMode === 'file' && vault.filePath}
           <LazyMount lazy={FileViewerLazy} what="the file" variant="panel" />
         {:else if vault.centerMode === 'note' && vault.note}
-          <NoteView />
+          <NoteView refineShown={detailsShown && detailView === 'refine'} ontogglerefine={toggleRefine} />
         {:else}
           {@const emptyVault = (vault.status?.notes ?? vault.current.notes) === 0}
           <div class="center-empty">
@@ -509,14 +537,27 @@
           <DetailPane
             module="vault"
             pane="details"
-            title="Note details"
+            title={detailView === 'refine' ? 'Refine with Otto' : 'Note details'}
             open={detailsShown}
             onclose={() => setDetails(false)}
             ontoggle={() => setDetails(!detailsShown)}
             bind:sheet={detailsSheet}
             testid="vault-details"
           >
-            <RightPanel />
+            {#snippet views()}
+              <Tabs size="s" label="Note details views" idBase="vault-detail" tabs={DETAIL_VIEWS} value={detailView} onchange={(id) => (detailView = id)} />
+            {/snippet}
+            <div class="detail-view" role="tabpanel" id="vault-detail-panel-{detailView}" aria-labelledby="vault-detail-tab-{detailView}">
+              {#if detailView === 'refine' && vault.notePath}
+                <!-- Keyed by note: the same note reloaded after the agent's
+                     edit keeps the terminal; another note gets its own session. -->
+                {#key `${vault.wsId}:${vault.current?.id}:${vault.notePath}`}
+                  <LazyMount lazy={RefineLazy} what="refine" variant="panel" props={{ path: vault.notePath }} />
+                {/key}
+              {:else}
+                <RightPanel />
+              {/if}
+            </div>
           </DetailPane>
         {/if}
       {/snippet}
@@ -781,6 +822,12 @@
   .vtab-close:hover {
     background: var(--hover);
     color: var(--text);
+  }
+  .detail-view {
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
   }
   .center-empty {
     overflow-y: auto;
