@@ -2537,15 +2537,15 @@ async fn cpp_review_fixes_clangd_llvm_codelldb_core_unreal_cc_override_cmake_and
     };
     assert!(clangd_download_url(mac_arm)
         .unwrap()
+        .0
         .contains(&format!("clangd-mac-{CLANGD_RELEASE_VERSION}.zip")));
     assert!(clangd_download_url(lin_x64)
         .unwrap()
+        .0
         .contains(&format!("clangd-linux-{CLANGD_RELEASE_VERSION}.zip")));
     assert!(clangd_download_url(lin_arm).is_err());
-        .0
     assert!(resolve_sdk_download(EcosystemKind::Cpp, Some("19.1.7"), mac_arm, &[]).is_err());
     let crafted_llvm = crate::toolchains_catalog::CatalogSdkEntry {
-        .0
         version: "19.1.7".into(),
         label: "LLVM 19.1.7".into(),
         lts: true,

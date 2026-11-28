@@ -13,9 +13,9 @@ pub(crate) mod installer_remote;
 pub(crate) mod installer_tools;
 pub(crate) mod installer_unity;
 mod jobs;
-mod local_registry;
 mod llvm_install;
 pub(crate) mod llvm_manifest;
+mod local_registry;
 pub(crate) mod remote_probe;
 
 use self::detected::scan_detected_sdks;
@@ -436,7 +436,6 @@ impl ToolchainManager {
                             .map(|s| PathBuf::from(&s.path));
                         mark_go_tool_outdated(&mut lsp_status, goroot.as_deref());
                         mark_go_tool_outdated(&mut dap_status, goroot.as_deref());
-                    } else if eco == EcosystemKind::Zig {
                     } else if eco == EcosystemKind::Cpp {
                         if let Some(clangd) = env_clone
                             .as_ref()
@@ -446,6 +445,7 @@ impl ToolchainManager {
                             lsp_status.available = true;
                             lsp_status.path = Some(clangd.to_string_lossy().into_owned());
                         }
+                    } else if eco == EcosystemKind::Zig {
                         let active_zig = installed.iter().find(|s| s.active);
                         let active_path = active_zig.map(|s| PathBuf::from(&s.path));
                         let active_ver = active_zig
@@ -562,14 +562,14 @@ impl ToolchainManager {
                     lsp_status,
                     dap_status: probed.dap.unwrap_or_else(|| empty_tool(eco.dap_name())),
                     unity_dap_status: None,
+                    // Managed LLVM installs on this Mac only (no remote script yet).
                     downloadable: catalogs
                         .get(&eco)
+                        .filter(|_| eco != EcosystemKind::Cpp)
                         .cloned()
-                    // Managed LLVM installs on this Mac only (no remote script yet).
                         .unwrap_or_default()
                         .into_iter()
                         .map(Into::into)
-                        .filter(|_| eco != EcosystemKind::Cpp)
                         .collect(),
                 }
             })
