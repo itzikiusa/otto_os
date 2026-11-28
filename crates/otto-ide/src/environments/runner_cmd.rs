@@ -1469,7 +1469,8 @@ pub(crate) fn build_runner_command(
         IdeRunnerKind::Xcode => build_xcode_cmd(env_map, cmd_opt, args, build_flags),
         IdeRunnerKind::Flutter => build_flutter_cmd(env_map, cmd_opt, args, build_flags),
         IdeRunnerKind::ReactNative => build_react_native_cmd(env_map, cmd_opt, args, build_flags),
-        IdeRunnerKind::Compound | IdeRunnerKind::Custom => {
+        // UnityAttach never runs: start_run refuses it (debug-only).
+        IdeRunnerKind::Compound | IdeRunnerKind::Custom | IdeRunnerKind::UnityAttach => {
             build_custom_cmd(cmd_opt, args, build_flags)
         }
     }

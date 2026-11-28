@@ -68,7 +68,7 @@ use self::runtime_debug::{
     create_python_venv, debug_command, debug_evaluate, debug_port, debug_set_variable,
     debug_variables, delete_run_config, get_debug_session, get_run, list_debug_sessions,
     list_run_configs, set_debug_breakpoints, start_debug_session, start_run, stop_run,
-    stream_debug_events, stream_run_events, upsert_run_config,
+    stream_debug_events, stream_run_events, unity_instances, upsert_run_config,
 };
 use self::spring_boot::{spring_actuator, spring_devtools_restart};
 use self::toolchains_env::{
@@ -303,6 +303,7 @@ pub fn api_router<S: IdeCtx>() -> Router<S> {
                 post(debug_set_variable::<S>),
             )
             .route("/ide/debug/sessions/{id}/port", get(debug_port::<S>))
+            .route("/ide/debug/unity/instances", post(unity_instances::<S>))
             // E. "Share with Friends" Host Routes
             .route(
                 "/ide/collab/rooms",

@@ -445,6 +445,37 @@ pub(super) async fn list_debug_sessions<S: IdeCtx>(
     Ok(Json(IdeDebugSessionsResp { sessions }))
 }
 
+/// `POST /ide/debug/unity/instances`: the Unity Editor that has the project open
+/// (read-only: one small file read and a PID check, never a connection).
+pub(super) async fn unity_instances<S: IdeCtx>(
+    State(ctx): State<S>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
+    Json(req): Json<crate::types::IdeUnityInstancesReq>,
+) -> ApiResult<Json<crate::types::IdeUnityInstancesResp>> {
+    req.target.validate()?;
+    ctx.ide().targets.resolve(&ctx, &user, &req.target).await?;
+    let mut editors = Vec::new();
+    if req.target.kind == IdeTargetKind::Local {
+        let root = tokio::fs::canonicalize(&req.target.root)
+            .await
+            .map_err(|e| Error::Invalid(format!("target root: {e}")))?;
+        let start = match req.cwd.as_deref().map(str::trim).filter(|c| !c.is_empty()) {
+            Some(c) => tokio::fs::canonicalize(root.join(c))
+                .await
+                .ok()
+                .filter(|p| p.starts_with(&root)),
+            None => Some(root.clone()),
+        };
+        let project = start.and_then(|s| {
+            crate::dap::adapters_dotnet::detect_unity_project_root(&s, &root).map(|(p, _)| p)
+        });
+        if let Some(project) = project {
+            editors.extend(crate::dap::adapters_dotnet::unity::find_unity_editor(&project).await);
+        }
+    }
+    Ok(Json(crate::types::IdeUnityInstancesResp { editors }))
+}
+
 pub(super) async fn get_debug_session<S: IdeCtx>(
     State(ctx): State<S>,
     Extension(AuthUser(user)): Extension<AuthUser>,

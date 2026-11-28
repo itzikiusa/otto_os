@@ -92,6 +92,9 @@ pub enum IdeInstallComponent {
     Sdk,
     Lsp,
     Dap,
+    /// .NET only, this Mac only: the Unity debugger (DotRush `monodbg`, plus the
+    /// .NET 10 SDK when no .NET 10+ runtime is present).
+    UnityDap,
     #[default]
     All,
 }
@@ -156,6 +159,10 @@ pub struct IdeToolchainEcosystem {
     pub installed: Vec<IdeInstalledSdk>,
     pub lsp_status: IdeToolBinaryStatus,
     pub dap_status: IdeToolBinaryStatus,
+    /// .NET on this Mac: the Unity debugger (`monodbg`), installed with
+    /// `component: "unity_dap"`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unity_dap_status: Option<IdeToolBinaryStatus>,
     pub downloadable: Vec<IdeDownloadableVersion>,
 }
 

@@ -401,6 +401,9 @@ pub enum IdeRunnerKind {
     Flutter,
     #[serde(alias = "expo", alias = "rn")]
     ReactNative,
+    /// Debug-only: attach to the Unity Editor that has the project open
+    /// (`target_path: "unity://editor"`). Run refuses it.
+    UnityAttach,
     Compound,
     #[default]
     Custom,

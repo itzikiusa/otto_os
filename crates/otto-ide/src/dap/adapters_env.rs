@@ -162,6 +162,12 @@ pub(crate) fn validate_non_root_debug_request(
         || req.launch.env.contains_key("DOTNET_ATTACH_PID")
         || env.contains_key("OTTO_JAVA_DEBUG_DAP_PORT")
         || req.launch.env.contains_key("OTTO_JAVA_DEBUG_DAP_PORT")
+        || req
+            .launch
+            .program
+            .trim()
+            .to_ascii_lowercase()
+            .starts_with("unity://")
     {
         return Err(Error::Forbidden(
             "attaching to local host processes or ports requires root privileges".into(),

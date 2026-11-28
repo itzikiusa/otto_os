@@ -10,6 +10,8 @@
 //!   `netcoredbg` directly to that PID.
 //! - **Process attach:** supports explicit PID (`launch.attach_pid` or `DOTNET_ATTACH_PID`)
 //!   for local/SSH `netcoredbg` attach, and direct TCP DAP attach when `attach_port` is provided.
+//! - **Unity Editor attach** (`unity://editor`, this Mac): DotRush's `monodbg`
+//!   bridges DAP to the Editor's Mono Soft Debugger ([`unity`]).
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -26,6 +28,8 @@ use crate::types::{IdeDebugOutputEntry, IdeStartDebugReq, IdeTargetKind};
 
 #[path = "adapters_dotnet_steps.rs"]
 mod steps;
+#[path = "adapters_unity.rs"]
+pub(crate) mod unity;
 pub(crate) use steps::plan_dotnet_test_steps;
 
 /// Parse `<TargetFramework>`, `<TargetFrameworks>`, and `<AssemblyName>` from a
@@ -81,7 +85,6 @@ pub(crate) fn parse_vstest_host_pid(output: &str) -> Option<u32> {
 }
 
 /// Check whether `dir` (or an ancestor up to `root`) is a Unity project (`Assets/` + `ProjectSettings/`).
-#[cfg(test)]
 #[allow(clippy::disallowed_methods)]
 pub(crate) fn detect_unity_project_root(
     start: &Path,
@@ -276,6 +279,9 @@ pub(super) async fn resolve_dotnet_adapter(
             "Unity Editor attach is not supported (Unity uses the Mono Soft Debugger protocol rather than DAP)."
                 .into(),
         ));
+    }
+    if raw_program.to_ascii_lowercase().starts_with("unity://") {
+        return unity::resolve_unity_attach(data_dir, req, cwd, env).await;
     }
 
     // Check for explicit direct TCP DAP attach port (e.g. remote netcoredbg --server=PORT).

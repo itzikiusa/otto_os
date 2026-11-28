@@ -11,6 +11,7 @@ pub(crate) mod discovery;
 mod installer;
 pub(crate) mod installer_remote;
 pub(crate) mod installer_tools;
+pub(crate) mod installer_unity;
 mod jobs;
 mod local_registry;
 mod llvm_install;
@@ -493,6 +494,8 @@ impl ToolchainManager {
                         installed,
                         lsp_status,
                         dap_status,
+                        unity_dap_status: (eco == EcosystemKind::Dotnet)
+                            .then(|| installer_unity::unity_dap_status(&roots[0])),
                         downloadable,
                     }
                 })
@@ -558,6 +561,7 @@ impl ToolchainManager {
                     installed,
                     lsp_status,
                     dap_status: probed.dap.unwrap_or_else(|| empty_tool(eco.dap_name())),
+                    unity_dap_status: None,
                     downloadable: catalogs
                         .get(&eco)
                         .cloned()

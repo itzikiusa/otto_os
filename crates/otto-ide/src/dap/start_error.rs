@@ -42,9 +42,14 @@ pub(crate) fn classify_start_error(err: &Error, language: &str) -> StartFailure 
         }
         _ => None,
     };
-    let ecosystem = kind
-        .and_then(|_| EcosystemKind::parse(language))
-        .map(EcosystemKind::as_str);
+    // The Unity debugger is its own install (`unity_dap`), not the .NET one.
+    let ecosystem =
+        if kind == Some(KIND_ADAPTER_MISSING) && message.starts_with("The Unity debugger") {
+            Some("unity")
+        } else {
+            kind.and_then(|_| EcosystemKind::parse(language))
+                .map(EcosystemKind::as_str)
+        };
     StartFailure {
         message,
         kind,

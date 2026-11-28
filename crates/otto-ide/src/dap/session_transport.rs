@@ -109,12 +109,37 @@ pub(super) async fn boot_session_connection(
 ) -> Result<()> {
     let io = connect_adapter_transport(entry, &resolved.adapter_name, resolved.transport, req, ctx)
         .await?;
+    // A Unity attach names the Editor's soft-debugger port as `processId`.
+    let unity_port = (resolved.adapter_name == super::adapters_dotnet::unity::MONODBG)
+        .then(|| resolved.launch_args["processId"].as_u64())
+        .flatten();
     let cmds = (
         resolved.initialize_args,
         resolved.launch_command.as_str(),
         resolved.launch_args,
     );
-    handshake_and_run(sessions, entry, io, cmds).await
+    let res = handshake_and_run(sessions, entry, io, cmds).await;
+    match unity_port {
+        Some(port) => {
+            use super::adapters_dotnet::unity::{attach_failed, ATTACHED_HINT};
+            let err = match res {
+                Ok(()) if !entry.is_terminal() => {
+                    entry.append_output("console", ATTACHED_HINT.into());
+                    return Ok(());
+                }
+                // monodbg answers the attach, then reports `terminated` when the
+                // Editor's soft debugger refuses the connection (Release mode).
+                Ok(()) => {
+                    attach_failed(port as u16, "the Editor's debugger refused the connection")
+                }
+                Err(e) => attach_failed(port as u16, &e.to_string()),
+            };
+            // That `terminated` may have ended the session already: say why anyway.
+            entry.fail_start(sessions, &err);
+            Err(err)
+        }
+        None => res,
+    }
 }
 
 async fn connect_adapter_transport(
@@ -414,17 +439,12 @@ pub(super) async fn handshake_and_run(
     }
 
     sync_all_breakpoints(entry, &active_conn).await?;
-    if let Err(err) = wire.request("configurationDone", Some(json!({}))).await {
-        let msg = err.to_string();
-        let msg_lc = msg.to_ascii_lowercase();
-        let benign_unsupported = supports_config_done == Some(false)
-            && (msg_lc.contains("unsupported")
-                || msg_lc.contains("unrecognized")
-                || msg_lc.contains("not implemented")
-                || msg_lc.contains("unknown command"));
-        if !benign_unsupported {
-            return Err(Error::Invalid(format!("configurationDone failed: {msg}")));
-        }
+    // DAP: `configurationDone` only when the adapter advertises it, as VS Code
+    // does (DotRush's monodbg does not, and exits on the request).
+    if supports_config_done == Some(true) {
+        wire.request("configurationDone", Some(json!({})))
+            .await
+            .map_err(|err| Error::Invalid(format!("configurationDone failed: {err}")))?;
     }
 
     if !launch_done {

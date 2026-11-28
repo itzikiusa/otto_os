@@ -279,7 +279,10 @@ pub(crate) fn apply_run_config_sdk_override(
         | IdeRunnerKind::Unreal => {
             super::env_layers::apply_cpp_toolchain_env(trimmed, target_kind, map, path_dirs);
         }
-        IdeRunnerKind::DotnetBuild | IdeRunnerKind::DotnetRun | IdeRunnerKind::DotnetTest => {
+        IdeRunnerKind::DotnetBuild
+        | IdeRunnerKind::DotnetRun
+        | IdeRunnerKind::DotnetTest
+        | IdeRunnerKind::UnityAttach => {
             if trimmed.starts_with('/') {
                 map.insert("DOTNET_ROOT".into(), trimmed.to_string());
                 push_unique(path_dirs, trimmed.to_string());

@@ -306,7 +306,10 @@ fn infer_sdk_kind(
             | IdeRunnerKind::Unreal => {
                 return SdkKindHint::Cpp;
             }
-            IdeRunnerKind::DotnetBuild | IdeRunnerKind::DotnetRun | IdeRunnerKind::DotnetTest => {
+            IdeRunnerKind::DotnetBuild
+            | IdeRunnerKind::DotnetRun
+            | IdeRunnerKind::DotnetTest
+            | IdeRunnerKind::UnityAttach => {
                 return SdkKindHint::Dotnet;
             }
             IdeRunnerKind::Node

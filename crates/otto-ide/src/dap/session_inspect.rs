@@ -199,11 +199,14 @@ pub(super) async fn sync_all_breakpoints(
         Vec::new()
     };
     if break_exc || !conn.exception_filters.is_empty() {
+        // `filterOptions` too (additive per DAP; ignored without
+        // `supportsExceptionFilterOptions`): DotRush's monodbg reads only them.
+        let filter_options: Vec<_> = filters.iter().map(|f| json!({ "filterId": f })).collect();
         let _ = conn
             .wire
             .request(
                 "setExceptionBreakpoints",
-                Some(json!({ "filters": filters })),
+                Some(json!({ "filters": filters, "filterOptions": filter_options })),
             )
             .await;
     }

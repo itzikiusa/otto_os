@@ -473,6 +473,14 @@ impl DapManager {
 }
 
 pub(super) fn build_session_title(req: &IdeStartDebugReq, adapter: &str) -> String {
+    if req
+        .launch
+        .program
+        .trim()
+        .eq_ignore_ascii_case("unity://editor")
+    {
+        return "Attach to Unity Editor".into();
+    }
     if let Some(tname) = req.launch.test_name.as_deref().filter(|s| !s.is_empty()) {
         return format!("Debug {tname} ({adapter})");
     }
