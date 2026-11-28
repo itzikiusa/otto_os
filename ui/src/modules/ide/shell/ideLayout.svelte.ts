@@ -24,6 +24,10 @@ export const EXPLORER_VIEW_LABEL: Record<IdeExplorerView, string> = { files: 'Fi
 export const STACK_MAX_W = 700;
 /** Below this page height the phone chrome is short (phone landscape). */
 export const STACK_MAX_H = 520;
+/** What the editor keeps beside the agent / build tool Detail pane before the
+ *  pane becomes a right sheet over it (the tablet rule, at the IDE's width):
+ *  the explorer is never hidden for it. */
+export const IDE_EDITOR_MIN = 640;
 
 const PANE_KEY = 'otto.ide.stackPane';
 const PANES: readonly IdeStackPane[] = ['files', 'editor', 'tools'];

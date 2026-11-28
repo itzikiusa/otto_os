@@ -34,6 +34,7 @@
     type IdeCodeProposal,
   } from './agent/ideAgentEngine.svelte';
   import { ide, ideBasename } from './ideStore.svelte';
+  import { IDE_EDITOR_MIN } from './shell/ideLayout.svelte';
 
   const EmbeddedRuntimeView = lazyComponent(loadRuntimeThreadView);
 
@@ -169,6 +170,7 @@
   open
   onclose={closeAgentPanel}
   legacy={{ w: 'otto.ide.agentW' }}
+  minContent={IDE_EDITOR_MIN}
   menu={() => [{ label: 'Open in Threads', icon: 'external', action: () => ideAgent.openActiveInThreads() }]}
   testid="ide-agent"
 >
