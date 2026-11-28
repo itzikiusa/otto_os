@@ -19,7 +19,6 @@
   import ListDetail from '../../lib/components/side/ListDetail.svelte';
   import ListPane from '../../lib/components/side/ListPane.svelte';
   import SideRow from '../../lib/components/side/SideRow.svelte';
-  import { rel } from '../../lib/stores/now.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
@@ -225,12 +224,15 @@
       {#each rooms as r (r.room.id)}
         <SideRow
           title={r.room.name}
-          meta="{plural(r.members.length, 'agent')} · {r.last_message_at ? rel(r.last_message_at) : 'no messages yet'}"
+          meta="{plural(r.members.length, 'agent')}{r.last_message_at ? '' : ' · no messages yet'}"
           selected={r.room.id === selectedId}
           menu={() => roomMenu(r)}
           testid="pa-channel-row"
           onclick={() => open(r.room.id)}
-        />
+        >
+          <!-- When it was last active, as a live <time> with the full date on hover. -->
+          {#snippet trailing()}{#if r.last_message_at}<RelTime iso={r.last_message_at} />{/if}{/snippet}
+        </SideRow>
       {/each}
     </ListPane>
   {/snippet}

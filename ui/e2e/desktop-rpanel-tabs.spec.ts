@@ -157,12 +157,15 @@ test('Files: folder navigation (up, crumbs, typed path, hidden toggle, open fold
 test('agent session: the session tabs join the rail and Files/Git follow the session folder', async ({ page }) => {
   await openPage(page, 'agents');
   await page.getByRole('button', { name: /E2E Shell/ }).first().click();
-  for (const name of ['Activity', 'Outputs', 'Canvas', 'Info']) await expect(railBtn(page, name)).toBeVisible();
+  for (const name of ['Session', 'Activity', 'Outputs', 'Canvas', 'Info']) await expect(railBtn(page, name)).toBeVisible();
   await railBtn(page, 'Files').click();
   const panel = page.locator('.rpanel');
-  // The session's folder shows once, in the details card heading the panel.
+  // Files / Git work in the session's folder: their folder bar says so (rc6: the
+  // details card is the Session tab, no longer a card above every tab).
+  await expect(panel.locator('.rpanel-folder')).toContainText('tmp', { timeout: 15_000 });
+  await expect(panel.locator('.rpanel-folder')).toContainText('session');
+  await railBtn(page, 'Session').click();
   await expect(panel.getByTestId('details-folder')).toContainText('tmp', { timeout: 15_000 });
-  await expect(panel.locator('.rpanel-folder')).toHaveCount(0);
   await railBtn(page, 'Activity').click();
   await expect(panel.locator('.rpanel-title')).toHaveText('Activity');
   // Leaving the session keeps the choice but shows a tab that exists there.
