@@ -8,6 +8,7 @@
   // opens its Structure; right-click offers "Explain with agent".
   import { tick, untrack } from 'svelte';
   import { viewport } from '../../lib/stores/viewport.svelte';
+  import { pageNav } from '../../lib/components/side/pageNav.svelte';
   import Icon, { type IconName } from '../../lib/components/Icon.svelte';
   import RedisKeyFilter from './RedisKeyFilter.svelte';
   import { database } from '../../lib/stores/database.svelte';
@@ -90,12 +91,10 @@
   function openStructure(node: SchemaNode): void {
     const page = treeEl?.closest('.db-page');
     void database.openObject(node);
-    // Tablet list/detail navigation gives the structure its usable width. The
-    // schema stays mounted, retaining its query and selection for the return.
-    if (viewport.isTablet && !database.sidebarCollapsed) {
-      database.toggleSidebar();
-      void tick().then(() => page?.closest('.db-root')?.querySelector<HTMLButtonElement>('.db-conn-state .chip')?.focus());
-    }
+    // Tablet: hiding the tables pane gives the structure its room ("Show Tables" / ⌘B
+    // bring it back); the schema stays mounted with its query and selection.
+    const hide = viewport.isTablet && !pageNav.show ? pageNav.toggle : null;
+    if (hide) hide(), void tick().then(() => page?.closest('.db-root')?.querySelector<HTMLButtonElement>('.db-conn-state .chip')?.focus());
   }
 
   // Node kinds that, when clicked, open the Structure view (vs. just expanding).
@@ -716,13 +715,13 @@
   .node:hover {
     background: var(--hover);
   }
+  /* The one row look (app.css .side-row): selected = tint + bold name, focus = inset ring. */
   .node.selected {
     background: var(--accent-soft);
   }
+  .node.selected .nl-text { font-weight: 600; }
   .node:focus-visible {
-    outline: none;
-    background: var(--accent-soft-strong);
-    box-shadow: inset 0 0 0 1px var(--accent-line-strong);
+    outline-offset: -2px;
   }
   /* Active database = bold, like Workbench's default schema. */
   .node.active-db .nl-text {

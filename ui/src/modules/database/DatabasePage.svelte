@@ -10,8 +10,10 @@
   import { tick, untrack } from 'svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
-  import { paneResizer, loadPaneWidth, LIST_PANE } from '../../lib/paneResizer';
-  import PaneDivider from '../../lib/components/PaneDivider.svelte';
+  import ListDetail from '../../lib/components/side/ListDetail.svelte';
+  import ListPane from '../../lib/components/side/ListPane.svelte';
+  import { pageNav } from '../../lib/components/side/pageNav.svelte';
+  import { loadFlag } from '../../lib/stores/dbPrefs.svelte';
   import PageBody from '../../lib/components/PageBody.svelte';
   import EnvBadge from '../../lib/components/EnvBadge.svelte';
   import { envTone } from '../../lib/status';
@@ -54,7 +56,6 @@
   import { popoutItems } from '../../lib/popoutMenu';
   import { router } from '../../lib/router.svelte';
   import { registry } from '../../lib/commands.svelte';
-  import { lsGet, lsSet } from '../../lib/storage';
   import type {
     BrokerCluster,
     Connection,
@@ -157,35 +158,51 @@
       ...VIEWS.filter((v) => v.show()).map((v) => ({ label: v.label, checked: database.mainTab === v.id, action: () => database.setMainTab(v.id) })),
       { separator: true },
       ...query,
-      ...(!viewport.isPhone && !database.sidebarCollapsed ? [{ label: 'Hide tables', icon: 'panel' as const, hint: '⌘B', action: () => database.toggleSidebar() }] : []),
       { label: comparePin.value ? 'Clear comparison' : 'Compare results', icon: 'columns', title: 'Keep loaded results beside the current query', action: toggleCompare },
       { separator: true },
       { label: database.testing ? 'Testing connection…' : 'Test connection', icon: 'plug', disabled: database.testing, action: () => void database.testConnection() },
       ...(['mysql', 'postgres'].includes(c.kind) ? [{ label: 'Database changes', icon: 'branch', title: 'Reviewed database changes for this connection', action: () => (changesOpen = true) }] : []),
       ...connItems(c),
       { separator: true },
+      ...(viewport.navDrawer ? [{ label: 'All connections', icon: 'plug' as const, action: showConnections }] : []),
       { label: 'Close connection', icon: 'x', title: 'Close this connection (its query tabs come back when you open it again)', action: () => database.closeConnection(c.id) },
     ];
   }
 
-  // Tables / History: open the hidden side pane on that view.
-  // Phone: Tables / History are a sheet over the results (Back closes it).
-  let phoneSide = $state<DbSideTab | null>(null);
-  let sheetKey = '';
+  const SIDE_TABS: TabItem<DbSideTab>[] = [
+    { id: 'schema', label: 'Tables' },
+    { id: 'saved', label: 'Saved' },
+    { id: 'history', label: 'History' },
+  ];
+  // Phone: the Tables / Saved / History pane is the page; whatever it opens
+  // (a table, a structure, a saved or past query, another view) is pushed over
+  // it with "‹ Tables" in the header, and Back returns with the pane as it was.
+  // Arriving on a connection (a row on the Connections page, a link) opens its
+  // workbench; "‹ Tables" goes to the list.
+  let phoneOpen = $state(true);
+  let openKey = '';
   $effect(() => {
-    // Opening a table (a new / switched tab) or a view closes the sheet.
-    const k = `${database.activeTab}:${database.tabs.length}:${database.mainTab}:${database.selectedConnId}`;
+    const t = database.tabs[database.activeTab];
+    const k = `${database.activeTab}:${database.tabs.length}:${database.mainTab}:${database.selectedConnId}:${database.selectedObjectPath}:${t?.statement}:${database.activePane?.id}`;
     untrack(() => {
-      if (phoneSide && sheetKey && k !== sheetKey) phoneSide = null;
-      sheetKey = k;
+      if (openKey && k !== openKey) phoneOpen = true;
+      openKey = k;
     });
   });
-  function showSide(tab: DbSideTab): void {
-    database.setSideTab(tab);
-    if (viewport.isPhone) phoneSide = tab;
-    // Reopening the tables puts focus back on the selected object.
-    else if (database.sidebarCollapsed) void showSchemaSidebar();
+  const sideName = $derived(SIDE_TABS.find((t) => t.id === database.sideTab)?.label ?? 'Tables');
+  function sideMenu(): MenuItem[] {
+    return database.sideTab === 'schema' ? [{ label: 'Refresh schema', icon: 'refresh', action: () => database.refreshSchema() }] : [];
   }
+  // Showing the hidden pane again (⌘B, "Show Tables") puts focus back on the
+  // selected object, so the keyboard picks up where it left.
+  let paneWasHidden = false;
+  $effect(() => {
+    const hidden = !!pageNav.show;
+    untrack(() => {
+      if (paneWasHidden && !hidden) void tick().then(focusSelectedNode);
+      paneWasHidden = hidden;
+    });
+  });
 
   // The state, in words: Connected · MySQL 8.0.36 · 14 ms / Connecting… /
   // Can't connect — reason. Never a bare dot, never a spinner beside a Run
@@ -235,10 +252,8 @@
     ]);
   }
 
-  async function showSchemaSidebar(): Promise<void> {
+  function focusSelectedNode(): void {
     const page = document.querySelector('.db-page');
-    database.toggleSidebar();
-    await tick();
     const selected = [...(page?.querySelectorAll<HTMLElement>('[data-node-id]') ?? [])]
       .find((node) => node.dataset.nodeId === database.selectedObjectPath);
     (selected?.querySelector<HTMLButtonElement>('.node-label') ?? selected
@@ -256,7 +271,7 @@
   $effect(() =>
     registry.register('connections', [
       { id: 'conn.list', title: 'Show the connection list', group: 'Connections', keywords: 'picker sidebar profiles', run: showConnections },
-      { id: 'conn.sidebar', title: database.sidebarCollapsed ? 'Show the schema sidebar' : 'Hide the schema sidebar', group: 'Connections', shortcut: '⌘B', keywords: 'toggle collapse tree', run: () => (database.sidebarCollapsed ? void showSchemaSidebar() : database.toggleSidebar()) },
+      { id: 'conn.sidebar', title: 'Hide or show the tables', group: 'Connections', shortcut: '⌘B', keywords: 'toggle collapse tree schema sidebar', run: () => pageNav.toggle?.() },
     ]),
   );
   async function onConnSaved(c: Connection): Promise<void> {
@@ -397,56 +412,6 @@
     if (cl && latest()) openCluster(cl);
   }
 
-  const SIDE_TABS: TabItem<DbSideTab>[] = [
-    { id: 'schema', label: 'Tables' },
-    { id: 'saved', label: 'Saved' },
-    { id: 'history', label: 'History' },
-  ];
-  // ── DB Assistant split (resizable, persisted) ────────────────────────────────
-  // When open, the DB Assistant panel sits BESIDE the editor/results, separated by
-  // a draggable divider so the user can enlarge the agent's shell. Mirrors the
-  // query-editor's own resizable-pane idiom (pointer drag + localStorage px).
-  let assistW = $state(loadAssistW());
-  function loadAssistW(): number {
-    const v = Number(lsGet('db.assistW'));
-    return Number.isFinite(v) && v > 280 ? v : 460;
-  }
-  function persistAssistW(): void {
-    lsSet('db.assistW', String(Math.round(assistW)));
-  }
-  const assistMaxW = (): number => Math.max(320, (typeof window !== 'undefined' ? window.innerWidth : 1280) - 360);
-  const pxText = (v: number): string => `${Math.round(v)} pixels wide`;
-  function setAssistW(w: number): void {
-    assistW = w;
-    persistAssistW();
-  }
-  let stopAssistResize: (() => void) | null = null;
-  $effect(() => () => stopAssistResize?.());
-  function startAssistResize(e: PointerEvent): void {
-    e.preventDefault(); stopAssistResize?.();
-    const startX = e.clientX, startW = assistW, maxW = assistMaxW();
-    const onMove = (ev: PointerEvent): void => { assistW = Math.max(300, Math.min(maxW, startW + (startX - ev.clientX))); };
-    const onUp = (): void => {
-      persistAssistW();
-      window.removeEventListener('pointermove', onMove); window.removeEventListener('pointerup', onUp); window.removeEventListener('pointercancel', onUp);
-      if (stopAssistResize === onUp) stopAssistResize = null;
-    };
-    stopAssistResize = onUp;
-    window.addEventListener('pointermove', onMove); window.addEventListener('pointerup', onUp); window.addEventListener('pointercancel', onUp);
-  }
-
-  // ── Connection sidebar width (resizable, persisted) ───────────────────────────
-  // The tablet/desktop sidebar is drag-resizable so long, deeply-nested connection
-  // names ("DB MySQL - Platform Aggregates Prod") get the horizontal room they need;
-  // the chosen width survives reloads. Mirrors the assist-pane idiom above. (On
-  // phones the sidebar is a full-width band — the width binding is skipped there.)
-  // Documented exception to LIST_PANE: the default is 300 (not 280) and the max
-  // tracks the window (up to 640), because this one pane also hosts the schema
-  // tree, Saved and History — deeper, wider content than a plain list.
-  const SIDE_DEFAULT = 300;
-  let sideW = $state(loadPaneWidth('db.sideW', SIDE_DEFAULT, LIST_PANE.min, 640));
-  // Leave room for the editor/results area; cap so the sidebar can't eat the page.
-  const sideMaxW = (): number => Math.min(640, Math.max(360, (typeof window !== 'undefined' ? window.innerWidth : 1280) - 420));
   // Open connections as top-level tabs (Workbench-style), resolved to their
   // Connection records for name + engine glyph.
   const openConns = $derived(
@@ -560,9 +525,12 @@
      results. The back button goes to the connection list. -->
 <PageHeader title={workbenchTitle} more={headerMenu}>
   {#snippet leading()}
-    <button class="icon-btn" onclick={showConnections} aria-label="All connections" title="All connections">
-      <Icon name="chevronLeft" size={16} />
-    </button>
+    <!-- A phone's lead is the list's Back (or ☰); All connections is under ⋯ there. -->
+    {#if !viewport.navDrawer}
+      <button class="icon-btn" onclick={showConnections} aria-label="All connections" title="All connections">
+        <Icon name="chevronLeft" size={16} />
+      </button>
+    {/if}
   {/snippet}
   {#snippet badge()}
     {#if database.selectedConn && database.activePane === null}
@@ -593,13 +561,6 @@
   {/snippet}
   {#snippet actions()}
     {#if database.selectedConn && database.activePane === null}
-      <!-- One way to the side pane: while it is open its own tabs are Tables ·
-           Saved · History; while it is hidden (and on a phone, where it is a
-           sheet) these two open it on that tab. -->
-      {#if viewport.isPhone || database.sidebarCollapsed}
-        <button class="btn small ghost" data-keep onclick={() => showSide('schema')} title={viewport.isPhone ? 'Tables' : 'Tables (⌘B)'}>Tables</button>
-        <button class="btn small ghost" data-overflow="1" onclick={() => showSide('history')} title="Query history and saved queries">History</button>
-      {/if}
       {#if database.mainTab === 'query' && editorBar.cur}
         {#if editorBar.cur.running}
           <button class="btn small qe-stop" data-keep onclick={() => editorBar.cur?.stop()} title="Stop the running query (Esc)"><Icon name="stop" size={12} /> Stop</button>
@@ -617,38 +578,24 @@
 </PageHeader>
 <PageBody fill padded={false}>
 <div class="db-page" class:terminal-active={database.activePane?.kind === 'ssh'}>
-  {#if !viewport.isPhone}
-  <aside
-    id="db-side"
-    class="db-side"
-    class:collapsed={!viewport.isPhone && database.sidebarCollapsed}
-    style={viewport.isPhone || database.sidebarCollapsed ? '' : `width:${sideW}px`}
+  <ListDetail
+    module="database"
+    name={sideName}
+    open={phoneOpen}
+    onback={() => (phoneOpen = false)}
+    empty={!database.selectedConnId || database.activeConnStatus?.phase === 'error'}
+    legacy={{ w: 'db.sideW', hidden: () => (loadFlag('db.sidebarCollapsed', false) ? true : null) }}
   >
-      <!-- TABLET / DESKTOP: one tab strip over the schema tree, Saved and History. -->
-      <div class="side-switch">
-        <Tabs label="Sidebar view" tabs={SIDE_TABS} value={database.sideTab === 'connections' ? 'schema' : database.sideTab} onchange={(id) => database.setSideTab(id)}>
-          {#snippet trailing()}
-            {#if database.sideTab === 'schema' && database.selectedConnId}
-              <button class="icon-btn" onclick={() => database.refreshSchema()} title="Refresh schema" aria-label="Refresh schema"><Icon name="refresh" size={12} /></button>
-            {/if}
-          {/snippet}
-        </Tabs>
-      </div>
-      <div class="side-body">
-        {#if database.selectedConnId}
-          {@render schemaSideBody()}
-        {:else}
-          <div class="side-empty">
-            <EmptyState icon="file" title="No connection open" body="Open a database connection to browse its tables." />
-          </div>
-        {/if}
-      </div>
-  </aside>
-  {/if}
-
-  {#if !viewport.isPhone && !database.sidebarCollapsed}
-    <PaneDivider bind:width={sideW} storageKey="db.sideW" label="Resize connections sidebar" max={sideMaxW()} defaultWidth={SIDE_DEFAULT} />
-  {/if}
+    {#snippet list()}
+      <!-- Tables · Saved · History are the pane's views (its header); ⋯ holds
+           Hide Tables ⌘B and Refresh schema. -->
+      <ListPane menu={sideMenu} testid="db-side">
+        {#snippet views()}
+          <Tabs size="s" label="Sidebar view" tabs={SIDE_TABS} value={database.sideTab === 'connections' ? 'schema' : database.sideTab} onchange={(id) => database.setSideTab(id)} />
+        {/snippet}
+        {@render schemaSideBody()}
+      </ListPane>
+    {/snippet}
 
   <div class="db-main" class:danger-rail={database.isProd} class:guard-rail={database.isGuarded && !database.isProd}>
     {#if !hasAnyTab && connsSettled && !isPage}
@@ -770,28 +717,16 @@
           </ConnectionComparison>
           {/key}
         </div>
-        {#if database.assistOpen}
-          <!-- A focusable separator is the ARIA window-splitter widget (paneResizer sets its tabIndex and value, and adds ←/→, Home/End). -->
-          <div
-            class="assist-divider"
-            role="separator"
-            aria-orientation="vertical"
-            aria-label="Resize assistant"
-            title="Drag or use ←/→ to resize the assistant"
-            onpointerdown={startAssistResize}
-            use:paneResizer={{ value: assistW, min: 300, max: assistMaxW(), invert: true, onChange: setAssistW, text: pxText }}
-          ></div>
-          <aside class="assist-pane" style="width:{assistW}px">
-            <LazyMount lazy={AssistantLazy} what="the assistant" variant="panel" />
-          </aside>
-        {/if}
+        <!-- The DB assistant is this row's Detail pane (DbAssistantPanel). -->
+        {#if database.assistOpen}<LazyMount lazy={AssistantLazy} what="the assistant" quiet />{/if}
       </div>
       {:else}
         <EmptyState icon="db" title="Pick a tab" body="Choose an open connection above." />
       {/if}
     {/if}
   </div>
-  <DiagnoseAside editFor={editableConn} />
+    {#snippet detail()}<DiagnoseAside editFor={editableConn} />{/snippet}
+  </ListDetail>
 </div>
 </PageBody>
 </div>
@@ -804,15 +739,6 @@
     <SchemaTree />
   {/if}
 {/snippet}
-
-{#if viewport.isPhone && phoneSide && database.selectedConnId}
-  <Modal title={phoneSide === 'history' ? 'History' : phoneSide === 'saved' ? 'Saved' : 'Tables'} onclose={() => (phoneSide = null)}>
-    <div class="side-switch">
-      <Tabs label="Sidebar view" tabs={SIDE_TABS} value={database.sideTab === 'connections' ? 'schema' : database.sideTab} onchange={(id) => { database.setSideTab(id); phoneSide = id; }} />
-    </div>
-    <div class="phone-side">{@render schemaSideBody()}</div>
-  </Modal>
-{/if}
 
 {#if changesOpen && database.selectedConnId}<Modal title="Database changes" width={1040} onclose={() => changesOpen=false}><LazyMount lazy={DatabaseChangesLazy} what="database changes" variant="panel" props={{ connectionId: database.selectedConnId, node: database.activeDb }} /></Modal>{/if}
 
@@ -918,83 +844,6 @@
     /* Let the page shrink inside its (flex) content pane instead of forcing its
        intrinsic width — belt-and-suspenders with .db-main's min-width:0 below. */
     min-width: 0;
-  }
-  .db-side {
-    /* Default width; on tablet/desktop an inline `width:{sideW}px` (drag-resizable,
-       persisted) overrides this, and the phone media query forces full width. */
-    width: 300px;
-    flex-shrink: 0;
-    border-inline-end: 1px solid var(--border);
-    display: flex;
-    flex-direction: column;
-    min-height: 0;
-  }
-  /* On tablet/desktop the list lives inside the scrollable .side-body tab, so it
-     fills the full sidebar height (no cap) and the side-body owns the scroll. */
-  .side-body .conn-list {
-    padding: 0;
-    border-bottom: none;
-    overflow-y: visible;
-  }
-  .conn-empty,
-  /* Schema-tab empty state with its way-forward buttons. */
-  .side-empty {
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
-    padding: 4px 2px;
-  }
-  .link {
-    border: none;
-    background: none;
-    color: var(--accent-text);
-    cursor: pointer;
-    font-size: var(--fs-s);
-    padding: 0;
-  }
-  .conn-head {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    padding: 6px 8px 2px;
-  }
-  .conn-head-title {
-    font-size: var(--fs-xs);
-    font-weight: 600;
-    text-transform: uppercase;
-    letter-spacing: .06em;
-    color: var(--text-dim);
-  }
-  .head-btns {
-    display: flex;
-    align-items: center;
-    gap: 1px;
-  }
-  .conn-name {
-    flex: 1;
-    min-width: 0;
-    font-size: var(--fs-s);
-    font-weight: 500;
-    line-height: 1.35;
-    /* Show the FULL connection name instead of clipping it: wrap onto extra lines
-       (breaking long unbroken tokens like host URLs), up to 3 lines (~50–75 chars)
-       before ellipsizing — so deeply-nested names stay readable at any width. */
-    overflow-wrap: anywhere;
-    display: -webkit-box;
-    -webkit-line-clamp: 3;
-    line-clamp: 3;
-    -webkit-box-orient: vertical;
-    overflow: hidden;
-  }
-  .side-switch {
-    flex-shrink: 0;
-  }
-  .side-body {
-    flex: 1;
-    overflow-y: auto;
-    overflow-x: hidden;
-    padding: 8px;
-    min-height: 0;
   }
   .db-main {
     flex: 1;
@@ -1165,37 +1014,6 @@
     display: flex;
     flex-direction: column;
   }
-  /* Draggable divider between the view and the assistant pane. */
-  .assist-divider {
-    flex: none;
-    width: 6px;
-    cursor: col-resize;
-    background: var(--border);
-    position: relative;
-    touch-action: none;
-  }
-  .assist-divider:focus-visible {
-    outline: none;
-  }
-  .assist-divider:hover,
-  .assist-divider:focus-visible {
-    background: var(--accent);
-  }
-  /* Draggable divider between the connections sidebar and the main area. Sits flush
-     against the sidebar's inline-end border; a hit-area wider than its visible line
-     makes it easy to grab. */
-  .db-side.collapsed {
-    display: none;
-  }
-
-  /* The DB Assistant pane — fixed (resizable) width, pinned to the right edge. */
-  .assist-pane {
-    flex: none;
-    min-width: 0;
-    min-height: 0;
-    display: flex;
-    border-inline-start: 1px solid var(--border);
-  }
   .ellipsis {
     overflow: hidden;
     text-overflow: ellipsis;
@@ -1206,7 +1024,7 @@
      The results are the screen: the view fills the height under the header
      (the query tabs, the editor folded to one line after a run, then the rows
      down to the bottom bar); a view taller than that (Structure, Builder)
-     scrolls inside it. Tables and History are a sheet from the header. */
+     scrolls inside it. Tables / Saved / History are the list page before it. */
   @media (max-width: 640px) {
     .db-page {
       flex-direction: column;
@@ -1222,24 +1040,7 @@
       overflow-y: auto;
       -webkit-overflow-scrolling: touch;
     }
-    /* The assistant drops below the view as a full-width block. */
-    .main-split {
-      flex-direction: column;
-    }
-    .assist-divider {
-      display: none;
-    }
-    .assist-pane {
-      width: 100% !important;
-      height: 60vh;
-      border-inline-start: none;
-      border-top: 1px solid var(--border);
-    }
     .conn-tabs { height: 44px; }
-  }
-  .phone-side {
-    max-height: 60vh;
-    overflow-y: auto;
   }
   /* Finger-sized header controls on touch. */
   @media (hover: none), (pointer: coarse) {
@@ -1265,15 +1066,12 @@
       display: none;
     }
   }
-  /* Tablet keeps two columns; cap restored sidebar width within viewport. */
   @media (min-width: 641px) and (max-width: 1024px) {
-    .db-side { max-width: 45vw; }
     .main-tabs { height: auto; min-height: 44px; padding: 6px 12px; flex-wrap: wrap; row-gap: 4px; }
     .main-tabs .grow { flex-basis: 100%; height: 0; }
     .conn-status { flex-wrap: wrap; }
   }
   @media (max-height: 500px) and (pointer: coarse) {
-    .db-side { max-width: min(32vw, 220px); }
     .main-tabs { min-height: 36px; padding: 4px 10px; }
   }
 </style>

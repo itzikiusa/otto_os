@@ -108,8 +108,6 @@ async function routeQueries(page: Page, id = connId): Promise<void> {
 async function openConn(page: Page, name = CONN): Promise<void> {
   await page.goto('/#/database');
   await expect(page.locator('.shell')).toBeVisible({ timeout: 30_000 });
-  const picker = page.locator('.side-switch [role="tab"]', { hasText: 'Connections' }).first();
-  if (await picker.isVisible().catch(() => false)) await picker.click();
   const c = page.locator('.conn-list .tr-title', { hasText: name });
   await expect(c.first()).toBeVisible({ timeout: 30_000 });
   await c.first().click();

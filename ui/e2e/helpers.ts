@@ -418,12 +418,12 @@ export async function showConnectionList(page: Page): Promise<void> {
   await expect(page.locator('.conn-list')).toBeVisible({ timeout: 15_000 });
 }
 
-/** The open connection's tables: the side pane's Tables tab, or on a phone the
- *  sheet the header's Tables button opens (with the same Tables · Saved ·
- *  History tabs). */
+/** The open connection's tables: the side pane's Tables view, or on a phone
+ *  the list page "‹ <view>" goes back to (the same Tables · Saved · History
+ *  views, as the page header). */
 export async function showDbTables(page: Page): Promise<void> {
   if ((page.viewportSize()?.width ?? 0) <= 640) {
-    await page.getByTestId('page-header').getByRole('button', { name: 'Tables', exact: true }).click();
+    await page.getByTestId('page-header').getByRole('button', { name: /^Back to (Tables|Saved|History)$/ }).click();
   }
   await page.getByRole('tablist', { name: 'Sidebar view' }).getByRole('tab', { name: 'Tables', exact: true }).click();
   await expect(page.locator('.schema-tree')).toBeVisible({ timeout: 15_000 });

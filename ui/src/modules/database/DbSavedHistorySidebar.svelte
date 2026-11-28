@@ -1,6 +1,7 @@
 <script lang="ts">
   // Saved Queries + Query History sidebar body extracted from DatabasePage.svelte.
   import { focusOnMount } from '../../lib/focusOnMount';
+  import { rowMenu } from '../../lib/rowMenu';
   import Icon from '../../lib/components/Icon.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
@@ -115,7 +116,7 @@
     />
   {:else}
     {#each filteredSaved as q (q.id)}
-      <div class="saved-row" role="presentation" oncontextmenu={(e) => { e.preventDefault(); savedMenu(e, q); }}>
+      <div class="side-row saved-row" role="presentation" oncontextmenu={(e) => { e.preventDefault(); savedMenu(e, q); }}>
         {#if renamingId === q.id}
           <input
             dir="auto"
@@ -130,12 +131,12 @@
             aria-label="Rename saved query"
           />
         {:else}
-          <button class="saved-open" onclick={() => database.openSavedQuery(q)} title={stmtPreview(q.statement, 1000)}>
-            <Icon name="file" size={12} />
-            <span class="ellipsis">{q.name}</span>
+          <button class="side-row-main saved-open" data-side-row onclick={() => database.openSavedQuery(q)} title={stmtPreview(q.statement, 1000)} use:rowMenu>
+            <Icon name="file" size={14} />
+            <span class="side-row-title ellipsis" dir="auto">{q.name}</span>
           </button>
           <button
-            class="icon-btn row-del"
+            class="icon-btn side-row-more row-del"
             onclick={(e) => savedMenu(e, q)}
             aria-haspopup="menu"
             aria-label="Actions for saved query {q.name}"
@@ -198,16 +199,19 @@
       />
     {:else}
       {#each filteredHistory as h (h.id)}
-        <button
-          class="hist-row"
-          class:bad={!h.ok}
-          onclick={() => void database.openHistory(h)}
-          title={h.error ? stmtPreview(h.error, 1000) : stmtPreview(h.statement, 1000)}
-        >
-          <span class="hist-dot" class:ok={h.ok}></span>
-          <span class="hist-stmt ellipsis mono">{stmtPreview(h.statement)}</span>
-          <span class="hist-meta">{h.ok ? `${h.row_count}r` : 'err'} · {rel(h.created_at, { compact: true })}</span>
-        </button>
+        <div class="side-row">
+          <button
+            class="side-row-main hist-row"
+            class:bad={!h.ok}
+            data-side-row
+            onclick={() => void database.openHistory(h)}
+            title={h.error ? stmtPreview(h.error, 1000) : stmtPreview(h.statement, 1000)}
+          >
+            <span class="hist-dot" class:ok={h.ok}></span>
+            <span class="side-row-title hist-stmt ellipsis mono">{stmtPreview(h.statement)}</span>
+            <span class="side-row-trailing hist-meta">{h.ok ? `${h.row_count}r` : 'err'} · {rel(h.created_at, { compact: true })}</span>
+          </button>
+        </div>
       {/each}
       {#if database.canLoadMoreHistory}
         <button class="load-more" onclick={() => database.loadMoreHistory()} disabled={database.historyLoadingMore}>
@@ -276,52 +280,7 @@
     color: var(--text-dim);
     cursor: default;
   }
-  .saved-row,
-  .hist-row {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    width: 100%;
-    border: none;
-    background: transparent;
-    border-radius: var(--radius-s);
-    cursor: pointer;
-    color: var(--text);
-    text-align: start;
-    padding: 0 6px;
-  }
-  .saved-row {
-    padding: 0;
-  }
-  .saved-open {
-    flex: 1;
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    min-width: 0;
-    border: none;
-    background: transparent;
-    color: var(--text);
-    cursor: pointer;
-    height: 28px;
-    padding: 0 6px;
-    border-radius: var(--radius-s);
-    font-size: var(--fs-s);
-  }
-  .saved-row:hover,
-  .hist-row:hover {
-    background: var(--hover);
-  }
-  .row-del {
-    opacity: 0;
-  }
-  .saved-row:hover .row-del,
-  .saved-row:focus-within .row-del {
-    opacity: 1;
-  }
-  .hist-row {
-    height: 32px;
-  }
+  /* Rows: the shared .side-row look (app.css); the ⋯ is the row's .side-row-more. */
   .hist-dot {
     width: 6px;
     height: 6px;
@@ -342,20 +301,5 @@
     color: var(--text-dim);
     flex-shrink: 0;
     font-variant-numeric: tabular-nums;
-  }
-  @media (max-width: 640px) {
-    .hist-stmt {
-      font-size: var(--fs-m);
-    }
-    .hist-meta {
-      font-size: var(--fs-s);
-    }
-    .saved-open {
-      font-size: var(--fs-l);
-      height: 36px;
-    }
-    .hist-row {
-      height: 40px;
-    }
   }
 </style>

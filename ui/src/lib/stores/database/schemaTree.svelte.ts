@@ -35,7 +35,6 @@ export type SchemaTreeHost = Pick<
   | 'schemaRoot'
   | 'selectedConnId'
   | 'showCounts'
-  | 'sidebarCollapsed'
 >;
 
 export class DbSchemaTreeStore {
@@ -168,11 +167,6 @@ export class DbSchemaTreeStore {
     const id = this.db.selectedConnId;
     if (!id) return;
     for (const nodeId of this.db.expanded) void this.loadChildren(id, nodeId);
-  }
-
-  toggleSidebar(): void {
-    this.db.sidebarCollapsed = !this.db.sidebarCollapsed;
-    saveFlag('db.sidebarCollapsed', this.db.sidebarCollapsed);
   }
 
   /**

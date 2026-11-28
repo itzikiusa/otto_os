@@ -49,7 +49,7 @@ test('a failed SSH connection opens an embedded, approval-required diagnosis thr
   // The access mode rides on the create; the first message follows it.
 
   // Close keeps the thread: Diagnose again shows it with no new start or thread.
-  await aside.getByRole('button', { name: 'Close — the thread is kept' }).click();
+  await page.getByTestId('diagnose-aside-close').click();
   await expect(aside).toHaveCount(0);
   await panel.getByTestId('conn-diagnose').click();
   await expect(page.getByTestId('diagnose-aside')).toBeVisible();

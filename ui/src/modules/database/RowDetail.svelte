@@ -1,10 +1,14 @@
 <script lang="ts">
-  // Row detail side panel for the results grid (TablePlus's "row detail"): the
-  // record under the grid cursor, one field per line — name + type, the value
-  // wrapped in full (NULL dim, JSON pretty-printed), a per-field copy. Read-only
-  // on purpose: editing stays in the grid / Vertical view where it is
-  // review-gated. ‹ › step through the rows in view.
+  // Row detail for the results grid (TablePlus's "row detail"), the grid's
+  // Detail pane: the record under the grid cursor, one field per line — name +
+  // type, the value wrapped in full (NULL dim, JSON pretty-printed), a
+  // per-field copy. Read-only on purpose: editing stays in the grid / Vertical
+  // view where it is review-gated. The footer steps through the rows in view
+  // ("‹ Previous · 3 of 50 · Next ›"); ⋯ holds the raw JSON view. Inline
+  // beside the grid while there is room, a sheet otherwise (full width on a
+  // phone). ⌥⌘B opens / closes it.
   import Icon from '../../lib/components/Icon.svelte';
+  import DetailPane from '../../lib/components/side/DetailPane.svelte';
   import type { QueryResult } from '../../lib/api/types';
   import { cellStr, copyWithToast, isComplex, prettyJson } from './results-format';
   import { columnKind } from './grid-format';
@@ -23,9 +27,12 @@
     /** Open the whole row as searchable raw JSON (labelled `rawLabel`). */
     onraw?: () => void;
     rawLabel?: string;
+    open: boolean;
     onclose: () => void;
+    /** ⌥⌘B: open / close. */
+    ontoggle: () => void;
   }
-  let { result, row, rowIdx, position, total, onstep, onopen, onraw, rawLabel = 'View raw JSON', onclose }: Props = $props();
+  let { result, row, rowIdx, position, total, onstep, onopen, onraw, rawLabel = 'View raw JSON', open, onclose, ontoggle }: Props = $props();
 
   let fieldFilter = $state('');
   const fields = $derived.by(() => {
@@ -40,107 +47,90 @@
   }
 </script>
 
-<aside class="row-detail" aria-label="Row detail">
-  <header class="rd-head">
-    <span class="rd-title">{rowIdx === null ? 'Row' : `Row ${rowIdx + 1}`}</span>
-    {#if position >= 0}<span class="rd-pos">{position + 1} of {total.toLocaleString()}</span>{/if}
-    <span class="grow"></span>
-    {#if onraw}
-      <button class="icon-btn" disabled={!row} onclick={onraw} aria-label={rawLabel} title={rawLabel}>
-        <Icon name="eye" size={13} />
-      </button>
+{#snippet rowNav()}
+  <button type="button" class="btn small ghost" disabled={position <= 0} onclick={() => onstep(-1)} aria-label="Previous row" title="Previous row">
+    <Icon name="chevronLeft" size={12} /> Previous
+  </button>
+  <span class="rd-pos">{position >= 0 ? `${position + 1} of ${total.toLocaleString()}` : ''}</span>
+  <button type="button" class="btn small ghost" disabled={position < 0 || position >= total - 1} onclick={() => onstep(1)} aria-label="Next row" title="Next row">
+    Next <Icon name="chevronRight" size={12} />
+  </button>
+{/snippet}
+
+<DetailPane
+  module="database"
+  pane="row"
+  title={rowIdx === null ? 'Row' : `Row ${rowIdx + 1}`}
+  {open}
+  {onclose}
+  {ontoggle}
+  menu={onraw ? () => [{ label: rawLabel, icon: 'eye', disabled: !row, action: () => onraw?.() }] : undefined}
+  footer={rowNav}
+  testid="row-detail"
+>
+  <div class="row-detail">
+    <div class="rd-search">
+      <Icon name="search" size={12} />
+      <input dir="ltr"
+        class="rd-search-input"
+        type="text"
+        placeholder="Find a field…"
+        aria-label="Find a field"
+        spellcheck="false"
+        bind:value={fieldFilter}
+      />
+    </div>
+    {#if !row}
+      <p class="rd-empty">Click a row in the grid to see all of its fields here.</p>
+    {:else}
+      <dl class="rd-fields">
+        {#each fields as { c, ci } (ci)}
+          {@const v = row[ci]}
+          {@const kind = columnKind(c.type_hint, [v])}
+          <div class="rd-field">
+            <dt>
+              <span class="rd-name mono" title={c.name}>{c.name}</span>
+              {#if c.type_hint}<span class="rd-type mono">{c.type_hint}</span>{/if}
+              <span class="grow"></span>
+              <button
+                class="icon-btn rd-act"
+                onclick={() => copyWithToast(v === null || v === undefined ? '' : cellStr(v))}
+                aria-label="Copy {c.name}"
+                title="Copy value"
+              ><Icon name="copy" size={12} /></button>
+              <button class="icon-btn rd-act" onclick={() => onopen(ci)} aria-label="Open {c.name} in the viewer" title="Open in the viewer">
+                <Icon name="maximize" size={12} />
+              </button>
+            </dt>
+            <dd class="mono" class:num={kind === 'num'}>
+              {#if v === null || v === undefined}
+                <span class="rd-null">NULL</span>
+              {:else if isComplex(v)}
+                <pre class="rd-json">{text(v)}</pre>
+              {:else}
+                {text(v)}
+              {/if}
+            </dd>
+          </div>
+        {/each}
+        {#if fields.length === 0}
+          <p class="rd-empty">No field matches “{fieldFilter}”.</p>
+        {/if}
+      </dl>
     {/if}
-    <button class="icon-btn" disabled={position <= 0} onclick={() => onstep(-1)} aria-label="Previous row" title="Previous row">
-      <Icon name="chevronUp" size={13} />
-    </button>
-    <button class="icon-btn" disabled={position < 0 || position >= total - 1} onclick={() => onstep(1)} aria-label="Next row" title="Next row">
-      <Icon name="chevronDown" size={13} />
-    </button>
-    <button class="icon-btn" onclick={onclose} aria-label="Close row detail" title="Close row detail">
-      <Icon name="x" size={13} />
-    </button>
-  </header>
-  <div class="rd-search">
-    <Icon name="search" size={12} />
-    <input dir="ltr"
-      class="rd-search-input"
-      type="text"
-      placeholder="Find a field…"
-      aria-label="Find a field"
-      spellcheck="false"
-      bind:value={fieldFilter}
-    />
   </div>
-  {#if !row}
-    <p class="rd-empty">Click a row in the grid to see all of its fields here.</p>
-  {:else}
-    <dl class="rd-fields">
-      {#each fields as { c, ci } (ci)}
-        {@const v = row[ci]}
-        {@const kind = columnKind(c.type_hint, [v])}
-        <div class="rd-field">
-          <dt>
-            <span class="rd-name mono" title={c.name}>{c.name}</span>
-            {#if c.type_hint}<span class="rd-type mono">{c.type_hint}</span>{/if}
-            <span class="grow"></span>
-            <button
-              class="icon-btn rd-act"
-              onclick={() => copyWithToast(v === null || v === undefined ? '' : cellStr(v))}
-              aria-label="Copy {c.name}"
-              title="Copy value"
-            ><Icon name="copy" size={12} /></button>
-            <button class="icon-btn rd-act" onclick={() => onopen(ci)} aria-label="Open {c.name} in the viewer" title="Open in the viewer">
-              <Icon name="maximize" size={12} />
-            </button>
-          </dt>
-          <dd class="mono" class:num={kind === 'num'}>
-            {#if v === null || v === undefined}
-              <span class="rd-null">NULL</span>
-            {:else if isComplex(v)}
-              <pre class="rd-json">{text(v)}</pre>
-            {:else}
-              {text(v)}
-            {/if}
-          </dd>
-        </div>
-      {/each}
-      {#if fields.length === 0}
-        <p class="rd-empty">No field matches “{fieldFilter}”.</p>
-      {/if}
-    </dl>
-  {/if}
-</aside>
+</DetailPane>
 
 <style>
   .row-detail {
-    /* Shrinks toward 240px when the grid needs the room — no viewport query. */
-    flex: 0 1 300px;
-    min-width: 240px;
+    flex: 1;
+    min-height: 0;
     display: flex;
     flex-direction: column;
-    border: 1px solid var(--border);
-    border-radius: var(--radius-s);
-    background: var(--surface);
-    overflow: hidden;
-  }
-  .rd-head {
-    display: flex;
-    align-items: center;
-    gap: 4px;
-    height: 40px;
-    box-sizing: border-box;
-    padding-block: 0; padding-inline: 12px 6px;
-    background: var(--surface-2);
-    border-bottom: 1px solid var(--border);
-  }
-  .rd-title {
-    font-weight: 600;
-    font-size: var(--fs-s);
   }
   .rd-pos {
-    font-size: var(--fs-xs);
-    color: var(--text-dim);
-    margin-inline-start: 6px;
+    flex: 1;
+    text-align: center;
     font-variant-numeric: tabular-nums;
   }
   .rd-search {
@@ -235,13 +225,13 @@
     max-height: 220px;
     overflow: auto;
   }
+  .grow {
+    flex: 1;
+  }
   .rd-empty {
     margin: 0;
     padding: 16px 12px;
     color: var(--text-dim);
     font-size: var(--fs-s);
-  }
-  .grow {
-    flex: 1;
   }
 </style>

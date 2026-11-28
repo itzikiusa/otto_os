@@ -21,7 +21,8 @@ test('an unreachable database says it once in the header, with Retry and Details
   await expect(state).toContainText('Can’t connect', { timeout: 30_000 });
   await expect(page.getByRole('button', { name: 'Retry', exact: true })).toHaveCount(1);
   await expect(page.getByText('fixture.invalid')).toHaveCount(0); // the raw resolver text is not repeated
-  await expect(page.locator('.db-side')).toContainText('No tables while it can’t connect.');
+  // Nothing to list while it can't connect: no tables pane (the empty rule).
+  await expect(page.getByTestId('db-side')).toHaveCount(0);
   const banner = page.getByTestId('db-conn-error-banner');
   await expect(banner).toHaveCount(0);
 

@@ -153,7 +153,7 @@ test('grid: filter row, row detail, numeric alignment and NULL styling', async (
   const detail = page.locator('.row-detail');
   await expect(detail).toBeVisible();
   await page.locator('.grid tbody tr:not(.spacer)').nth(1).locator('td.cell').first().click();
-  await expect(detail.locator('.rd-title')).toHaveText(/Row \d+/);
+  await expect(page.getByTestId('row-detail').getByRole('heading', { name: /Row \d+/ })).toBeVisible();
   await expect(detail.locator('.rd-field', { hasText: 'status' })).toContainText('refunded');
 });
 

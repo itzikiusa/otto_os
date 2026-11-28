@@ -2,6 +2,8 @@ import { test, expect, type Page } from '@playwright/test';
 import { expectNoHorizontalOverflow, openPage } from './helpers';
 import { mockContainersApi } from './containers-mock';
 import { mockBrokersApi, seedBrokersCluster } from './brokers-mock';
+import { mockDbRoutes, seedMockDbConnection } from './db-mock';
+import { apiCtx, seedWorkspace } from './seed';
 
 // The rc.6 side surfaces of Containers, Brokers and Database on the three
 // sizes, driven with real taps on a phone: list → item → ‹ Back → another
@@ -223,6 +225,128 @@ for (const s of ['light', 'dark'] as const) {
         await page.getByTestId('message-detail-close').tap();
         await expect(detail).toBeHidden();
         await back.tap();
+        await page.getByTestId('open-navigator').tap();
+        await expect(page.getByRole('dialog', { name: 'Navigator' })).toBeVisible();
+        await page.keyboard.press('Escape');
+        await expect(page.getByTestId('open-side-panel')).toBeVisible();
+      });
+    });
+  });
+}
+
+for (const s of ['light', 'dark'] as const) {
+  test.describe(`Database side surfaces (${s})`, () => {
+    let workspaceId = '';
+    let connId = '';
+    const CONN = `side-d-db-${s}-${Math.random().toString(36).slice(2, 6)}`;
+    test.beforeAll(async () => {
+      const { ctx, base } = await apiCtx();
+      workspaceId = await seedWorkspace(ctx, base);
+      connId = await seedMockDbConnection(ctx, base, workspaceId, CONN);
+      await ctx.dispose();
+    });
+    async function open(page: Page): Promise<void> {
+      await scheme(page, s);
+      await page.addInitScript((wsId) => localStorage.setItem('otto_workspace', wsId as string), workspaceId);
+      await mockDbRoutes(page, connId);
+      await page.goto('/#/connections');
+      const c = page.locator('.conn-list .tr-title', { hasText: CONN }).first();
+      await expect(c).toBeVisible({ timeout: 30_000 });
+      await c.click();
+      await expect(page.locator('.query-editor')).toBeVisible({ timeout: 20_000 });
+    }
+    async function runOrders(page: Page): Promise<void> {
+      const content = page.locator('.qe-edit .cm-content');
+      await content.click();
+      await page.keyboard.press('ControlOrMeta+A');
+      await page.keyboard.insertText('SELECT * FROM shop.orders');
+      await page.locator('.btn.small.primary', { hasText: 'Run' }).first().click();
+      await expect(page.locator('.grid tbody tr:not(.spacer)').first()).toBeVisible({ timeout: 15_000 });
+    }
+
+    test.describe('desktop', () => {
+      test.use({ viewport: DESKTOP, isMobile: false, hasTouch: false });
+      test('tables pane with views, ⋯ Hide / Show and ⌘B; row detail as the Detail pane', async ({ page }) => {
+        await open(page);
+        const side = page.getByTestId('db-side');
+        await expect(side.getByRole('tablist', { name: 'Sidebar view' })).toBeVisible();
+        await expect(page.locator('.schema-tree')).toBeVisible();
+        await runOrders(page);
+        await shot(page, `database-desktop-${s}`);
+        await page.getByRole('button', { name: 'Row detail' }).click();
+        await page.locator('.grid tbody tr:not(.spacer)').nth(2).locator('td.cell').first().click();
+        const detail = page.getByTestId('row-detail');
+        await expect(detail.getByRole('heading', { name: /^Row \d+$/ })).toBeVisible();
+        await expect(detail.getByText(/\d+ of 240/)).toBeVisible();
+        await shot(page, `database-desktop-row-${s}`);
+        const before = await detail.getByRole('heading').textContent();
+        await detail.getByRole('button', { name: 'Next row' }).click();
+        await expect(detail.getByRole('heading')).not.toHaveText(before ?? '');
+        await page.getByTestId('row-detail-close').click();
+        await expect(detail).toBeHidden();
+        // ⋯ › Hide Tables, Show Tables, ⌘B.
+        await page.getByTestId('db-side-more').click();
+        await page.getByRole('menuitem', { name: /^Hide Tables/ }).click();
+        await expect(side).toBeHidden();
+        await page.getByTestId('show-list-pane').click();
+        await expect(side).toBeVisible();
+        await side.getByRole('tab', { name: 'History', exact: true }).click();
+        await page.keyboard.press('Meta+b');
+        await expect(side).toBeHidden();
+        await expect(page.getByRole('button', { name: 'Show History', exact: true })).toBeVisible();
+        await page.keyboard.press('Meta+b');
+        await expect(side).toBeVisible();
+      });
+    });
+
+    test.describe('tablet', () => {
+      test.use({ viewport: TABLET, isMobile: true, hasTouch: true });
+      test('tables beside the workbench; row detail without room is a sheet', async ({ page }) => {
+        await open(page);
+        await expect(page.getByTestId('db-side')).toBeVisible();
+        await runOrders(page);
+        await expectNoHorizontalOverflow(page);
+        await shot(page, `database-tablet-${s}`);
+        await page.getByRole('button', { name: 'Row detail' }).tap();
+        await expect(page.getByTestId('row-detail')).toBeVisible();
+        await shot(page, `database-tablet-row-${s}`);
+        await page.getByTestId('row-detail-close').tap();
+        await expect(page.getByTestId('row-detail')).toBeHidden();
+      });
+    });
+
+    test.describe('phone', () => {
+      test.use({ viewport: PHONE, isMobile: true, hasTouch: true });
+      test('push: workbench → ‹ Tables → a table → Back → Saved; row detail sheet; ☰ and Side panel', async ({ page }) => {
+        await open(page);
+        const back = page.getByRole('button', { name: 'Back to Tables', exact: true });
+        await expect(back).toBeVisible();
+        await runOrders(page);
+        await expectNoHorizontalOverflow(page);
+        await shot(page, `database-phone-content-${s}`);
+        // Row detail: the results ⋯ › Row detail, a full-width sheet.
+        await page.getByRole('button', { name: 'More result actions' }).tap();
+        await page.getByRole('menuitem', { name: 'Row detail' }).tap();
+        const detail = page.getByTestId('row-detail');
+        await expect(detail).toBeVisible();
+        await shot(page, `database-phone-row-${s}`);
+        await page.getByTestId('row-detail-close').tap();
+        await expect(detail).toBeHidden();
+        // ‹ Tables: the list is the page, its views in the header row.
+        await back.tap();
+        const tree = page.getByRole('tree', { name: 'Schema' });
+        await expect(tree).toBeVisible();
+        await expect(page.getByTestId('page-header').getByRole('tablist', { name: 'Sidebar view' })).toBeVisible();
+        await expectNoHorizontalOverflow(page);
+        await shot(page, `database-phone-list-${s}`);
+        await tree.getByRole('treeitem', { name: /^Tables/ }).first().tap();
+        await tree.getByRole('treeitem', { name: /^orders/ }).first().tap();
+        await expect(back).toBeVisible();
+        await expect(tree).toBeHidden();
+        await back.tap();
+        await expect(tree.getByRole('treeitem', { name: /^orders/ }).first()).toHaveAttribute('aria-selected', 'true');
+        await page.getByTestId('page-header').getByRole('tab', { name: 'Saved', exact: true }).tap();
+        await expect(page.getByRole('button', { name: 'Back to Saved', exact: true })).toHaveCount(0);
         await page.getByTestId('open-navigator').tap();
         await expect(page.getByRole('dialog', { name: 'Navigator' })).toBeVisible();
         await page.keyboard.press('Escape');

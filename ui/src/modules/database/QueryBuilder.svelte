@@ -36,6 +36,7 @@
   import { resourceAccess } from '../../lib/stores/resource-access.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import { paneResizer } from '../../lib/paneResizer';
+  import DetailPane from '../../lib/components/side/DetailPane.svelte';
   import VirtualList from '../../lib/components/VirtualList.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
@@ -173,51 +174,17 @@
     }
   }
 
-  // Resizable palette column (persisted; double-click resets).
-  const PALETTE_W_DEFAULT = 208;
-  let paletteW = $state(loadPaletteW());
-  function loadPaletteW(): number {
-    try {
-      const v = Number(localStorage.getItem('db.qbPaletteW'));
-      return Number.isFinite(v) && v >= 160 ? Math.min(400, v) : PALETTE_W_DEFAULT;
-    } catch {
-      return PALETTE_W_DEFAULT;
-    }
-  }
-  function persistPaletteW(): void {
-    try {
-      localStorage.setItem('db.qbPaletteW', String(Math.round(paletteW)));
-    } catch {
-      /* storage unavailable — non-fatal */
-    }
-  }
-  function startPaletteResize(e: PointerEvent): void {
-    e.preventDefault();
-    const startX = e.clientX;
-    const startW = paletteW;
-    const onMove = (ev: PointerEvent): void => {
-      paletteW = Math.max(160, Math.min(400, startW + (ev.clientX - startX)));
-    };
-    const onUp = (): void => {
-      persistPaletteW();
-      window.removeEventListener('pointermove', onMove);
-      window.removeEventListener('pointerup', onUp);
-      window.removeEventListener('pointercancel', onUp);
-    };
-    window.addEventListener('pointermove', onMove);
-    window.addEventListener('pointerup', onUp);
-    // A cancelled gesture (system gesture, focus loss) ends the drag too —
-    // else pointermove stays attached and the pane follows the cursor.
-    window.addEventListener('pointercancel', onUp);
-  }
-  function resetPaletteW(): void {
-    paletteW = PALETTE_W_DEFAULT;
-    persistPaletteW();
-  }
-  function setPaletteW(w: number): void {
-    paletteW = w;
-    persistPaletteW();
-  }
+  // The table palette is the builder's Detail pane: open beside the canvas
+  // when there is room for both (so on first load only then); a sheet
+  // otherwise, from the canvas's "Tables" button. ⌥⌘B toggles it.
+  let paletteOpen = $state(false);
+  let paletteSheet = $state(false);
+  let paletteAuto = true;
+  $effect(() => {
+    if (!paletteAuto || paletteLoading || (!paletteTables.length && !paletteError)) return;
+    paletteAuto = false;
+    paletteOpen = !paletteSheet;
+  });
 
   // Canvas scroll container (cards + edges live in its content coordinates).
   let canvasEl = $state<HTMLDivElement | null>(null);
@@ -912,72 +879,13 @@
     body="The visual query builder works with MySQL, PostgreSQL and ClickHouse connections. For MongoDB, use Aggregate pipeline… in the results toolbar’s More menu."
   />
 {:else}
-  <div class="builder" style="--qb-palette-w:{paletteW}px">
-    <!-- ── Palette ─────────────────────────────────────────────────────── -->
-    <aside class="palette" aria-label="Tables">
-      <div class="pal-head">
-        <span class="section-title">Tables</span>
-        {#if tables.length}
-          <button class="icon-btn" onclick={clearCanvas} aria-label="Clear the builder" title="Clear the builder">
-            <Icon name="trash" size={12} />
-          </button>
-        {/if}
-      </div>
-      {#if databases.length > 1 || (databases[0]?.name ?? '') !== ''}
-        <select class="input db-select" bind:value={selectedDb} onchange={loadPaletteTables} aria-label="Database">
-          {#each databases as d (d.path)}
-            <option value={d.path}>{d.name || 'default'}</option>
-          {/each}
-        </select>
-      {/if}
-      <div class="pal-search">
-        <Icon name="search" size={12} />
-        <input dir="ltr" class="pal-search-input" placeholder="Filter tables…" aria-label="Filter tables" bind:value={paletteSearch} spellcheck="false" />
-      </div>
-      <div class="pal-list">
-        {#if paletteLoading}
-          <div class="pal-hint"><Skeleton rows={6} height={22} label="tables" /></div>
-        {:else if paletteError}
-          <div class="pal-hint"><LoadState what="tables" variant="compact" error={paletteError} empty onretry={() => void loadPaletteTables()} /></div>
-        {:else if paletteTables.length === 0}
-          <div class="pal-hint">No tables in {dbName(selectedDb) || 'this database'}.</div>
-        {:else if filteredPalette.length === 0}
-          <div class="pal-hint">No tables match “{paletteSearch.trim()}”.</div>
-        {:else}
-          <VirtualList
-            items={filteredPalette}
-            estimateHeight={27}
-            class="pal-vlist"
-            key={(t) => t.path}
-            findText={(t) => t.label}
-          >
-            {#snippet row(t)}
-              <button class="pal-item" class:on={onCanvas.has(t.path)} onclick={() => addTable(t)} title="Add {t.label} to the canvas">
-                <Icon name={t.kind === 'view' ? 'eye' : 'grid'} size={12} />
-                <span class="pal-item-label">{t.label}</span>
-                <Icon name="plus" size={12} />
-              </button>
-            {/snippet}
-          </VirtualList>
-        {/if}
-      </div>
-    </aside>
-
-    <!-- A focusable separator is the ARIA window-splitter widget (paneResizer adds ←/→, Home/End, Enter). -->
-    <div
-      class="side-resizer"
-      role="separator"
-      aria-orientation="vertical"
-      aria-label="Resize table list"
-      title="Drag or use ←/→ to resize · double-click or Enter to reset"
-      ondblclick={resetPaletteW}
-      onpointerdown={startPaletteResize}
-      use:paneResizer={{ value: paletteW, min: 160, max: 400, onChange: setPaletteW, onReset: resetPaletteW, text: (v) => `${Math.round(v)} pixels wide` }}
-    ></div>
-
+  <div class="builder">
     <div class="main" bind:this={mainEl}>
       <!-- ── Canvas ──────────────────────────────────────────────────────── -->
       <div class="canvas" style={canvasH ? `flex: 0 0 ${canvasH}px` : ''}>
+        <button class="btn small qb-tables-toggle" aria-pressed={paletteOpen} onclick={() => (paletteOpen = !paletteOpen)} title="Add tables to the canvas (⌥⌘B)" data-testid="qb-tables-toggle">
+          <Icon name="grid" size={12} /> Tables
+        </button>
         <div
           class="canvas-scroll"
           class:dragging={dragUid !== null || pending !== null}
@@ -1330,6 +1238,65 @@
         </div>
       </div>
     </div>
+    <DetailPane
+      module="database"
+      pane="builder-tables"
+      title="Tables"
+      open={paletteOpen}
+      onclose={() => (paletteOpen = false)}
+      ontoggle={() => (paletteOpen = !paletteOpen)}
+      bind:sheet={paletteSheet}
+      minContent={360}
+      testid="qb-palette"
+    >
+      {#snippet action()}
+        {#if tables.length}
+          <button class="icon-btn" onclick={clearCanvas} aria-label="Clear the builder" title="Clear the builder">
+            <Icon name="trash" size={14} />
+          </button>
+        {/if}
+      {/snippet}
+      <div class="palette">
+        {#if databases.length > 1 || (databases[0]?.name ?? '') !== ''}
+          <select class="input db-select" bind:value={selectedDb} onchange={loadPaletteTables} aria-label="Database">
+            {#each databases as d (d.path)}
+              <option value={d.path}>{d.name || 'default'}</option>
+            {/each}
+          </select>
+        {/if}
+        <div class="pal-search">
+          <Icon name="search" size={12} />
+          <input dir="ltr" class="pal-search-input" placeholder="Filter tables…" aria-label="Filter tables" bind:value={paletteSearch} spellcheck="false" />
+        </div>
+        <div class="pal-list">
+          {#if paletteLoading}
+            <div class="pal-hint"><Skeleton rows={6} height={22} label="tables" /></div>
+          {:else if paletteError}
+            <div class="pal-hint"><LoadState what="tables" variant="compact" error={paletteError} empty onretry={() => void loadPaletteTables()} /></div>
+          {:else if paletteTables.length === 0}
+            <div class="pal-hint">No tables in {dbName(selectedDb) || 'this database'}.</div>
+          {:else if filteredPalette.length === 0}
+            <div class="pal-hint">No tables match “{paletteSearch.trim()}”.</div>
+          {:else}
+            <VirtualList
+              items={filteredPalette}
+              estimateHeight={27}
+              class="pal-vlist"
+              key={(t) => t.path}
+              findText={(t) => t.label}
+            >
+              {#snippet row(t)}
+                <button class="pal-item" class:on={onCanvas.has(t.path)} onclick={() => addTable(t)} title="Add {t.label} to the canvas">
+                  <Icon name={t.kind === 'view' ? 'eye' : 'grid'} size={12} />
+                  <span class="pal-item-label">{t.label}</span>
+                  <Icon name="plus" size={12} />
+                </button>
+              {/snippet}
+            </VirtualList>
+          {/if}
+        </div>
+      </div>
+    </DetailPane>
   </div>
 
   {#if joinOpen}
@@ -1445,46 +1412,28 @@
 {/snippet}
 
 <style>
+  /* The canvas / designer column, then the table palette (a Detail pane). */
   .builder {
     height: 100%;
-    display: grid;
-    grid-template-columns: var(--qb-palette-w, 208px) minmax(0, 1fr);
+    display: flex;
     overflow: hidden;
     min-height: 0;
   }
-  .side-resizer {
-    grid-column: 1;
-    grid-row: 1;
-    justify-self: end;
-    width: 5px;
-    margin-inline-end: -2px;
-    cursor: col-resize;
-    position: relative;
-    z-index: 2;
-    touch-action: none;
-  }
-  .side-resizer:hover,
-  .side-resizer:focus-visible {
-    outline: none;
-    background: var(--accent-line);
+  .qb-tables-toggle {
+    position: absolute;
+    inset-block-start: 8px;
+    inset-inline-end: 8px;
+    z-index: 3;
   }
 
   /* ── Palette ── */
   .palette {
-    grid-column: 1;
-    grid-row: 1;
+    flex: 1;
     display: flex;
     flex-direction: column;
     gap: 8px;
-    padding-block: 10px; padding-inline: 10px 8px;
-    border-inline-end: 1px solid var(--border);
+    padding: 8px;
     min-height: 0;
-  }
-  .pal-head {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    min-height: 24px;
   }
   .db-select {
     width: 100%;
@@ -1580,8 +1529,7 @@
 
   /* ── Main column: canvas / split / designer ── */
   .main {
-    grid-column: 2;
-    grid-row: 1;
+    flex: 1;
     display: flex;
     flex-direction: column;
     min-height: 0;
