@@ -66,7 +66,7 @@ for (const scheme of ['light', 'dark'] as const) test(`inbox → run → step �
   await expect(page).toHaveURL(new RegExp(`#/workflows/${wf}/runs/${running}/b$`));
   await expect(stepPane(page)).toBeVisible();
   await expect(page.getByTestId('wf-step-tab-conversation')).toBeVisible();
-  await page.getByRole('button', { name: 'Back to the run' }).tap();
+  await page.getByRole('button', { name: 'Back to Run', exact: true }).tap();
   await expect(page).toHaveURL(new RegExp(`#/workflows/${wf}/runs/${running}$`));
   await api.post(`/workflow-runs/${running}/cancel`);
 });
@@ -78,7 +78,7 @@ test('the pushed Result screen goes back to the run, not to the inbox (CR1-041)'
   await expect(page).toHaveURL(new RegExp(`#/workflows/${wf}/runs/${done}/_result$`));
   await expect(stepPane(page)).toHaveAttribute('data-node-id', '_result');
   await expect(page.getByTestId('page-header').first()).toContainText('Result');
-  await page.getByRole('button', { name: 'Back to the run' }).tap();
+  await page.getByRole('button', { name: 'Back to Run', exact: true }).tap();
   await expect(page).toHaveURL(new RegExp(`#/workflows/${wf}/runs/${done}$`));
   await expect(stepRow(page, 'a')).toBeVisible();
 });

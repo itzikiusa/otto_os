@@ -1,9 +1,10 @@
 <script lang="ts">
   // One workflow's editor (ux.md §9; a lazy chunk): the canvas drawn top to
-  // bottom and fitted on open, the inspector in a 360 px column (a bottom
-  // sheet over a read-only outline on a phone), Instructions / Triggers /
-  // Versions in that column from ⋯, one Save (⌘S, "Unsaved", the version
-  // lock) and Run… (the start form). Validation is one line above the canvas.
+  // bottom and fitted on open, the inspector as the page's Detail pane (its
+  // views: Step / Workflow · Triggers · Instructions · Versions; ⓘ or ⌥⌘B
+  // closes it; on a phone a full-width sheet over a read-only outline whose
+  // Done saves the step and ✕ puts it back), one Save (⌘S, "Unsaved", the
+  // version lock) and Run… (the start form). Validation is one line above the canvas.
   import { untrack } from 'svelte';
   import PageHeader from '../../../lib/components/PageHeader.svelte';
   import PageBody from '../../../lib/components/PageBody.svelte';
@@ -28,6 +29,8 @@
   import { InspectorOptions } from '../inspector/options.svelte';
   import { withParam } from '../inspector/util';
   import Modal from '../../../lib/components/Modal.svelte';
+  import DetailPane from '../../../lib/components/side/DetailPane.svelte';
+  import Tabs from '../../../lib/components/Tabs.svelte';
   import StartRunModal from '../runs/StartRunModal.svelte';
   import { workflowsUi } from '../workflowsUiState.svelte';
   import { deleteWorkflow, duplicateWorkflow, renameWorkflow } from '../list/workflowActions';
@@ -65,6 +68,19 @@
   const pickers = new InspectorOptions();
   const defaultProvider = $derived(defaultAgentProvider());
   const phone = $derived(viewport.isPhone);
+  /** Desktop / tablet: the inspector is open (ⓘ, ⌥⌘B, its ✕). */
+  let inspectorOpen = $state(true);
+  const PANELS = [
+    { id: 'triggers', label: 'Triggers' },
+    { id: 'instructions', label: 'Instructions' },
+    { id: 'versions', label: 'Versions' },
+  ] as const;
+  type Panel = (typeof PANELS)[number]['id'];
+  function showPanel(p: Panel | null): void {
+    inspectorOpen = true;
+    if (p === 'versions') void openVersions();
+    else panel = p;
+  }
 
   async function load(): Promise<void> {
     loadError = null;
@@ -241,19 +257,14 @@
     const copy = wf && (await duplicateWorkflow(wf.workspace_id, wf));
     if (copy) router.go(`workflows/${copy.id}`);
   }
-  // The side panels and the problems bar are the desktop layout's; the phone
-  // outline has neither, so its menu leaves them out.
+  // The problems bar is the desktop layout's (the phone outline has none), so
+  // a phone's menu leaves Validate out; the inspector's views are everywhere.
   const more = (): MenuItem[] => [
     { label: 'Runs of this workflow', icon: 'clock', action: () => onrunsof?.(workflowId) },
     { label: 'Optimize…', icon: 'zap', action: () => router.go(`workflows/${workflowId}/optimize`) },
-    ...(phone ? [] : [
-      { separator: true },
-      { label: 'Triggers', checked: panel === 'triggers', action: () => (panel = panel === 'triggers' ? null : 'triggers') },
-      { label: 'Instructions', checked: panel === 'instructions', action: () => (panel = panel === 'instructions' ? null : 'instructions') },
-      { label: 'Versions', checked: panel === 'versions', action: () => (panel === 'versions' ? (panel = null) : void openVersions()) },
-      { separator: true },
-      { label: 'Validate', action: () => void validate() },
-    ] satisfies MenuItem[]),
+    { separator: true },
+    ...PANELS.map((p): MenuItem => ({ label: p.label, checked: panel === p.id && (phone || inspectorOpen), action: () => showPanel(p.id) })),
+    ...(phone ? [] : [{ separator: true }, { label: 'Validate', action: () => void validate() }] satisfies MenuItem[]),
     { label: 'Rename…', action: () => void rename() },
     { label: 'Duplicate', icon: 'copy', action: () => void duplicate() },
     { separator: true },
@@ -270,7 +281,7 @@
     }
   }
 
-  // Phone: a step sheet edits a copy until Done saves it.
+  // Phone: the inspector sheet edits a copy of the step until Done saves it.
   let phoneBefore: WorkflowGraph | null = null;
   function openSheet(id: string): void {
     phoneBefore = $state.snapshot(graph);
@@ -280,8 +291,10 @@
     if (phoneBefore) graph = phoneBefore;
     phoneBefore = null;
     selectedId = null;
+    panel = null;
     dirty = false;
   }
+  const inspectorTitle = $derived(panel ? PANELS.find((p) => p.id === panel)!.label : selected ? selected.name || selected.kind : (wf?.name ?? 'Workflow'));
   async function doneSheet(): Promise<void> {
     if (!dirty || (await save())) {
       phoneBefore = null;
@@ -301,6 +314,7 @@
   {#snippet badge()}{#if dirty}<span class="ed-chip">Unsaved</span>{/if}{/snippet}
   {#snippet actions()}
     {#if !phone}
+      <button type="button" class="icon-btn" aria-pressed={inspectorOpen} aria-label={inspectorOpen ? 'Hide inspector' : 'Show inspector'} title="{inspectorOpen ? 'Hide' : 'Show'} inspector (⌥⌘B)" onclick={() => (inspectorOpen = !inspectorOpen)}><Icon name="info" size={14} /></button>
       <button type="button" class="btn" aria-haspopup="menu" disabled={!wf} onclick={stepMenu}><Icon name="plus" size={12} /> Step</button>
       <button type="button" class="btn" disabled={!wf || saving} onclick={() => void save()}>{saving ? 'Saving…' : 'Save'}</button>
     {/if}
@@ -310,63 +324,73 @@
 <PageBody fill padded={false}>
   {#if !wf}
     <LoadState what="the workflow" variant="page" loading={!loadError} error={loadError} onretry={() => void load()} />
-  {:else if phone}
-    <PhoneOutline {graph} {triggers} {defaultProvider} openId={selectedId} onopen={openSheet} oncancel={cancelSheet} ondone={() => void doneSheet()} {saving}>
-      {#snippet sheet(id)}
-        {@const n = graph.nodes.find((x) => x.id === id)}
-        {#if n}<StepInspector node={n} {graph} {types} wsId={wf?.workspace_id ?? ''} {pickers} {defaultProvider} workflowName={wf?.name} onedit={(m) => { m(n); dirty = true; }} onzoom={(field, label) => (zoom = { field, label })} />{/if}
-      {/snippet}
-    </PhoneOutline>
   {:else}
     <div class="ed">
-      <div class="ed-main">
-        {#if problems.length}
-          <div class="ed-problems" class:warn={onlyWarnings} data-testid="wf-editor-problems">
-            <Icon name="warning" size={12} />{plural(problems.length, onlyWarnings ? 'warning' : 'problem')} ·
-            <button type="button" class="ed-link" aria-expanded={showProblems} onclick={() => (showProblems = !showProblems)}>{showProblems ? 'Hide' : 'Show'}</button>
-            {#if showProblems}<ul>{#each problems as p, i (i)}<li class:warn={p.warning}>{p.warning ? 'Warning: ' : ''}{p.text}</li>{/each}</ul>{/if}
-          </div>
-        {/if}
-        <EditorCanvas {graph} {selectedId} {selectedEdgeId} {invalid} {triggers} {defaultProvider}
-          onselect={(id) => { selectedId = id; if (id) panel = null; }} onedgeselect={(id) => (selectedEdgeId = id)}
-          onconnect={connect} ondeletenode={deleteNode} ondeleteedge={deleteEdge} />
-      </div>
-      <aside class="ed-side" aria-label="Inspector">
-        {#if panel}
-          <button type="button" class="btn ghost small ed-back" onclick={() => (panel = null)}><Icon name="chevronLeft" size={12} /> {selected ? selected.name : 'Workflow'}</button>
-        {/if}
-        {#if panel === 'triggers'}
-          <TriggersPanel {workflowId} workflowName={wf.name} bind:triggers />
-        {:else if panel === 'instructions'}
-          <h2 class="ed-h">Instructions</h2>
-          <p class="node-hint">Every run and every step follows these.</p>
-          <textarea dir="auto" class="ed-instr" rows="14" aria-label="Instructions" bind:value={instructions}></textarea>
-          <button type="button" class="btn small" disabled={instructions === (wf.instructions ?? '')} onclick={() => void saveInstructions()}>Save instructions</button>
-        {:else if panel === 'versions'}
-          <h2 class="ed-h">Versions</h2>
-          <LoadState what="the versions" variant="compact" loading={!versions && !versionsError} error={versionsError} onretry={() => void openVersions()}>
-            <ol class="ed-versions">
-              {#each versions ?? [] as v (v.id)}
-                <li><span>Version {v.version}{v.note ? ` · ${v.note}` : ''}<span class="node-hint"> · {rel(v.created_at)}</span></span>
-                  {#if v.version !== wf.version}<button type="button" class="btn small ghost" onclick={() => void restore(v.version)}>Restore</button>{/if}</li>
-              {/each}
-            </ol>
-            {#if versionsMore && versions?.length}
-              <button type="button" class="btn small ghost" onclick={() => void openVersions(versions!.at(-1)!.version)}>Show older</button>
-            {/if}
-          </LoadState>
-        {:else if selected}
-          {#key selected.id}
-            <StepInspector node={selected} {graph} {types} wsId={wf.workspace_id} {pickers} {defaultProvider} workflowName={wf.name} onedit={edit} onzoom={(field, label) => (zoom = { field, label })} />
-          {/key}
-        {:else}
-          <h2 class="ed-h">{wf.name}</h2>
-          {#if wf.description}<p class="ed-desc">{wf.description}</p>{/if}
-          <p class="node-hint">{graph.nodes.length} steps · version {wf.version ?? 1}{triggers.length ? ` · ${triggers.length} ${triggers.length === 1 ? 'trigger' : 'triggers'}` : ''}</p>
-          {#if wf.instructions}<p class="ed-desc ed-clip">{wf.instructions}</p>{/if}
-          <p class="node-hint">Select a step to change it. Instructions, Triggers and Versions are in ⋯.</p>
-        {/if}
-      </aside>
+      {#if phone}
+        <div class="ed-main ed-outline"><PhoneOutline {graph} {triggers} {defaultProvider} onopen={openSheet} /></div>
+      {:else}
+        <div class="ed-main">
+          {#if problems.length}
+            <div class="ed-problems" class:warn={onlyWarnings} data-testid="wf-editor-problems">
+              <Icon name="warning" size={12} />{plural(problems.length, onlyWarnings ? 'warning' : 'problem')} ·
+              <button type="button" class="ed-link" aria-expanded={showProblems} onclick={() => (showProblems = !showProblems)}>{showProblems ? 'Hide' : 'Show'}</button>
+              {#if showProblems}<ul>{#each problems as p, i (i)}<li class:warn={p.warning}>{p.warning ? 'Warning: ' : ''}{p.text}</li>{/each}</ul>{/if}
+            </div>
+          {/if}
+          <EditorCanvas {graph} {selectedId} {selectedEdgeId} {invalid} {triggers} {defaultProvider}
+            onselect={(id) => { selectedId = id; if (id) { panel = null; inspectorOpen = true; } }} onedgeselect={(id) => (selectedEdgeId = id)}
+            onconnect={connect} ondeletenode={deleteNode} ondeleteedge={deleteEdge} />
+        </div>
+      {/if}
+      <DetailPane
+        module="workflows"
+        pane="inspector"
+        title={inspectorTitle}
+        open={phone ? !!selectedId || !!panel : inspectorOpen}
+        onclose={() => (phone ? cancelSheet() : (inspectorOpen = false))}
+        ontoggle={phone ? undefined : () => (inspectorOpen = !inspectorOpen)}
+        testid={phone && selectedId ? 'wf-step-sheet' : 'wf-inspector'}
+      >
+        {#snippet views()}
+          <Tabs label="Inspector" tabs={[{ id: 'main', label: selected ? 'Step' : 'Workflow' }, ...PANELS]} value={panel ?? 'main'} onchange={(id) => (id === 'main' ? (panel = null) : showPanel(id))} idBase="wf-insp" />
+        {/snippet}
+        {#snippet action()}
+          {#if phone && selectedId}
+            <button type="button" class="btn small primary" onclick={() => void doneSheet()} disabled={saving}>{saving ? 'Saving…' : 'Done'}</button>
+          {/if}
+        {/snippet}
+        <div class="ed-side">
+          {#if panel === 'triggers'}
+            <TriggersPanel {workflowId} workflowName={wf.name} bind:triggers />
+          {:else if panel === 'instructions'}
+            <p class="node-hint">Every run and every step follows these.</p>
+            <textarea dir="auto" class="ed-instr" rows="14" aria-label="Instructions" bind:value={instructions}></textarea>
+            <button type="button" class="btn small" disabled={instructions === (wf.instructions ?? '')} onclick={() => void saveInstructions()}>Save instructions</button>
+          {:else if panel === 'versions'}
+            <LoadState what="the versions" variant="compact" loading={!versions && !versionsError} error={versionsError} onretry={() => void openVersions()}>
+              <ol class="ed-versions">
+                {#each versions ?? [] as v (v.id)}
+                  <li><span>Version {v.version}{v.note ? ` · ${v.note}` : ''}<span class="node-hint"> · {rel(v.created_at)}</span></span>
+                    {#if v.version !== wf.version}<button type="button" class="btn small ghost" onclick={() => void restore(v.version)}>Restore</button>{/if}</li>
+                {/each}
+              </ol>
+              {#if versionsMore && versions?.length}
+                <button type="button" class="btn small ghost" onclick={() => void openVersions(versions!.at(-1)!.version)}>Show older</button>
+              {/if}
+            </LoadState>
+          {:else if selected}
+            {#key selected.id}
+              <StepInspector node={selected} {graph} {types} wsId={wf.workspace_id} {pickers} {defaultProvider} workflowName={wf.name} onedit={edit} onzoom={(field, label) => (zoom = { field, label })} />
+            {/key}
+          {:else}
+            <h2 class="ed-h">{wf.name}</h2>
+            {#if wf.description}<p class="ed-desc">{wf.description}</p>{/if}
+            <p class="node-hint">{graph.nodes.length} steps · version {wf.version ?? 1}{triggers.length ? ` · ${triggers.length} ${triggers.length === 1 ? 'trigger' : 'triggers'}` : ''}</p>
+            {#if wf.instructions}<p class="ed-desc ed-clip">{wf.instructions}</p>{/if}
+            <p class="node-hint">Select a step to change it. Instructions, Triggers and Versions are above.</p>
+          {/if}
+        </div>
+      </DetailPane>
     </div>
   {/if}
 </PageBody>
@@ -400,17 +424,10 @@
     display: flex;
     flex-direction: column;
     gap: var(--sp-2);
-    flex: none;
-    inline-size: 360px;
-    padding: var(--sp-6);
-    border-inline-start: 1px solid var(--border);
-    background: var(--surface);
-    overflow-y: auto;
+    padding: var(--sp-5);
   }
-  @media (max-width: 1024px) {
-    .ed-side {
-      inline-size: 320px;
-    }
+  .ed-outline {
+    overflow-y: auto;
   }
   .ed-problems {
     display: flex;
@@ -469,9 +486,6 @@
     -webkit-box-orient: vertical;
     overflow: hidden;
     color: var(--text-dim);
-  }
-  .ed-back {
-    align-self: flex-start;
   }
   .ed-instr {
     inline-size: 100%;

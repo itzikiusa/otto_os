@@ -25,6 +25,9 @@
   import { toasts } from '../../../lib/toast.svelte';
   import { toastError } from '../../../lib/toastError';
   import EditorCanvas from '../editor/EditorCanvas.svelte';
+  import ListDetail from '../../../lib/components/side/ListDetail.svelte';
+  import ListPane from '../../../lib/components/side/ListPane.svelte';
+  import SideSection from '../../../lib/components/side/SideSection.svelte';
   import { clockTime } from '../runs/runWords';
   import { afterMarks, canApply, estimateLines, groupChanges, initialSelection, listingRemovedText, savingText } from './optimizeView';
 
@@ -44,6 +47,8 @@
   let applying = $state(false);
   let view = $state<'before' | 'after'>('after');
   let notOfferedOpen = $state(false);
+  /** Phone: the changes are the page; Preview pushes After + reads/writes. */
+  let preview = $state(false);
 
   async function load(): Promise<void> {
     error = null;
@@ -121,9 +126,6 @@
 
 <PageHeader title="Optimize" crumbs={phone || !wf ? [] : [{ label: wf.name, onclick: back }]}
   more={phone ? () => [{ label: 'Discard', icon: 'x', action: back }] : undefined}>
-  {#snippet leading()}
-    {#if phone}<button type="button" class="icon-btn" aria-label="Back to the workflow" title="Back to the workflow" onclick={back}><Icon name="chevronLeft" size={16} /></button>{/if}
-  {/snippet}
   {#snippet actions()}
     {#if !phone}<button type="button" class="btn" onclick={back}>Discard</button>{/if}
     <button type="button" class="btn primary" data-testid="wf-opt-apply" disabled={!draft || !canApply(selected) || !!stale || applying}
@@ -136,50 +138,59 @@
   {#if !wf || !draft || !first}
     <LoadState what="this workflow’s draft" errorTitle="Couldn’t check this workflow" variant="page" loading={!error} {error} empty onretry={() => void load()} />
   {:else}
-    <div class="opt" data-testid="wf-opt-page">
-      <div class="side">
-        {#if stale || rejected}
-          <p class="banner" use:announceShown={{ text: stale ?? 'A change no longer passes its checks.' }}>{stale ?? 'A change no longer passes its checks.'} <button type="button" class="btn small" onclick={() => void load()}>Check again</button></p>
-        {/if}
-        <section class="opt-card" data-testid="wf-opt-estimate">
-          {#if est?.none}<p class="dim">{est.none}</p>
-          {:else if est}<p class="big">Expected: {est.typical}</p><p class="dim">{[est.slow, est.basis].filter(Boolean).join(' · ')}</p>{/if}
-          {#if !est?.none && draft.estimate.note}<p class="dim">{draft.estimate.note}</p>{/if}
-        </section>
-        <p class="checks" data-testid="wf-opt-checks">
-          <Icon name="check" size={12} />Checked: valid · step numbers that prompts mention are unchanged · every file a step reads is still written before it · outward steps keep their order.
-          {#each draft.checks.warnings as w, i (i)}<span class="warn">{w}</span>{/each}
-        </p>
-        {#if !groups.length}
-          <EmptyState variant="panel" icon="zap" title="No faster version found" body="Each step needs the one before it, and no step matches a pattern Otto can replace with a built-in step." />
-        {/if}
-        {#each groups as g (g.effect)}
-          <h3>{g.label}<span class="count">{g.changes.length}</span></h3>
-          <ul class="changes">
-            {#each g.changes as c (c.id)}
-              <li data-testid="wf-opt-change" data-change-id={c.id} data-rule={c.rule} data-effect={c.effect} data-preselected={c.preselected}>
-                <label class="opt-row">
-                  <input type="checkbox" checked={selected.includes(c.id)} onchange={() => toggle(c.id)} />
-                  <span class="title" dir="auto">{c.title}</span>
-                  {#if savingText(c.saving_ms)}<span class="saving">{savingText(c.saving_ms)}</span>{/if}
-                </label>
-                <p class="why" dir="auto">{c.why}</p>
-                <span class="chips">{#each c.nodes as id (id)}<span class="chip">{names.get(id) ?? id}</span>{/each}</span>
-              </li>
-            {/each}
-          </ul>
-        {/each}
-        {#if first.not_offered.length}
-          <div data-testid="wf-opt-not-offered">
-            <button type="button" class="fold" aria-expanded={notOfferedOpen} onclick={() => (notOfferedOpen = !notOfferedOpen)}>
-              Not offered<span class="count">{first.not_offered.length}</span><Icon name={notOfferedOpen ? 'chevronDown' : 'chevronRight'} size={12} />
-            </button>
-            {#if notOfferedOpen}
-              <ul class="changes">{#each first.not_offered as n, i (i)}<li><span class="title" dir="auto">{n.nodes.map((id) => names.get(id) ?? id).join(', ')}</span><p class="why" dir="auto">{n.reason}</p></li>{/each}</ul>
+    <ListDetail module="workflows" pane="optimize" name="Changes" wide open={preview} onback={() => (preview = false)} testid="wf-opt-page">
+      {#snippet list()}
+        {#if first && draft}
+        <ListPane
+          count={first.changes.length}
+          primary={viewport.navDrawer && canApply(selected) && !stale && !applying ? { icon: 'check', label: `Apply as version ${next}…`, onclick: () => void apply() } : undefined}
+          menu={viewport.navDrawer ? () => [{ label: 'Preview the faster version', icon: 'eye', action: () => (preview = true) }] : undefined}
+        >
+          <div class="opt-top">
+            {#if stale || rejected}
+              <p class="banner" use:announceShown={{ text: stale ?? 'A change no longer passes its checks.' }}>{stale ?? 'A change no longer passes its checks.'} <button type="button" class="btn small" onclick={() => void load()}>Check again</button></p>
+            {/if}
+            <section class="opt-card" data-testid="wf-opt-estimate">
+              {#if est?.none}<p class="dim">{est.none}</p>
+              {:else if est}<p class="big">Expected: {est.typical}</p><p class="dim">{[est.slow, est.basis].filter(Boolean).join(' · ')}</p>{/if}
+              {#if !est?.none && draft.estimate.note}<p class="dim">{draft.estimate.note}</p>{/if}
+            </section>
+            <p class="checks" data-testid="wf-opt-checks">
+              <Icon name="check" size={12} />Checked: valid · step numbers that prompts mention are unchanged · every file a step reads is still written before it · outward steps keep their order.
+              {#each draft.checks.warnings as w, i (i)}<span class="warn">{w}</span>{/each}
+            </p>
+            {#if !groups.length}
+              <EmptyState variant="panel" icon="zap" title="No faster version found" body="Each step needs the one before it, and no step matches a pattern Otto can replace with a built-in step." />
             {/if}
           </div>
+          {#each groups as g (g.effect)}
+            <SideSection title={g.label} count={g.changes.length} foldable={false}>
+              {#each g.changes as c (c.id)}
+                {@const on = selected.includes(c.id)}
+                <div class="side-row opt-change" class:selected={on} data-testid="wf-opt-change" data-change-id={c.id} data-rule={c.rule} data-effect={c.effect} data-preselected={c.preselected}>
+                  <label class="side-row-main opt-row">
+                    <input type="checkbox" data-side-row checked={on} onchange={() => toggle(c.id)} />
+                    <span class="side-row-text">
+                      <span class="side-row-title" dir="auto">{c.title}</span>
+                      <span class="why" dir="auto">{c.why}</span>
+                      <span class="chips">{#each c.nodes as id (id)}<span class="chip">{names.get(id) ?? id}</span>{/each}</span>
+                    </span>
+                    {#if savingText(c.saving_ms)}<span class="side-row-trailing saving">{savingText(c.saving_ms)}</span>{/if}
+                  </label>
+                </div>
+              {/each}
+            </SideSection>
+          {/each}
+          {#if first.not_offered.length}
+            <div data-testid="wf-opt-not-offered">
+              <SideSection title="Not offered" count={first.not_offered.length} bind:open={notOfferedOpen}>
+                <ul class="not-offered">{#each first.not_offered as n, i (i)}<li><span class="title" dir="auto">{n.nodes.map((id) => names.get(id) ?? id).join(', ')}</span><p class="why" dir="auto">{n.reason}</p></li>{/each}</ul>
+              </SideSection>
+            </div>
+          {/if}
+        </ListPane>
         {/if}
-      </div>
+      {/snippet}
 
       <div class="main">
         {#if phone}
@@ -216,33 +227,26 @@
           </table>
         </div>
       </div>
-    </div>
+    </ListDetail>
   {/if}
 </PageBody>
 
 <style>
-  .opt {
-    display: flex;
-    flex: 1;
-    min-block-size: 0;
-  }
-  .side,
   .main {
     display: flex;
     flex-direction: column;
     gap: var(--sp-4);
+    flex: 1;
     min-block-size: 0;
+    min-inline-size: 0;
     overflow-y: auto;
     padding: var(--sp-6);
   }
-  .side {
-    flex: none;
-    inline-size: 440px;
-    border-inline-end: 1px solid var(--border);
-  }
-  .main {
-    flex: 1;
-    min-inline-size: 0;
+  .opt-top {
+    display: flex;
+    flex-direction: column;
+    gap: var(--sp-4);
+    padding: var(--sp-2) var(--sp-2) var(--sp-4);
   }
   .canvas {
     display: flex;
@@ -302,45 +306,42 @@
     font-size: var(--fs-m);
     font-weight: 600;
   }
-  .count {
-    font-weight: 400;
-    color: var(--text-dim);
-  }
-  .changes,
+  .not-offered,
   .outline {
     margin: 0;
     padding: 0;
     list-style: none;
   }
-  .changes li,
+  .not-offered li,
   .outline li {
     display: flex;
     flex-direction: column;
     gap: var(--sp-2);
-    padding-block: var(--sp-4);
-    border-block-start: 1px solid var(--border);
+    padding: var(--sp-3) var(--sp-4);
   }
   .outline li {
     flex-direction: row;
     align-items: center;
     gap: var(--sp-4);
     min-block-size: 44px;
+    padding-inline: 0;
+    border-block-start: 1px solid var(--border);
   }
+  /* A change row on the shared row look: the checkbox is the focusable row. */
   .opt-row {
-    display: flex;
-    align-items: center;
-    gap: var(--sp-4);
-    min-block-size: 32px;
-    cursor: pointer;
+    align-items: flex-start;
+    padding-block: var(--sp-3);
   }
   .opt-row input {
     flex: none;
     inline-size: 16px;
     block-size: 16px;
+    margin-block-start: 2px;
+  }
+  .why {
+    white-space: normal;
   }
   .title {
-    flex: 1;
-    min-inline-size: 0;
     font-size: var(--fs-m);
   }
   .saving {
@@ -352,24 +353,11 @@
     display: flex;
     flex-wrap: wrap;
     gap: var(--sp-2);
+    margin-block-start: var(--sp-2);
   }
   .mark {
     font-size: var(--fs-xs);
     color: var(--warning);
-  }
-  .fold {
-    display: flex;
-    align-items: center;
-    gap: var(--sp-3);
-    min-block-size: 32px;
-    padding: 0;
-    border: 0;
-    background: none;
-    color: var(--text);
-    font: inherit;
-    font-size: var(--fs-m);
-    font-weight: 600;
-    cursor: pointer;
   }
   .io-wrap {
     overflow-x: auto;
@@ -398,28 +386,12 @@
   .gone {
     display: block;
   }
-  @media (max-width: 1024px) {
-    .side {
-      inline-size: 360px;
-    }
-  }
   @media (max-width: 640px) {
-    .opt {
-      flex-direction: column;
-      overflow-y: auto;
-    }
-    .side,
     .main {
-      overflow: visible;
       padding: var(--sp-5);
     }
-    .side {
-      inline-size: auto;
-      border-inline-end: 0;
-    }
-    .opt-row {
-      min-block-size: 44px;
-    }
+  }
+  @media (pointer: coarse) {
     .opt-row input {
       inline-size: 20px;
       block-size: 20px;

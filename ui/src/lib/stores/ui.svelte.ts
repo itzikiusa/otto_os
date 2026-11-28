@@ -74,13 +74,6 @@ const LS = {
   /** Legacy single threshold — migrated once into `dbAutoVertical`, then removed. */
   dbAutoVerticalCols: 'otto_db_auto_vertical_cols',
   dbAutoVertical: 'otto_db_auto_vertical_by_engine',
-  wfCtx: 'otto_wf_ctx_open',
-  wfCtxWidth: 'otto_wf_ctx_width',
-  wfCtxTab: 'otto_wf_ctx_tab',
-  wfSideWidth: 'otto_wf_side_width',
-  runDetailH: 'otto_wf_run_detail_h',
-  wfDockSide: 'otto_wf_dock_side',
-  wfInspSideW: 'otto_wf_insp_side_w',
   clientId: 'otto_client_id',
   sessionIsolation: 'otto_session_isolation',
   sidebarOrder: 'otto_sidebar_order',
@@ -103,11 +96,6 @@ export const RIGHT_MAX = 2000;
 const RIGHT_LEAVE = 360;
 export const RAIL_MIN = 190;
 export const RAIL_MAX = 420;
-/** Workflow run "Context files" sidebar bounds (a focused file browser). */
-export const WF_CTX_MIN = 240;
-export const WF_CTX_MAX = 560;
-/** Workflow run-detail (inspector) resizable-height floor; the cap is viewport-aware. */
-export const RUN_DETAIL_MIN = 160;
 
 export const isTauri = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
 
@@ -169,23 +157,6 @@ function clampRail(px: number): number {
 }
 /** DB Explorer "auto-Vertical past N columns" threshold: 0 = never, capped so
  *  a typo can't disable the feature by accident; NaN → the default (10). */
-function clampWfCtx(px: number): number {
-  return Math.max(WF_CTX_MIN, Math.min(WF_CTX_MAX, Math.round(px)));
-}
-function clampWfSide(px: number): number {
-  return Math.max(200, Math.min(600, Math.round(px)));
-}
-function clampWfInspSide(px: number): number {
-  const vw = typeof window !== 'undefined' ? window.innerWidth : 1400;
-  const max = Math.max(300, Math.round(vw * 0.6));
-  return Math.max(280, Math.min(max, Math.round(px)));
-}
-
-function clampRunDetail(px: number): number {
-  const vh = typeof window !== 'undefined' ? window.innerHeight : 900;
-  const max = Math.max(RUN_DETAIL_MIN, Math.round(vh * 0.85));
-  return Math.max(RUN_DETAIL_MIN, Math.min(max, Math.round(px)));
-}
 /** Git graph list pane when a commit detail is open. */
 function clampGitGraphList(px: number): number {
   return Math.max(300, Math.min(720, Math.round(px)));
@@ -226,18 +197,6 @@ class UiStore {
   browserAgentOpen = $state(lsGet(LS.browserAgentOpen) !== '0'); // default open
   /** Browser page: the agent dock's height in px (drag-resizable). */
   browserAgentH = $state(Math.min(900, Math.max(160, Number(lsGet(LS.browserAgentH)) || 280)));
-  // Workflow run "Context files" sidebar: defaults open, resizable, desktop-only.
-  wfCtxOpen = $state(lsGet(LS.wfCtx) !== '0');
-  wfCtxWidth = $state(clampWfCtx(Number(lsGet(LS.wfCtxWidth)) || 340));
-  // Right sidebar tab (Files | Agents) + resizable left panel width.
-  wfCtxTab: 'files' | 'agents' = $state(lsGet(LS.wfCtxTab) === 'agents' ? 'agents' : 'files');
-  wfSideWidth = $state(clampWfSide(Number(lsGet(LS.wfSideWidth)) || 270));
-  // Workflow run-detail (inspector) resizable max-height cap.
-  runDetailHeight = $state(clampRunDetail(Number(lsGet(LS.runDetailH)) || 300));
-  // Workflow node inspector: dock to a resizable RIGHT column instead of the
-  // bottom strip (the 'seamless', wider view), + that column's width.
-  wfDockSide = $state(lsGet(LS.wfDockSide) === '1');
-  wfInspSideWidth = $state(clampWfInspSide(Number(lsGet(LS.wfInspSideW)) || 400));
   // Git graph list pane width in detail mode.
   gitGraphListWidth = $state(clampGitGraphList(Number(lsGet(LS.gitGraphListWidth)) || 420));
   // Git graph LEFT refs sidebar width (drag-resizable; default matches the CSS 220px).
@@ -595,34 +554,6 @@ class UiStore {
       this.rightRestore = this.rightWidth;
       this.setRightWidth(wide);
     }
-  }
-
-  /** Toggle the workflow run "Context files" sidebar open/collapsed. */
-  toggleWfCtx(): void {
-    this.wfCtxOpen = !this.wfCtxOpen;
-    lsSet(LS.wfCtx, this.wfCtxOpen ? '1' : '0');
-  }
-
-  setWfCtxTab(tab: 'files' | 'agents'): void {
-    this.wfCtxTab = tab;
-    lsSet(LS.wfCtxTab, tab);
-  }
-  setWfCtxWidth(px: number): void {
-    this.wfCtxWidth = clampWfCtx(px);
-    lsSet(LS.wfCtxWidth, String(this.wfCtxWidth));
-  }
-
-  setRunDetailHeight(px: number): void {
-    this.runDetailHeight = clampRunDetail(px);
-    lsSet(LS.runDetailH, String(this.runDetailHeight));
-  }
-  setWfDockSide(on: boolean): void {
-    this.wfDockSide = on;
-    lsSet(LS.wfDockSide, on ? '1' : '0');
-  }
-  setWfInspSideWidth(px: number): void {
-    this.wfInspSideWidth = clampWfInspSide(px);
-    lsSet(LS.wfInspSideW, String(this.wfInspSideWidth));
   }
 
 
