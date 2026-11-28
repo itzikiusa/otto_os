@@ -78,6 +78,9 @@ test('touch verbs: definition, usages, docs, rename, quick fix, then find / repl
     'Find in File…', 'Replace in File…', 'Go to Line…', 'Text Size', '—',
   ]);
   assert.ok(rows.every((r) => !r.hint), 'no shortcut hints on glass');
+  const back = ideTouchVerbRows({ symbol: 'Run', readOnly: false, definition: noop, back: noop, canBack: false });
+  assert.deepEqual(back.map((r) => r.label ?? '—'), ['Go to Definition', 'Navigate Back', '—'], 'the phone row has no ‹ of its own: Navigate Back is a row');
+  assert.equal(back[1].disabled, true, 'nothing to go back to');
   const off = ideTouchVerbRows({ symbol: '', readOnly: true, definition: noop, rename: noop, replace: noop, goToLine: noop });
   assert.equal(off.find((r) => r.label === 'Go to Definition')?.disabled, true, 'no name under the caret');
   assert.equal(off.find((r) => r.label === 'Rename…')?.disabled, true);

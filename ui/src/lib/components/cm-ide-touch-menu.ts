@@ -21,6 +21,9 @@ export interface IdeTouchMenuVerbs {
   find?: (() => void) | null;
   replace?: (() => void) | null;
   goToLine?: (() => void) | null;
+  /** Navigate Back (⌘[ on a desktop): the phone's one Back is the page header's, so this lives here. */
+  back?: (() => void) | null;
+  canBack?: boolean;
   /** Editor text size: −1 / +1 point (the IDE's font-size preference). */
   textSize?: ((delta: -1 | 1) => void) | null;
 }
@@ -49,6 +52,7 @@ export function ideTouchVerbRows(v: IdeTouchMenuVerbs): MenuItem[] {
     rows.push({ label, icon, disabled, title: opts.needsSym ? why : undefined, action: fn });
   };
   add('Go to Definition', 'arrow', v.definition, { needsSym: true });
+  if (v.back) rows.push({ label: 'Navigate Back', icon: 'chevronLeft', disabled: !v.canBack, action: v.back });
   add('Find Usages', 'search', v.usages, { needsSym: true });
   add('Show Documentation', 'book', v.docs, { needsSym: true });
   add('Rename…', 'edit', v.rename, { needsSym: true, writes: true });
