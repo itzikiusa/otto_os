@@ -267,7 +267,7 @@ global system directories:
 | **Spring Boot** | Auto-detected from `@SpringBootApplication`, `pom.xml`, and `build.gradle*` (including multi-module sub-projects); Spring Boot run/debug configs & gutter icons with profile activation (`SPRING_PROFILES_ACTIVE` / `-Dspring-boot.run.profiles`), `application*.{properties,yml}` completion, hover, diagnostics (with deprecated-property Quick Fixes in `.properties`), bidirectional `@Value` / `@ConfigurationProperties` ↔ config navigation, loopback-only Actuator inspector (Health incl. 503 DOWN/OUT_OF_SERVICE, Endpoints/Mappings, Beans, redacted Env), and DevTools classpath trigger touch |
 | **Python** | `uv`, standalone CPython (3.11 / 3.12 / 3.13), `pyright`, `ruff`, `debugpy` |
 | **Rust** | `rustup` (`rustc` + `cargo`), `rust-analyzer`, `CodeLLDB` (`codelldb`) |
-| **Zig** | Official Zig SDK tarball (`ziglang.org/download/index.json`, SHA-256 verified), local SDK registration, `zls` (Zig-version-matched), `CodeLLDB` (`codelldb`) / `lldb-dap` / built-in `otto-lldb-dap` with Zig LLDB type formatters |
+| **Zig** | Official Zig SDK tarball (`ziglang.org/download/index.json`, SHA-256 verified; 0.16.0 by default, 0.14.0 and 0.13.0 offered), local SDK registration, `zls` (Zig-version-matched), `CodeLLDB` (`codelldb`) / `lldb-dap` / built-in `otto-lldb-dap` with Zig LLDB type formatters |
 | **C / C++ & Unreal Engine** | Clang / GCC / LLVM toolchain discovery & local registration, a managed **LLVM** download on the Mac (see below), `clangd` 23.1.0 (SHA-256 verified) (auto `--compile-commands-dir` including CMake/Meson/Unreal `Intermediate/ProjectFiles` + `textDocument/switchSourceHeader` `⌥O`), `clang-format`, CMake (Presets & CTest), Meson, Make, `vcpkg.json` / `conanfile.txt` / `.uproject` deps, `CodeLLDB` / `lldb-dap` / built-in `otto-lldb-dap` with C++ STL & Unreal pretty-printers, PID/process-name attach, and core-dump debugging |
 | **.NET (C# / F# / Unity / Unreal)** | Official .NET SDK tarball (`builds.dotnet.microsoft.com`, 10.0 LTS by default and 11.0 STS; 8.0 and 9.0 are end of life), local SDK registration (`DOTNET_ROOT`), SDK-matched `csharp-ls` + `fsautocomplete` (with OmniSharp / Roslyn fallback), NuGet inspector & OSV vulnerabilities, `netcoredbg` (and `vsdbg` fallback) with `VSTEST_HOST_DEBUG` test debugging (several test projects or frameworks run as Debug All steps) & explicit PID attach, and **Unity Editor attach** through DotRush's Mono debugger (`monodbg` 2026.11, installed on request from the .NET page; see §6) |
 | **Go** | Official Go SDK tarball, local SDK registration (`POST /ide/toolchains/local`), `gopls`, Delve (`dlv`), `gofumpt` |
@@ -302,7 +302,10 @@ install is accepted each tool runs and `clang++ -std=c++20` compiles and runs a
 test program. The upstream `.tar.zst` uses a 1 GiB zstd window, so the daemon
 holds about 1 GiB more memory while it unpacks. When the job ends the project's
 C/C++ toolchain is set to it (with Undo). Linux pins (23.1.5 x64 / arm64) are in
-the manifest, but SSH hosts are not offered the download yet.
+the manifest, but SSH hosts are not offered the download yet (a direct request
+fails the job with "Managed LLVM downloads install on this Mac only…"). Verified
+end to end on Apple Silicon only: the Intel Mac and Linux entries are pinned
+(name, size, SHA-256 checked against upstream) but have not been installed.
 
 The project's selected C/C++ toolchain decides what runs: `CC` / `CXX` and
 `PATH` (so `clang-format` / `clang-tidy`) come from its `bin/`, clangd is
@@ -466,9 +469,9 @@ each project's frameworks and, per framework, `IsTestingPlatformApplication`:
 a VSTest step runs `dotnet test --no-build -f <tfm>` with `VSTEST_HOST_DEBUG=1`
 and attaches to its one test host (60 s for the host to start), an MTP step
 launches the built test app. Zig compiles every suite once through Otto's
-no-exec build runner (Zig 0.14 and 0.16; other versions say which are supported,
-and Run works for every version), with `src/main.zig`'s suite last. Local and SSH
-targets work the same.
+no-exec build runner (Zig 0.14 and 0.16; 0.15 and 0.17 are not supported — the
+message says which are, and Run works for every version), with `src/main.zig`'s
+suite last. SSH targets use the same steps (not verified live on SSH).
 
 **Playwright and Karma / Angular tests** debug through Microsoft's js-debug
 (installed from Toolchains, 1.2 MB, its pinned SHA-256 checked; a Debug without

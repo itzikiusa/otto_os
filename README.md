@@ -23,37 +23,53 @@ expect rough edges. Prebuilt builds: see [Download](#download-prebuilt-dmg).
   and each agent step's conversation beside the list. **Pause**, **Resume**,
   *Skip this step* and *Add a note for the next step…* work while it runs. The
   same pages work on the phone, with touch.
+- **One sidebar system.** Pages with a list (Agents, Threads, Git, the IDE,
+  Database, Settings, Workflows, AWS, Kubernetes and the rest) share one list
+  pane: its name and count, one primary action, ⋯ (which starts with **Hide
+  … ⌘B**), one search row, the same rows and selection. What belongs to the
+  selected item opens in one detail pane beside the content (⌥⌘B), as a sheet
+  only when there is no room. Every page has one header row, on the desktop,
+  a tablet and a phone. On a phone the list is the page: an item opens over
+  it with **‹ Back** to the list, ☰ and the **Menu** tab open the one
+  drawer (the Navigator, Commands, Help, Settings), and the bell lives at the
+  top of that drawer. A tablet shows the Rail and can expand it to the
+  Navigator.
 - **Zig in the IDE.** Zig projects (`build.zig`) get what the other languages
   have: highlighting, toolchain detection and Otto's own installer, `zls`
   (SHA-256 verified via zigtools' release selector) for completion and
   navigation, run configurations and gutter Run / Debug on `main` and on tests,
   and debugging with breakpoints, stepping, watch, set variable and stops on
-  `@panic`, with slices, optionals and error unions shown as values. `zls`
+  `@panic`, with slices, optionals and error unions shown as values. Debugging
+  `build.zig` tests needs Zig 0.14 or 0.16 (Otto installs 0.16.0 by default;
+  on 0.15 and 0.17 tests run but do not debug). `zls`
   runs the project's `build.zig`, so it starts only after you trust the
   project (see the language-server note below).
 - **C / C++, Unreal Engine, Kotlin, Spring Boot, .NET and web frameworks in the
   IDE.** C / C++ & Unreal Engine get highlighting, a one-click pinned LLVM
   download on the Mac (clang, clangd, clang-format, clang-tidy, SHA-256
-  checked, selected per project), `clangd` with auto
+  checked, selected per project; tested on Apple Silicon, the Intel Mac and
+  Linux archives are pinned but untested, and SSH hosts are not offered it), `clangd` with auto
   `--compile-commands-dir` and `⌥O` header/source switch, CMake / Presets /
   CTest / Meson / Make / Unreal run configs, GoogleTest & Catch2 gutter runs,
   `vcpkg`/`conan`/CMake/`.uproject` inspection, and LLDB debugging (STL &
   Unreal formatters, exception breakpoints, PID/process-name attach and core
   dumps). Kotlin & Spring Boot get Kotlin highlighting,
   `kotlin-language-server`, mixed Java/Kotlin modules, JUnit 5 gutter runs
-  and Kotest gutter Run / Debug of one spec, container or test (Kotest 6.1+, Gradle or Maven), Gradle `libs.versions.toml` inspection, JVM JDWP debugging,
+  and Kotest gutter Run / Debug of one spec, container or test (Kotest 6.1+, Gradle or Maven, local or SSH), Gradle `libs.versions.toml` inspection, JVM JDWP debugging,
   `application.properties`/`application.yml` completion, hover, and navigation
   (plus `.properties` deprecation quick fixes), a loopback-only Actuator
   inspector (every `/env` value redacted), and DevTools `.reloadtrigger` restart check. .NET (C# / F# / Unity / Unreal C#) gets
   highlighting, toolchain discovery/installer, `csharp-ls` / OmniSharp /
   `fsautocomplete`, xUnit/NUnit/MSTest gutter runs, NuGet inspection, and
-  `netcoredbg` debugging (launch, VSTest test debugging of one test project
-  per session, and explicit PID attach; Unity Editor attach is not supported).
+  `netcoredbg` debugging (launch, VSTest test debugging, Debug All Tests
+  across several test projects, and explicit PID attach), plus Unity Editor
+  attach (below).
   JS/TS web frameworks (Angular, React, Next.js,
   Svelte/SvelteKit, Vue/Nuxt, Vite) get framework detection, `svelteserver` /
   `vue-language-server` (standalone mode) / `ngserver`, Vitest/Jest/Playwright/Karma runners, and
   Node + Browser CDP debugging, plus Playwright and Angular Karma test
-  debugging through js-debug. `zls`, `kotlin-language-server`, `vue-language-server` and
+  debugging through js-debug (local projects; plain Karma and SSH targets are
+  Run-only). `zls`, `kotlin-language-server`, `vue-language-server` and
   the .NET servers (`csharp-ls`, `fsautocomplete`) run code from the project
   (its build, the plugins its `tsconfig.json` names, or its MSBuild targets),
   so they do not start until you trust the project: **Trust project…** in the
@@ -61,14 +77,30 @@ expect rough edges. Prebuilt builds: see [Download](#download-prebuilt-dmg).
   then starts the server; *Edit run configurations… ▸ Project environment ▸
   Trust this project* turns it off again.
 - **Jupyter notebooks & ML workflow in the IDE.** Open, edit, run and save
-  `.ipynb` notebooks directly in Otto with a built-in persistent Python kernel
-  (standard Python execution on the selected interpreter; IPython `%magic` and
-  other Jupyter kernels are not supported), inline
-  matplotlib plots and `_repr_html_` tables, interpreter selection across
-  `.venv` / `conda` / `uv` / Poetry / system Python, interrupt/restart, live
-  Variables view, isolated cell DAP debugging, Apple Silicon MPS / GPU
-  detection, and auto-discovered training and loopback TensorBoard run
-  configurations.
+  `.ipynb` notebooks on real Jupyter kernels: every installed kernelspec
+  (ipykernel, and other languages' kernels such as bash_kernel) runs through
+  the Jupyter protocol with no `jupyter` install, so `%magic`, `!cmd`,
+  `input()` and streamed output work; a built-in Python kernel covers
+  environments without ipykernel (**Install ipykernel…** adds it). A kernelspec
+  stored in the project asks before its first start. Inline matplotlib plots
+  and `_repr_html_` tables, interpreter selection across `.venv` / `conda` /
+  `uv` / Poetry / system Python, interrupt/restart, a Variables view,
+  Apple Silicon MPS / GPU detection, and auto-discovered training and loopback
+  TensorBoard run configurations. Debug Cell runs on the built-in kernel only;
+  kernels are local (no SSH, no Jupyter Server URLs), 12 at most.
+- **Unity Editor attach.** In a Unity project, **Attach to Unity Editor**
+  attaches the debugger to the Editor that has the project open, through an
+  open Mono debug adapter (DotRush's `monodbg`, MIT, SHA-256 checked) that
+  Otto installs when you ask, with .NET 10 if it is missing. Breakpoints,
+  stepping, locals, evaluate, conditional breakpoints and logpoints work, and
+  **Stop** detaches and leaves the Editor running. It was verified against a
+  Mono process standing in for the Editor; a real Unity Editor was not
+  available. Players, IL2CPP builds and SSH targets are not supported.
+- **Debug All Tests, one step at a time.** A .NET solution or folder with
+  several test projects (or target frameworks), and a `build.zig` with several
+  test suites, debug in one session as steps: "Step 2 of 4 · Api.Tests
+  (net10.0)", a result chip per finished step, **Skip to next step**, and at
+  the end the failed tests, each with its own **Debug**.
 - **Goal progress, loop rounds and waiting threads.** Goal criteria show numeric
   progress (`value / target`), a progress meter, last-3-rounds trends and
   blocker counts across multiple loops on the run page and in chat status
@@ -121,7 +153,8 @@ expect rough edges. Prebuilt builds: see [Download](#download-prebuilt-dmg).
   an explicitly confirmed development run target with passive HTTP header
   checks. An active Nuclei DAST scan of that target runs when a person starts
   it by hand, or on the schedule for a localhost target the person allowed
-  (30 days, re-checked before every run, paused by any change)
+  themselves (bound to that one target, at most hourly, for 30 days,
+  re-checked before every run, paused by any change; agents cannot allow it)
   ([Security scans](docs/features/security-scans.md)).
 - **Chat.** A run started from chat keeps one live status message in its
   thread instead of a message per step, and flushes pending chat progress

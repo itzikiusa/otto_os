@@ -111,8 +111,9 @@ pausing the approval.
 
 Only a person signed in to Otto can turn the switch on or off: agent session
 tokens, MCP credentials, share links and paired phones are refused on that
-route. An agent can still change the schedule, which pauses scheduled active
-checks; it can never allow, extend or retarget them. If Nuclei fails or times
+route. An agent session's credential is refused on every IDE route, so it cannot
+change the schedule either; and any change to the schedule pauses scheduled
+active checks, so nothing but the person can allow, extend or retarget them. If Nuclei fails or times
 out on a scheduled run, the scan still completes with its other results and
 shows **Active checks failed:** with the reason; the first failure of a streak
 posts a notice. High or critical active findings post a notice too. Scan
