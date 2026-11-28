@@ -835,7 +835,7 @@
     session ? `${session.build === 'chrome' ? 'Chrome' : 'Headless shell'} ${session.version.split('.')[0]}` : '',
   );
 
-  const isTouch = typeof matchMedia !== 'undefined' && matchMedia('(pointer: coarse)').matches;
+  const isTouch = typeof matchMedia !== 'undefined' && matchMedia('(pointer: coarse)').matches; // ui-guards: allow — touch input hints, not a side surface
   // Each derived below is a STATE (not its ticking detail), so a reconnect
   // attempt counter or an fps tick never re-announces.
   const driveNote = $derived(

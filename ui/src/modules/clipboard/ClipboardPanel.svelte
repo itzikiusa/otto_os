@@ -265,28 +265,33 @@
       <div class="main">
         <div class="list" id="clip-list" role="listbox" aria-label="Entries">
           {#each groups as g (g.label)}
-            <div class="group" role="group" aria-label={g.label}>
-              <div class="group-label" aria-hidden="true">{g.label}</div>
+            <!-- The shared list look (app.css "Side surfaces": section head, row,
+                 selected tint); the filter field keeps focus and walks it
+                 (aria-activedescendant), the quick-picker way. -->
+            <div class="side-section" role="group" aria-label={g.label}>
+              <div class="side-section-head" aria-hidden="true"><span class="ssh-title">{g.label}</span></div>
               {#each g.items as e (e.id)}
                 {@const i = flat.indexOf(e)}
-                <button
-                  id="clip-{e.id}"
-                  class="clip-entry"
-                  class:sel={i === sel}
-                  role="option"
-                  aria-selected={i === sel}
-                  tabindex="-1"
-                  onclick={() => (sel = i)}
-                  ondblclick={() => void act('paste')}
-                >
-                  {#if e.kind === 'image' && urls[`t:${e.id}`]}
-                    <img class="thumb" src={urls[`t:${e.id}`]} alt="" />
-                  {:else}
-                    <span class="kind-icon"><Icon name={KIND_ICON[e.kind]} size={13} /></span>
-                  {/if}
-                  <span class="row-title">{title(e)}</span>
-                  {#if e.pinned}<Icon name="pin" size={12} />{/if}
-                </button>
+                <div class="side-row" class:selected={i === sel}>
+                  <button
+                    id="clip-{e.id}"
+                    class="side-row-main clip-entry"
+                    class:sel={i === sel}
+                    role="option"
+                    aria-selected={i === sel}
+                    tabindex="-1"
+                    onclick={() => (sel = i)}
+                    ondblclick={() => void act('paste')}
+                  >
+                    {#if e.kind === 'image' && urls[`t:${e.id}`]}
+                      <img class="thumb" src={urls[`t:${e.id}`]} alt="" />
+                    {:else}
+                      <span class="kind-icon"><Icon name={KIND_ICON[e.kind]} size={13} /></span>
+                    {/if}
+                    <span class="side-row-title row-title">{title(e)}</span>
+                    {#if e.pinned}<Icon name="pin" size={12} />{/if}
+                  </button>
+                </div>
               {/each}
             </div>
           {/each}
@@ -406,36 +411,12 @@
   .list {
     width: 40%;
     overflow-y: auto;
-    padding: 6px;
+    padding: 8px;
     border-inline-end: 1px solid var(--separator);
-  }
-  .group-label {
-    padding-block: 8px 4px;
-    padding-inline: 8px;
-    font-size: var(--fs-xs);
-    font-weight: 600;
-    color: var(--text-dim);
+    background: var(--bg-sidebar);
   }
   .clip-entry {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    width: 100%;
-    min-height: 32px;
-    padding-inline: 8px;
-    border: none;
-    border-radius: var(--radius-s);
-    background: transparent;
-    color: var(--text);
-    font: inherit;
-    text-align: start;
     cursor: default;
-  }
-  .clip-entry:hover {
-    background: var(--hover);
-  }
-  .clip-entry.sel {
-    background: var(--accent-soft);
   }
   .kind-icon {
     display: inline-flex;
@@ -451,10 +432,6 @@
   }
   .row-title {
     flex: 1;
-    min-width: 0;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
   }
   .more {
     margin: 8px;

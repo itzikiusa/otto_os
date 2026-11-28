@@ -37,6 +37,7 @@
   import BrowserSummary from './BrowserSummary.svelte';
   import ReaderView from './ReaderView.svelte';
   import NotesRail from './NotesRail.svelte';
+  import DetailPane from '../../lib/components/side/DetailPane.svelte';
   import AgentDock from './AgentDock.svelte';
   import AskBar from './AskBar.svelte';
   import BrowserUrlBar from './BrowserUrlBar.svelte';
@@ -155,10 +156,10 @@
     void browser.loadAnnotations(url);
   });
 
-  // Marks rail visibility: auto-opens when the page has marks (or user clicks
-  // the Marks toggle), and stays collapsed when empty so narrow embedded panels
-  // and Reader view don't lose 260px to an empty rail.
+  // Marks (the Detail pane): auto-opens when the page has marks and it fits
+  // inline (never a sheet over the page); the toggle, ⌥⌘B and ✕ decide otherwise.
   let marksRailOverride = $state<boolean | null>(null);
+  let marksSheet = $state(false);
   let lastMarksTabId = $state<string | null>(null);
   $effect(() => {
     const id = browser.activeId;
@@ -171,7 +172,7 @@
     !!activeLive || (!!activeRemote && browserLive.ready) || !!browser.page,
   );
   const showMarksRail = $derived(
-    canShowMarksRail && (marksRailOverride ?? browser.annotations.length > 0),
+    canShowMarksRail && (marksRailOverride ?? (browser.annotations.length > 0 && !marksSheet)),
   );
   function closeMarksRail(): void {
     marksRailOverride = false;
@@ -801,15 +802,15 @@
     {#if mirroredSim}
       <LazyMount lazy={SimulatorView} what="the simulator view" variant="panel" props={{ device: mirroredSim, currentUrl: browser.activeTab?.url ?? '', split: simSplit, ontogglesplit: () => (simSplit = !simSplit), ondevicechange: (d: SimDevice) => (mirroredSim = d), onclose: () => (mirroredSim = null) }} />
     {/if}
-    {#if showMarksRail}
-      <div class="notes-wrap mobile-open">
+    {#if canShowMarksRail}
+      <DetailPane module="browser" pane="marks" title="Marks · {browser.annotations.length}" open={showMarksRail} bind:sheet={marksSheet}
+        onclose={closeMarksRail} ontoggle={() => (marksRailOverride = !showMarksRail)} testid="browser-marks">
         <NotesRail
           annotations={browser.annotations}
           liveMode={!!activeLive || !!activeRemote}
-          onclose={closeMarksRail}
           onfocusmark={!activeLive && !activeRemote && browser.page ? (sel) => readerView?.scrollToMark(sel) : undefined}
         />
-      </div>
+      </DetailPane>
     {/if}
   </div>
 
@@ -872,11 +873,6 @@
     min-width: 0;
     position: relative;
   }
-  .notes-wrap {
-    display: flex;
-    min-height: 0;
-    flex-shrink: 0;
-  }
   @media (max-width: 640px) {
     .body.sim-split {
       flex-direction: column;
@@ -885,9 +881,6 @@
   @media (max-width: 640px), (max-height: 500px) {
     .web-pane {
       flex-direction: column;
-    }
-    .notes-wrap:not(.mobile-open) {
-      display: none;
     }
   }
   @container (max-width: 640px) {
