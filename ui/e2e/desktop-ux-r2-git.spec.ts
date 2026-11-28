@@ -152,6 +152,9 @@ test('stash, stale worktree and submodule actions are accessible by keyboard and
   }
   // On a phone the Branches list is the page; the stash row's ⋯ is a click away.
   await page.setViewportSize({ width: 390, height: 844 });
+  // The open commit comes along as a sheet over the graph: close it, then Back to the list.
+  await page.getByRole('button', { name: 'Close Commit detail' }).click();
+  await page.getByRole('button', { name: 'Back to Branches' }).click();
   if (await head('Stashes').getAttribute('aria-expanded') === 'false') await head('Stashes').click();
   await page.locator('.stash-row').first().hover();
   await page.getByRole('button', { name: 'Actions for stash stash@{0}', exact: true }).click();

@@ -156,6 +156,9 @@ test('branch actions work with keyboard and phone tap', async ({ page }) => {
   await page.keyboard.press('Escape');
   // On a phone the Branches list is the page; the row's ⋯ is still a click away.
   await page.setViewportSize({ width: 390, height: 844 });
+  // The open commit comes along as a sheet over the graph: close it, then Back to the list.
+  await page.getByRole('button', { name: 'Close Commit detail' }).click();
+  await page.getByRole('button', { name: 'Back to Branches' }).click();
   await row.hover();
   await menu.click();
   await expectFullyInViewport(page, page.locator('.ctx-menu'));
