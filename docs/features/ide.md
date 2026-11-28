@@ -521,7 +521,8 @@ monodbg.dll`. The adapter is not bundled: its release also carries Microsoft's
 .NET → Unity debugger** (or **Install Unity debugger** on the debugger's error
 card) downloads the pinned DotRush `2026.11` bundle (8.7 MB, SHA-256 checked)
 into `toolchains/dotnet/monodbg/2026.11/`, and the .NET 10 SDK too when no .NET
-10+ runtime is found (`monodbg` is `net10.0`). The symbols come from every
+10+ runtime is found (`monodbg` is `net10.0`); that SDK sits beside the others
+in `toolchains/dotnet/sdks/` and does not become the current .NET. The symbols come from every
 `Library/ScriptAssemblies/*.dll` with a `.pdb` except Unity's own
 (`Unity.*`, `UnityEngine.*`, `UnityEditor.*`), so `.asmdef` assemblies count.
 Breakpoints, stepping, locals, watches, evaluate (method calls included),
