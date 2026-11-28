@@ -364,7 +364,7 @@ impl EcosystemKind {
             Self::Rust => "stable",
             Self::Zig => "0.16.0",
             Self::Cpp => "23.1.5",
-            Self::Dotnet => "9.0.203",
+            Self::Dotnet => "10.0.404",
             Self::Node => "22.14.0",
             Self::Python => "3.13",
             Self::Shell => "3.10.0",
@@ -780,8 +780,9 @@ pub fn curated_catalog(ecosystem: EcosystemKind, platform: TargetPlatform) -> Ve
             })
             .collect(),
         EcosystemKind::Dotnet => [
-            ("9.0.203", ".NET SDK 9.0.203 (STS)", false, "215 MB"),
-            ("8.0.408", ".NET SDK 8.0.408 (LTS)", true, "205 MB"),
+            // .NET 8 and 9 are end of life (releases-index.json, 2026-11).
+            ("10.0.404", ".NET SDK 10.0.404 (LTS)", true, "234 MB"),
+            ("11.0.100", ".NET SDK 11.0.100 (STS)", false, "201 MB"),
         ]
         .into_iter()
         .map(|(ver, label, lts, sz)| CatalogSdkEntry {
