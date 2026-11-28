@@ -172,8 +172,10 @@
 //   side-pane         a hand-rolled side surface in a module (src/modules/):
 //                     a locally defined .list-pane / .side / .sidebar rule set,
 //                     a private width threshold (matchMedia(…), or a
-//                     …Width / …W compared to a 480–1499 px number), or an
-//                     import of shell/Drawer or DockedDrawer → the shared
+//                     …Width / …W compared to a 480–1499 px number), an
+//                     import of shell/Drawer or DockedDrawer, or a copy of
+//                     ListPane's chrome (class="side-list" / "side-pane-head"
+//                     on a module's own markup) → the shared
 //                     blocks in lib/components/side (ListDetail, ListPane,
 //                     SideSection, SideRow, DetailPane). The baseline lists
 //                     what the rc.6 page migrations drive to zero.
@@ -896,6 +898,9 @@ for (const f of files) {
     for (const m of code.matchAll(/\bmatchMedia\s*\(/g)) hit('side-pane', f, m.index, 'private matchMedia(…)');
     for (const m of code.matchAll(/\b[A-Za-z_$][\w$]*(?:Width|W)\s*[<>]=?\s*(?:[4-9]\d\d|1[0-4]\d\d)\b/g)) hit('side-pane', f, m.index, `private width threshold ${m[0]}`);
     for (const m of code.matchAll(/import\s+\w+\s+from\s+['"][^'"]*\/(?:shell\/Drawer|DockedDrawer)\.svelte['"]/g)) hit('side-pane', f, m.index, m[0].slice(0, 90));
+    // A copy of ListPane's chrome on a module's own markup (a list inside the
+    // page's content): use a standalone <ListPane name=…> instead.
+    for (const m of code.matchAll(/\bclass="(?:side-list|side-pane-head)[\s"]/g)) hit('side-pane', f, m.index, `hand-made list pane ${m[0]}`);
   }
   // radio-key: every role="radio" needs arrow keys, on itself (radioKey or its
   // own onkeydown) or on the radiogroup that encloses it (the nearest
