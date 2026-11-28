@@ -71,7 +71,6 @@ function evalToSummary(e: SkillEval): SkillEvalSummary {
 }
 
 class SkillsLabState {
-  listCollapsed = $state(false);
   startingEval = $state(false);
   startingReview = $state(false);
 
@@ -174,7 +173,6 @@ class SkillsLabState {
   }
 
   resetForTests(): void {
-    this.listCollapsed = false;
     this.startingEval = false;
     this.startingReview = false;
     this.browser = {

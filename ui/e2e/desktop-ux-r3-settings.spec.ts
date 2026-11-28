@@ -33,10 +33,10 @@ test('tablet Skills can hide navigation while editing and preserve its draft', a
  await page.getByRole('tab', { name: 'Files', exact: true }).click();
  const editor = page.getByTestId('skill-editor').locator('.cm-content'); await expect(editor).toContainText('A document for editing.');
  await page.screenshot({ path: '/tmp/otto-ux-r3-settings-skills-tablet-before.png' }); await editor.fill('# Keep tablet draft');
- await page.getByRole('button', { name: 'Hide skills list', exact: true }).click();
+ await page.getByTestId('skills-list-more').click(); await page.getByRole('menuitem', { name: /Hide Skills/ }).click();
  expect((await page.getByTestId('skill-editor').boundingBox())!.width).toBeGreaterThan(480); await expect(editor).toContainText('# Keep tablet draft');
  await page.screenshot({ path: '/tmp/otto-ux-r3-settings-skills-tablet-focused.png' });
- await page.getByRole('button', { name: 'Show skills list', exact: true }).click();
+ await page.getByTestId('show-list-pane').click();
  await expect(page.getByRole('searchbox', { name: 'Filter skills' })).toBeVisible(); await expect(editor).toContainText('# Keep tablet draft'); await ctx.dispose();
 });
 test('an old skill load failure cannot replace the newly selected skill', async ({ page }) => {

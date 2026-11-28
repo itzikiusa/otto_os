@@ -3,8 +3,9 @@
   // Skills Evaluator module: a left list of past runs + "New evaluation", and a
   // right pane showing either the start form or a selected run's live report.
   import { onDestroy, untrack } from 'svelte';
-  import { LIST_PANE, loadPaneWidth } from '../../lib/paneResizer';
-  import PaneDivider from '../../lib/components/PaneDivider.svelte';
+  import ListDetail from '../../lib/components/side/ListDetail.svelte';
+  import ListPane from '../../lib/components/side/ListPane.svelte';
+  import type { MenuItem } from '../../lib/contextmenu.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { skillsLabState } from '../../lib/stores/skillsLabState.svelte';
   import { router } from '../../lib/router.svelte';
@@ -23,7 +24,6 @@
   import RunDetail from './RunDetail.svelte';
   import LazyMount from '../../lib/components/LazyMount.svelte';
   import { lazyComponent } from '../../lib/lazy-component.svelte';
-  import type MatrixView from './MatrixView.svelte';
 
   const CompareViewLazy = lazyComponent(() => import('./CompareView.svelte'));
   const GoldenTasksViewLazy = lazyComponent(() => import('./GoldenTasksView.svelte'));
@@ -41,20 +41,12 @@
     /** "Open run" hand-off (a skill's Evals tab): select this run. */
     initialRun?: string | null;
     onrunconsumed?: () => void;
-    /** The runs list is hidden — the ONE list toggle lives in the Skills Lab
-     *  header (it hands its state down). */
-    listCollapsed?: boolean;
-    /** Tells the host whether this view has a runs list to toggle. */
-    onlistable?: (listable: boolean) => void;
-    /** Phone push-navigation: tells the host whether a Back button should show. */
-    onphonedetail?: (open: boolean) => void;
   }
-  let { initialSkill = null, onconsumed, initialRun = null, onrunconsumed, listCollapsed = false, onlistable, onphonedetail }: Props = $props();
+  let { initialSkill = null, onconsumed, initialRun = null, onrunconsumed }: Props = $props();
   const initialEval = skillsLabState.evalFor(ws.currentId);
   let formSkill = $state<{ name: string; source: string } | null>(initialEval.formSkill);
-  let phoneListOpen = $state(false);
-  let matrixPhoneDetail = $state(false);
-  let matrixView = $state<ReturnType<typeof MatrixView> | null>(null);
+  /** Phone: the open run / form / comparison is pushed over the list. */
+  let phoneOpen = $state(false);
   $effect(() => {
     if (!initialSkill) return;
     formSkill = initialSkill;
@@ -62,7 +54,7 @@
     compareMode = false;
     selectedId = null;
     mode = 'form';
-    phoneListOpen = false;
+    phoneOpen = true;
     onconsumed?.();
   });
 
@@ -72,7 +64,7 @@
     onrunconsumed?.();
     formSkill = null;
     compareMode = false;
-    phoneListOpen = false;
+    phoneOpen = true;
     void openRunById(id);
   });
 
@@ -92,7 +84,6 @@
   let mode: Mode = $state(initialEval.mode);
   let selectedId: string | null = $state(initialEval.selectedId);
   const starting = $derived(skillsLabState.startingEval);
-  const listHidden = $derived(listCollapsed);
   // The view is part of the route (`#/skills-eval/evaluator[/golden|/matrix]`)
   // so back/forward and deep links land on it.
   const TABS: { id: Tab; label: string; icon: 'zap' | 'target' | 'grid' }[] = [
@@ -101,7 +92,6 @@
     { id: 'matrix', label: 'Matrix', icon: 'grid' },
   ];
   const tab = $derived<Tab>(router.parts[2] === 'golden' ? 'golden' : router.parts[2] === 'matrix' ? 'matrix' : 'runs');
-  $effect(() => onlistable?.(tab === 'runs' || tab === 'matrix'));
   function setTab(t: Tab): void {
     if (t === tab) return;
     router.go(t === 'runs' ? 'skills-eval/evaluator' : `skills-eval/evaluator/${t}`);
@@ -115,7 +105,7 @@
     if (wsId) await loadList(wsId);
     selectedId = id;
     mode = 'detail';
-    phoneListOpen = false;
+    phoneOpen = true;
   }
   function openRun(e: SkillEval): void {
     runs = [toSummary(e), ...runs.filter((r) => r.id !== e.id)];
@@ -187,21 +177,6 @@
     [...compareSel].some((id) => !compareFull[id] && !compareErrors[id]),
   );
 
-  const showRunsPhoneList = $derived(
-    viewport.isPhone && (phoneListOpen || (compareMode && compareSel.size < 2) || ((loading || !!loadError) && runs.length === 0)),
-  );
-  $effect(() => {
-    onphonedetail?.(
-      viewport.isPhone &&
-        ((tab === 'runs' && !showRunsPhoneList && runs.length > 0) ||
-          (tab === 'matrix' && matrixPhoneDetail)),
-    );
-  });
-  export function back(): void {
-    if (tab === 'matrix') matrixView?.back();
-    else phoneListOpen = true;
-  }
-
   // Evaluator defaults (was Settings → Skills evaluator): the Lab's page ⋯
   // opens it, and `#/skills-eval/evaluator/defaults` — where the old Settings
   // route forwards — opens it on arrival.
@@ -218,7 +193,11 @@
   function toggleCompare(): void {
     compareMode = !compareMode;
     if (!compareMode) compareSel = new Set();
-    else if (viewport.isPhone && compareSel.size < 2) phoneListOpen = true;
+    else if (compareSel.size < 2) phoneOpen = false;
+  }
+  // The runs pane's ⋯ (after Hide Evaluations ⌘B).
+  function paneMenu(): MenuItem[] {
+    return [{ label: compareTitle, icon: 'columns', disabled: runs.length < 2, action: toggleCompare }];
   }
 
   function toggleCompareSel(id: string): void {
@@ -276,7 +255,7 @@
     loadedWs = wsId;
     compareErrors = {};
     compareLoading = {};
-    phoneListOpen = false;
+    phoneOpen = true;
     if (cached.loaded) {
       runs = cached.runs;
       nextCursor = cached.nextCursor;
@@ -334,14 +313,14 @@
     formSkill = null;
     selectedId = null;
     mode = 'form';
-    phoneListOpen = false;
+    phoneOpen = true;
   }
 
   function selectRun(id: string): void {
     formSkill = null;
     selectedId = id;
     mode = 'detail';
-    phoneListOpen = false;
+    phoneOpen = true;
   }
 
   async function start(req: StartSkillEvalReq): Promise<void> {
@@ -353,7 +332,7 @@
     formSkill = null;
     selectedId = created.id;
     mode = 'detail';
-    phoneListOpen = false;
+    phoneOpen = true;
   }
 
   // Keep the list entry in sync with the live detail (status, score).
@@ -392,9 +371,6 @@
   }
 
   const compareTitle = $derived(runs.length < 2 ? 'Compare runs (needs at least two)' : compareMode ? 'Leave compare mode' : 'Compare runs side by side');
-
-  // Resizable run list (PaneDivider): the width survives reloads.
-  let sideW = $state(loadPaneWidth('skillsEval.sideW', LIST_PANE.default, LIST_PANE.min, LIST_PANE.max));
 </script>
 
 <div class="se-wrap">
@@ -409,70 +385,62 @@
       {/if}
     {:else if tab === 'matrix'}
       {#if MatrixViewLazy.component}
-        <MatrixViewLazy.component bind:this={matrixView} {listCollapsed} onopenrun={openRunById} onphonedetail={(o) => (matrixPhoneDetail = o)} />
+        <MatrixViewLazy.component onopenrun={openRunById} />
       {:else}
         <LoadState what="matrix evaluations" variant="page" loading={!MatrixViewLazy.error} error={MatrixViewLazy.error} empty onretry={() => MatrixViewLazy.retry()} />
       {/if}
     {:else}
-<div class="se-page" class:list-hidden={listHidden && !viewport.isPhone}>
-  <aside class="se-side" class:hide-phone={viewport.isPhone && !showRunsPhoneList} id="evaluations-list" style={viewport.isPhone ? undefined : `width:${sideW}px`}>
-    <div class="se-side-head">
-      <span class="se-side-title">Evaluations</span>
-      <button
-        class="icon-btn"
-        aria-pressed={compareMode}
-        onclick={toggleCompare}
-        title={compareTitle}
-        aria-label={compareTitle}
-        disabled={runs.length < 2}
-      ><Icon name="columns" size={14} /></button>
-      <!-- Not .primary: the start form's "Start evaluation" is this view's primary. -->
-      <button class="icon-btn" onclick={newRun} aria-pressed={mode === 'form' && !compareMode} title="New evaluation" aria-label="New evaluation">
-        <Icon name="plus" size={14} />
-      </button>
-    </div>
-    {#if compareMode}
-      <div class="se-compare-hint">
-        <span>Select 2+ runs to compare ({compareSel.size} selected).</span>
-        {#if viewport.isPhone && compareSel.size >= 2 && showRunsPhoneList}
-          <button class="btn small" type="button" onclick={() => (phoneListOpen = false)}>Compare</button>
-        {/if}
-      </div>
-    {/if}
-    <div class="se-list">
+{#snippet compareBar()}
+          <span class="se-sel-count">{compareSel.size} selected</span>
+          <span class="grow"></span>
+          {#if viewport.navDrawer}
+            <button class="btn small" type="button" disabled={compareSel.size < 2} onclick={() => (phoneOpen = true)}>Compare</button>
+          {/if}
+          <button class="btn small ghost" type="button" onclick={toggleCompare} title="Leave compare mode">Done</button>
+{/snippet}
+
+<ListDetail module="skills-eval" pane="evaluations" name="Evaluations" open={phoneOpen && (!compareMode || compareSel.size >= 2)} onback={() => (phoneOpen = false)} empty={!!ws.currentId && !loading && !loadError && runs.length === 0} legacy={{ w: 'skillsEval.sideW' }}>
+  {#snippet list()}
+    <ListPane
+      count={runs.length}
+      primary={{ icon: 'plus', label: 'New evaluation', onclick: newRun }}
+      menu={paneMenu}
+      selection={compareMode ? compareBar : undefined}
+      loading={!!ws.currentId && loading && runs.length === 0}
+      error={runs.length === 0 ? loadError : null}
+      onretry={() => ws.currentId && loadList(ws.currentId)}
+      testid="evaluations-list"
+    >
       {#if !ws.currentId}
         <div class="se-muted">No workspace selected.</div>
-      {:else if (loading || loadError) && runs.length === 0}
-        <LoadState what="evaluations" variant="compact" {loading} error={loadError} empty onretry={() => ws.currentId && loadList(ws.currentId)} />
-      {:else if runs.length === 0}
-        <div class="se-muted">No evaluations yet. Fill in the form to run the first one.</div>
       {:else}
         {#each runs as r (r.id)}
-          <button
-            class="se-item"
-            aria-pressed={compareMode ? compareSel.has(r.id) : undefined}
-            aria-current={!compareMode && mode === 'detail' && selectedId === r.id ? 'true' : undefined}
-            class:active={compareMode ? compareSel.has(r.id) : mode === 'detail' && selectedId === r.id}
-            onclick={() => (compareMode ? toggleCompareSel(r.id) : selectRun(r.id))}
-          >
-            <div class="se-item-top">
-              {#if compareMode}
-                <span class="se-check" class:on={compareSel.has(r.id)}>
-                  {#if compareSel.has(r.id)}<Icon name="check" size={12} />{/if}
+          {@const on = compareMode ? compareSel.has(r.id) : mode === 'detail' && selectedId === r.id}
+          <div class="side-row two-line" class:selected={on}>
+            <button
+              type="button"
+              class="side-row-main se-item"
+              class:active={on}
+              data-side-row
+              aria-pressed={compareMode ? compareSel.has(r.id) : undefined}
+              aria-current={!compareMode && mode === 'detail' && selectedId === r.id ? 'true' : undefined}
+              onclick={() => (compareMode ? toggleCompareSel(r.id) : selectRun(r.id))}
+            >
+              {#if compareMode}<Icon name={compareSel.has(r.id) ? 'check' : 'square'} size={14} />{/if}
+              <span class="side-row-text">
+                <span class="se-item-top">
+                  <span class="side-row-title se-item-name" title={r.source_skill}>{r.source_skill}</span>
+                  <span class="se-dot st-{r.status}" role="img" aria-label={runStatus(r.status).label} title={runStatus(r.status).label}></span>
                 </span>
-              {/if}
-              <span class="se-item-name" title={r.source_skill}>{r.source_skill}</span>
-              <span class="se-dot st-{r.status}" role="img" aria-label={runStatus(r.status).label} title={runStatus(r.status).label}></span>
-            </div>
-            <div class="se-item-sub">
-              <span class="se-task" title={r.task}>{r.task}</span>
-            </div>
-            <div class="se-item-meta">
-              <span class="se-meta-main">{[r.impl_cli || 'Score only', r.best_score != null ? `best ${r.best_score.toFixed(0)}` : ''].filter(Boolean).join(' · ')}</span>
-              <span class="grow"></span>
-              <span title={new Date(r.created_at).toLocaleString()}>{rel(r.created_at)}</span>
-            </div>
-          </button>
+                <span class="side-row-meta se-task" title={r.task}>{r.task}</span>
+                <span class="side-row-meta se-item-meta">
+                  <span class="se-meta-main">{[r.impl_cli || 'Score only', r.best_score != null ? `best ${r.best_score.toFixed(0)}` : ''].filter(Boolean).join(' · ')}</span>
+                  <span class="grow"></span>
+                  <span title={new Date(r.created_at).toLocaleString()}>{rel(r.created_at)}</span>
+                </span>
+              </span>
+            </button>
+          </div>
         {/each}
         {#if nextCursor}
           <button class="btn small ghost se-more" onclick={() => void loadMore()} disabled={loadingMore}>
@@ -480,12 +448,10 @@
           </button>
         {/if}
       {/if}
-    </div>
-  </aside>
+    </ListPane>
+  {/snippet}
 
-  {#if !listHidden && !viewport.isPhone}<PaneDivider bind:width={sideW} storageKey="skillsEval.sideW" label="Resize the evaluations list" />{/if}
-
-  <main class="se-main" class:hide-phone={viewport.isPhone && showRunsPhoneList}>
+  <main class="se-main">
     {#if !ws.currentId}
       <EmptyState icon="zap" title="No workspace selected" body="Pick a workspace to evaluate its skills." />
     {:else if compareMode}
@@ -531,7 +497,7 @@
       />
     {/if}
   </main>
-</div>
+</ListDetail>
     {/if}
   </div>
 </div>
@@ -547,7 +513,6 @@
 {/if}
 
 <style>
-  .se-page.list-hidden .se-side { display: none; }
   .se-wrap {
     display: flex;
     flex-direction: column;
@@ -559,49 +524,6 @@
     min-height: 0;
     overflow: hidden;
   }
-  .se-page {
-    display: flex;
-    height: 100%;
-    min-height: 0;
-  }
-  .se-side {
-    /* Default width; an inline `width:{sideW}px` (drag-resizable, persisted)
-       takes over at runtime. */
-    width: 280px;
-    flex-shrink: 0;
-    border-inline-end: 1px solid var(--border);
-    background: var(--surface);
-    display: flex;
-    flex-direction: column;
-    min-height: 0;
-  }
-  /* The pane header's toggles: pressed reads as the accent tint. */
-  .se-side-head :global(.icon-btn[aria-pressed='true']) {
-    background: var(--accent-soft);
-    color: var(--accent-text);
-  }
-  .se-side-head {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    padding: 12px 12px 8px;
-  }
-  .se-side-title {
-    font-size: var(--fs-xs);
-    font-weight: 600;
-    letter-spacing: 0.06em;
-    text-transform: uppercase;
-    color: var(--text-dim);
-    flex: 1;
-  }
-  .se-list {
-    flex: 1;
-    overflow-y: auto;
-    padding: 4px 8px 12px;
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
-  }
   .se-muted {
     padding: 16px 8px;
     color: var(--text-dim);
@@ -612,52 +534,23 @@
     margin-inline: auto;
     display: block;
   }
-  .se-item {
-    text-align: start;
-    border: 1px solid transparent;
-    background: transparent;
-    border-radius: var(--radius-m);
-    padding: 8px 10px;
-    cursor: pointer;
-    display: flex;
-    flex-direction: column;
-    gap: 2px;
-  }
-  .se-item:hover {
-    background: var(--hover);
-  }
-  .se-item.active {
-    background: var(--accent-soft);
-    border-color: var(--accent-line);
-  }
   .se-item-top {
     display: flex;
     align-items: center;
     gap: 6px;
   }
   .se-item-name {
-    font-size: var(--fs-m);
-    font-weight: 500;
     flex: 1;
-    min-width: 0;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-  .se-task {
-    font-size: var(--fs-xs);
-    color: var(--text-dim);
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    display: block;
   }
   .se-item-meta {
     display: flex;
     align-items: center;
     gap: 4px;
-    font-size: var(--fs-xs);
-    color: var(--text-dim);
+  }
+  .se-sel-count {
+    padding-inline-start: 8px;
+    font-size: var(--fs-m);
+    font-weight: 600;
   }
   .se-meta-main {
     min-width: 0;
@@ -686,27 +579,6 @@
   .se-dot.st-error {
     background: var(--status-exited);
   }
-  /* Phone: push navigation between the runs list and the open report / form. */
-  @media (max-width: 640px) {
-    .se-page {
-      flex-direction: column;
-    }
-    .hide-phone {
-      display: none;
-    }
-    .se-side {
-      width: 100%;
-      flex: 1;
-      border-inline-end: none;
-    }
-    .se-main {
-      flex: 1;
-      min-height: 0;
-    }
-    .se-item {
-      min-height: var(--hit-min);
-    }
-  }
   @media (prefers-reduced-motion: reduce) {
     .se-dot.st-running {
       animation: none;
@@ -715,31 +587,8 @@
   .se-main {
     flex: 1;
     min-width: 0;
+    min-height: 0;
     overflow: hidden;
-  }
-  .se-compare-hint {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 8px;
-    padding: 6px 12px;
-    font-size: var(--fs-xs);
-    color: var(--text-dim);
-    border-bottom: 1px solid var(--border);
-  }
-  .se-check {
-    width: 14px;
-    height: 14px;
-    border: 1px solid var(--border);
-    border-radius: var(--radius-s);
-    display: grid;
-    place-items: center;
-    flex-shrink: 0;
-  }
-  .se-check.on {
-    background: var(--accent-solid);
-    color: var(--accent-contrast);
-    border-color: var(--accent-solid);
   }
   .grow {
     flex: 1;

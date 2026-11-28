@@ -13,8 +13,10 @@
   import type { BundledSkillView, LibrarySkill, ProviderSkillInfo } from '../../lib/api/types';
   import { skillLabApi } from '../../lib/api/skillLab';
   import { toasts } from '../../lib/toast.svelte';
-  import PaneDivider from '../../lib/components/PaneDivider.svelte';
-  import { LIST_PANE, loadPaneWidth } from '../../lib/paneResizer';
+  import ListDetail from '../../lib/components/side/ListDetail.svelte';
+  import ListPane from '../../lib/components/side/ListPane.svelte';
+  import type { MenuItem } from '../../lib/contextmenu.svelte';
+  import { auth } from '../../lib/stores/auth.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { viewport } from '../../lib/stores/viewport.svelte';
@@ -46,20 +48,14 @@
   } from './skillGroups';
 
   interface Props {
-    listCollapsed?: boolean;
     onreview?: (name: string, source: string) => void;
     onevaluate?: (name: string, source: string) => void;
-    /** Tells the page whether the library is empty (it then drops its header
-     *  primary: the empty state owns "New skill"). */
-    onempty?: (empty: boolean) => void;
-    /** Phone push-navigation: the page shows a back button in its header. */
-    onphonedetail?: (open: boolean) => void;
     /** Open one evaluation run in the Evaluator. */
     onopenrun?: (id: string) => void;
     /** Open one existing review in the Review tab. */
     onopenreview?: (id: string) => void;
   }
-  let { listCollapsed = false, onreview, onevaluate, onempty, onphonedetail, onopenrun, onopenreview }: Props = $props();
+  let { onreview, onevaluate, onopenrun, onopenreview }: Props = $props();
 
   // ---- Data (restored from skillsLabState so switching tabs/pages preserves state) ----
   const initialBrowser = skillsLabState.browser;
@@ -115,9 +111,6 @@
   });
 
   const groups = $derived(groupSkills(library, bundled, providerSkills, bodies));
-  $effect(() => {
-    if (!loading) onempty?.(groups.length === 0);
-  });
 
   // Background drift check: fetch the provider bodies that have a copy to
   // compare against. Four in flight; each result lands in `bodies`. Unreadable
@@ -177,8 +170,8 @@
   });
   const bundledInstalled = $derived(bundled.filter((b) => b.state !== 'not_installed').length);
   const bundledUpdates = $derived(bundled.filter((b) => b.state === 'update_available').length);
-  /** Page ⋯ → Install all bundled skills (the category filter narrows it). */
-  export async function installAllBundled(): Promise<void> {
+  /** ⋯ → Install all bundled skills (the category filter narrows it). */
+  async function installAllBundled(): Promise<void> {
     const cat = category && bundled.some((b) => b.category === category) ? category : null;
     if (await runInstallAll(cat)) await loadAll();
   }
@@ -221,8 +214,6 @@
   }
 
   // ---- Selection -----------------------------------------------------------
-  // The skills list's width — drag / ←→ on the divider, remembered across visits.
-  let listW = $state(loadPaneWidth('skills.listW', LIST_PANE.default, LIST_PANE.min, LIST_PANE.max));
   let selName = $state<string | null>(initialBrowser.selName);
   let selSource = $state<VariantSource>(initialBrowser.selSource);
   let tab = $state<DetailTab>(initialBrowser.detailTab);
@@ -237,9 +228,8 @@
   });
   let phoneDetail = $state(false);
   const selected = $derived(groups.find((g) => g.name === selName) ?? null);
-  $effect(() => onphonedetail?.(viewport.isPhone && phoneDetail));
-  /** Phone: back from the detail to the list (the page header's back button). */
-  export async function back(): Promise<void> {
+  /** Phone: back from the detail to the list (the page header's ‹ Skills). */
+  async function back(): Promise<void> {
     if (!(await confirmLeave())) return;
     phoneDetail = false;
   }
@@ -260,7 +250,7 @@
   }
   async function pick(g: SkillGroup): Promise<void> {
     if (g.name === selName) {
-      if (viewport.isPhone) phoneDetail = true;
+      phoneDetail = true;
       return;
     }
     if (!(await confirmLeave())) return;
@@ -269,7 +259,7 @@
   function select(g: SkillGroup, src?: VariantSource): void {
     selName = g.name;
     selSource = src && g.variants.some((v) => v.source === src) ? src : defaultSource(g);
-    if (viewport.isPhone) phoneDetail = true;
+    phoneDetail = true;
   }
   // Open on the last-viewed skill, else the first one listed.
   $effect(() => {
@@ -286,7 +276,7 @@
   // phone (the list is the screen there; the detail opens on a tap).
   $effect(() => {
     const list = shown;
-    if (loading || list.length === 0 || editorDirty || viewport.isPhone) return;
+    if (loading || list.length === 0 || editorDirty || viewport.navDrawer) return;
     if (selName && list.some((g) => g.name === selName)) return;
     untrack(() => {
       selName = list[0].name;
@@ -301,14 +291,14 @@
     if (selected && !selected.variants.some((v) => v.source === selSource)) selSource = defaultSource(selected);
   });
 
-  // ---- New / import (called from the page header) --------------------------
+  // ---- New / import (the list pane's + and ⋯, ⌘K) ---------------------------
   let newOpen = $state(false);
   let newTemplate = $state<'blank' | 'bundled' | 'import'>('blank');
-  export function openNew(): void {
+  function openNew(): void {
     newTemplate = 'blank';
     newOpen = true;
   }
-  export function openImport(): void {
+  function openImport(): void {
     newTemplate = 'import';
     newOpen = true;
   }
@@ -352,7 +342,17 @@
     ]);
   });
 
-  // ---- List keyboard: ↑/↓ move, Enter opens --------------------------------
+  // The list pane's ⋯ (after Hide Skills ⌘B). Install all is behind the same
+  // settings-admin gate as the Settings → Skills section it replaced.
+  function paneMenu(): MenuItem[] {
+    return [
+      { label: 'Import a skill (.zip)…', icon: 'download', action: openImport },
+      ...(auth.can('settings', 'admin') ? [{ label: 'Install all bundled skills…', icon: 'box', action: () => void installAllBundled() } as MenuItem] : []),
+    ];
+  }
+
+  // ---- List keyboard: ↑/↓ open the next skill (the unsaved-edit guard asks
+  //      first); the list pane's own walk only moves focus --------------------
   let listEl = $state<HTMLElement | null>(null);
   function onListKey(e: KeyboardEvent): void {
     if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp') return;
@@ -382,14 +382,9 @@
 </script>
 
 <div class="browser" data-testid="skills-browser">
-  {#if loading}
-    <div class="split">
-      <aside class="list-pane"><div class="pad"><Skeleton rows={10} height={40} label="skills" /></div></aside>
-      <section class="detail-pane hide-phone"><div class="pad"><Skeleton rows={6} height={28} announce={false} /></div></section>
-    </div>
-  {:else if loadError}
+  {#if loadError}
     <LoadState what="skills" variant="page" loading={retrying} error={loadError} empty={true} onretry={retryLoad} />
-  {:else if groups.length === 0}
+  {:else if !loading && groups.length === 0}
     <EmptyState
       variant="page"
       icon="zap"
@@ -402,121 +397,129 @@
       <button class="btn ghost" onclick={openImport}>Import a .zip</button>
     </EmptyState>
   {:else}
-    <div class="split">
-      <aside id="skills-list-pane" class="list-pane" class:collapsed={listCollapsed && !viewport.isPhone} class:hide-phone={viewport.isPhone && phoneDetail} aria-label="Skills" style="--list-pane-w:{listW}px">
-        <div class="list-tools">
-          <label class="search">
-            <Icon name="search" size={14} />
-            <input dir="ltr" type="search" placeholder="Filter skills…" bind:value={query} aria-label="Filter skills" />
-          </label>
-          <div class="chips" role="group" aria-label="Filter by source">
-            <button class="fchip" class:active={source === 'all'} aria-pressed={source === 'all'} onclick={() => (source = 'all')}>All <span class="n">{groups.length}</span></button>
-            {#each sources as [s, n] (s)}
-              <button class="fchip" class:active={source === s} aria-pressed={source === s} onclick={() => (source = source === s ? 'all' : s)} title="Skills with a {sourceLabel(s)} copy">
-                {#if s === 'library'}<Icon name="book" size={12} />{:else if s === 'bundled'}<Icon name="box" size={12} />{:else}<ProviderIcon provider={s} size={12} />{/if}
-                {sourceLabel(s)} <span class="n">{n}</span>
-              </button>
-            {/each}
-            {#if driftedCount > 0}
-              <button class="fchip warn" class:active={driftedOnly} aria-pressed={driftedOnly} onclick={() => (driftedOnly = !driftedOnly)} title="Skills whose copies differ">
-                <span class="sdot drifted"></span>Drifted <span class="n">{driftedCount}</span>
-              </button>
-            {/if}
-          </div>
-          <div class="chips" role="group" aria-label="Filter by category">
-            {#each topCats as [c, n] (c)}
-              <button class="fchip" class:active={category === c} aria-pressed={category === c} onclick={() => (category = category === c ? null : c)}>{c} <span class="n">{n}</span></button>
-            {/each}
-            {#if moreCats.length > 0}
-              <button class="fchip" class:active={!!category && !topCats.some(([c]) => c === category)} aria-haspopup="menu" onclick={moreCategories} title="More categories">
-                {category && !topCats.some(([c]) => c === category) ? category : `${moreCats.length} more`}
-                <Icon name="chevronDown" size={12} />
-              </button>
-            {/if}
-          </div>
-        </div>
-        {#if source === 'bundled' && bundled.length > 0}
-          <p class="bundled-sum dim" data-testid="bundled-summary">{bundledInstalled} of {bundled.length} bundled skills installed{bundledUpdates ? ` · ${bundledUpdates} with an update` : ''}</p>
-        {/if}
-        {#if partialError}
-          <LoadState what="some skills" variant="compact" error={partialError} onretry={loadAll} />
-        {/if}
-        <div class="list" bind:this={listEl} data-testid="skill-list" role="listbox" aria-label="Skills" tabindex="-1" onkeydown={onListKey}>
-          {#each shownByCat as [cat, items] (cat)}
-            <div class="cat" role="presentation">{cat} <span class="n">{items.length}</span></div>
-            {#each items as g (g.name)}
-              <button
-                class="row"
-                class:active={g.name === selName}
-                role="option"
-                aria-selected={g.name === selName}
-                tabindex={g.name === selName ? 0 : -1}
-                data-name={g.name}
-                data-testid="skill-row"
-                onclick={() => pick(g)}
-              >
-                <span class="sdot {g.sync}" title={syncTitle(g)}></span>
-                <span class="row-main">
-                  <span class="row-name" title={g.name}>{g.name}</span>
-                  {#if g.description}<span class="row-desc" title={g.description}>{g.description}</span>{/if}
-                </span>
-                <!-- The sync state rides on the copies' label (after the name, so the
-                     option still reads as the skill first). -->
-                <span class="badges" aria-label="Copies: {g.variants.map((v) => sourceLabel(v.source)).join(', ')} · {syncTitle(g).split('\n')[0]}">
-                  {#each g.variants as v (v.source)}
-                    <span class="src-tile" class:drift={g.driftedSources.includes(v.source)} title="{sourceLabel(v.source)}{g.driftedSources.includes(v.source) ? ' — differs' : ''}">
-                      {#if v.source === 'library'}<Icon name="book" size={12} />{:else if v.source === 'bundled'}<Icon name="box" size={12} />{:else}<ProviderIcon provider={v.source} size={12} />{/if}
-                    </span>
-                  {/each}
-                </span>
-              </button>
-            {/each}
-          {:else}
-            <div class="no-match">
-              <p class="dim">No skills match{query.trim() ? ` “${query.trim()}”` : ''}.</p>
-              {#if filtering}<button class="btn small ghost" onclick={clearFilters}>Clear filters</button>{/if}
+    <ListDetail module="skills-eval" pane="skills" name="Skills" open={phoneDetail && !!selected} onback={() => void back()} legacy={{ w: 'skills.listW' }}>
+      {#snippet list()}
+        <ListPane
+          count={groups.length}
+          primary={{ icon: 'plus', label: 'New skill…', onclick: openNew, testid: 'new-skill' }}
+          menu={paneMenu}
+          loading={loading}
+          testid="skills-list"
+        >
+          {#snippet searchRow()}
+            <label class="search">
+              <Icon name="search" size={14} />
+              <input dir="ltr" type="search" placeholder="Filter skills…" bind:value={query} aria-label="Filter skills" />
+            </label>
+          {/snippet}
+          {#snippet filterRow()}
+            <div class="chips">
+              <div class="chip-group" role="group" aria-label="Filter by source">
+                <button class="fchip" class:active={source === 'all'} aria-pressed={source === 'all'} onclick={() => (source = 'all')}>All <span class="n">{groups.length}</span></button>
+                {#each sources as [s, n] (s)}
+                  <button class="fchip" class:active={source === s} aria-pressed={source === s} onclick={() => (source = source === s ? 'all' : s)} title="Skills with a {sourceLabel(s)} copy">
+                    {#if s === 'library'}<Icon name="book" size={12} />{:else if s === 'bundled'}<Icon name="box" size={12} />{:else}<ProviderIcon provider={s} size={12} />{/if}
+                    {sourceLabel(s)} <span class="n">{n}</span>
+                  </button>
+                {/each}
+                {#if driftedCount > 0}
+                  <button class="fchip warn" class:active={driftedOnly} aria-pressed={driftedOnly} onclick={() => (driftedOnly = !driftedOnly)} title="Skills whose copies differ">
+                    <span class="sdot drifted"></span>Drifted <span class="n">{driftedCount}</span>
+                  </button>
+                {/if}
+              </div>
+              <div class="chip-group" role="group" aria-label="Filter by category">
+                {#each topCats as [c, n] (c)}
+                  <button class="fchip" class:active={category === c} aria-pressed={category === c} onclick={() => (category = category === c ? null : c)}>{c} <span class="n">{n}</span></button>
+                {/each}
+                {#if moreCats.length > 0}
+                  <button class="fchip" class:active={!!category && !topCats.some(([c]) => c === category)} aria-haspopup="menu" onclick={moreCategories} title="More categories">
+                    {category && !topCats.some(([c]) => c === category) ? category : `${moreCats.length} more`}
+                    <Icon name="chevronDown" size={12} />
+                  </button>
+                {/if}
+              </div>
             </div>
-          {/each}
-        </div>
-        <div class="legend dim" aria-hidden="true">
-          <span><span class="sdot in_sync"></span>In sync</span>
-          <span><span class="sdot drifted"></span>Drifted</span>
-          <span><span class="sdot single"></span>One copy</span>
-        </div>
-      </aside>
-      {#if !viewport.isMobile && !listCollapsed}
-        <PaneDivider bind:width={listW} storageKey="skills.listW" label="Resize the skills list" />
-      {/if}
-
-      <section class="detail-pane" class:hide-phone={viewport.isPhone && !phoneDetail}>
-        {#if selected}
-          <SkillDetail
-            group={selected}
-            source={selSource}
-            {tab}
-            wsId={ws.currentId ?? ''}
-            libraryBody={library.find((l) => l.name === selected.name)?.body}
-            bodyOf={(s) => bodies[bodyKey(s, selected.name)]}
-            onsource={(s) => (selSource = s)}
-            ontab={(t) => (tab = t)}
-            onchanged={changed}
-            ondeleted={deleted}
-            onbody={(s, b) => (bodies = { ...bodies, [bodyKey(s, selected.name)]: b })}
-            onreview={() => onreview?.(selected.name, selSource)}
-            onevaluate={() => onevaluate?.(selected.name, selSource)}
-            ondirty={(d) => (editorDirty = d)}
-            {onopenrun}
-            {onopenreview}
-          />
-        {:else}
-          <!-- With skills listed the effects above always open one, so the
-               only empty detail is an empty library. -->
-          {#if groups.length === 0}
-            <EmptyState title="No skills yet" body="Create a skill or import a package to see its method, files and history here." icon="zap" actionLabel="New skill…" actionIcon="plus" onaction={openNew} />
+          {/snippet}
+          {#if source === 'bundled' && bundled.length > 0}
+            <p class="bundled-sum dim" data-testid="bundled-summary">{bundledInstalled} of {bundled.length} bundled skills installed{bundledUpdates ? ` · ${bundledUpdates} with an update` : ''}</p>
           {/if}
-        {/if}
-      </section>
-    </div>
+          {#if partialError}
+            <LoadState what="some skills" variant="compact" error={partialError} onretry={loadAll} />
+          {/if}
+          <div bind:this={listEl} data-testid="skill-list" onkeydown={onListKey} role="presentation">
+            {#each shownByCat as [cat, items] (cat)}
+              <div class="side-section" role="group" aria-label={cat}>
+                <div class="side-section-head"><h3 class="ssh-title">{cat}</h3><span class="ssh-count">{items.length}</span></div>
+                {#each items as g (g.name)}
+                  <div class="side-row" class:two-line={!!g.description} class:selected={g.name === selName}>
+                    <button
+                      type="button"
+                      class="side-row-main"
+                      data-side-row
+                      aria-current={g.name === selName ? 'true' : undefined}
+                      data-name={g.name}
+                      data-testid="skill-row"
+                      onclick={() => pick(g)}
+                    >
+                      <span class="sdot {g.sync}" title={syncTitle(g)}></span>
+                      <span class="side-row-text">
+                        <span class="side-row-title row-name" title={g.name}>{g.name}</span>
+                        {#if g.description}<span class="side-row-meta" title={g.description}>{g.description}</span>{/if}
+                      </span>
+                      <!-- The sync state rides on the copies' label (after the name, so the
+                           row still reads as the skill first). -->
+                      <span class="side-row-trailing badges" aria-label="Copies: {g.variants.map((v) => sourceLabel(v.source)).join(', ')} · {syncTitle(g).split('\n')[0]}">
+                        {#each g.variants as v (v.source)}
+                          <span class="src-tile" class:drift={g.driftedSources.includes(v.source)} title="{sourceLabel(v.source)}{g.driftedSources.includes(v.source) ? ' — differs' : ''}">
+                            {#if v.source === 'library'}<Icon name="book" size={12} />{:else if v.source === 'bundled'}<Icon name="box" size={12} />{:else}<ProviderIcon provider={v.source} size={12} />{/if}
+                          </span>
+                        {/each}
+                      </span>
+                    </button>
+                  </div>
+                {/each}
+              </div>
+            {:else}
+              <div class="no-match">
+                <p class="dim">No skills match{query.trim() ? ` “${query.trim()}”` : ''}.</p>
+                {#if filtering}<button class="btn small ghost" onclick={clearFilters}>Clear filters</button>{/if}
+              </div>
+            {/each}
+          </div>
+          {#snippet footer()}
+            <span class="legend" aria-hidden="true">
+              <span><span class="sdot in_sync"></span>In sync</span>
+              <span><span class="sdot drifted"></span>Drifted</span>
+              <span><span class="sdot single"></span>One copy</span>
+            </span>
+          {/snippet}
+        </ListPane>
+      {/snippet}
+
+      {#if selected}
+        <SkillDetail
+          group={selected}
+          source={selSource}
+          {tab}
+          wsId={ws.currentId ?? ''}
+          libraryBody={library.find((l) => l.name === selected.name)?.body}
+          bodyOf={(s) => bodies[bodyKey(s, selected.name)]}
+          onsource={(s) => (selSource = s)}
+          ontab={(t) => (tab = t)}
+          onchanged={changed}
+          ondeleted={deleted}
+          onbody={(s, b) => (bodies = { ...bodies, [bodyKey(s, selected.name)]: b })}
+          onreview={() => onreview?.(selected.name, selSource)}
+          onevaluate={() => onevaluate?.(selected.name, selSource)}
+          ondirty={(d) => (editorDirty = d)}
+          {onopenrun}
+          {onopenreview}
+        />
+      {:else if loading}
+        <div class="pad"><Skeleton rows={6} height={28} announce={false} /></div>
+      {/if}
+    </ListDetail>
   {/if}
 </div>
 
@@ -538,36 +541,8 @@
     display: flex;
     flex-direction: column;
   }
-  .split {
-    flex: 1;
-    min-height: 0;
-    display: flex;
-  }
   .pad {
     padding: 12px;
-  }
-  .list-pane {
-    width: var(--list-pane-w, 280px);
-    flex: none;
-    display: flex;
-    flex-direction: column;
-    min-height: 0;
-    background: var(--surface);
-  }
-  .list-pane.collapsed { display: none; }
-  .detail-pane {
-    flex: 1;
-    min-width: 0;
-    min-height: 0;
-    display: flex;
-    flex-direction: column;
-  }
-  .list-tools {
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
-    padding: 10px 12px;
-    border-bottom: 1px solid var(--border);
   }
   .search {
     display: flex;
@@ -594,7 +569,8 @@
     font: inherit;
     outline: none;
   }
-  .chips {
+  .chips,
+  .chip-group {
     display: flex;
     flex-wrap: wrap;
     gap: 4px;
@@ -629,72 +605,8 @@
     color: var(--text-dim);
     font-variant-numeric: tabular-nums;
   }
-  .list {
-    flex: 1;
-    min-height: 0;
-    overflow-y: auto;
-    padding: 4px 6px 8px;
-  }
-  .cat {
-    display: flex;
-    align-items: baseline;
-    gap: 6px;
-    padding: 10px 8px 4px;
-    font-size: var(--fs-xs);
-    font-weight: 600;
-    letter-spacing: 0.06em;
-    text-transform: uppercase;
-    color: var(--text-dim);
-  }
-  .cat .n {
-    letter-spacing: 0;
-    font-weight: 500;
-  }
-  .row {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    width: 100%;
-    min-height: 40px;
-    padding: 4px 8px;
-    border: 1px solid transparent;
-    border-radius: var(--radius-m);
-    background: transparent;
-    color: var(--text);
-    text-align: start;
-    cursor: pointer;
-    font: inherit;
-  }
-  .row:hover {
-    background: var(--hover);
-  }
-  .row.active {
-    background: var(--accent-soft);
-    border-color: var(--accent-soft-strong);
-  }
-  .row-main {
-    flex: 1;
-    min-width: 0;
-    display: flex;
-    flex-direction: column;
-  }
-  .row-name,
-  .row-desc {
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-  .row-name {
-    font-weight: 500;
-  }
-  .row-desc {
-    font-size: var(--fs-xs);
-    color: var(--text-dim);
-  }
   .badges {
-    display: inline-flex;
     gap: 2px;
-    flex: none;
   }
   /* A copy's source icon tile (square) — not a status pill. */
   .src-tile {
@@ -731,9 +643,7 @@
   .legend {
     display: flex;
     gap: 12px;
-    padding: 6px 12px;
-    border-top: 1px solid var(--border);
-    font-size: var(--fs-xs);
+    padding-inline: 8px;
   }
   .legend > span {
     display: inline-flex;
@@ -741,30 +651,20 @@
     gap: 4px;
   }
   .no-match {
-    padding: 16px 10px;
+    padding: 16px 8px;
   }
   .bundled-sum {
     margin: 0;
-    padding: 6px 12px;
-    border-bottom: 1px solid var(--border);
+    padding: 0 8px 6px;
     font-size: var(--fs-xs);
   }
   .no-match p {
     margin: 0 0 6px;
   }
-  @media (max-width: 640px) {
-    .list-pane {
-      width: 100%;
-    }
-    .hide-phone {
-      display: none;
-    }
+  @media (pointer: coarse) {
     .fchip {
       min-height: var(--hit-min);
       padding-inline: 10px;
-    }
-    .row {
-      min-height: 44px;
     }
   }
 </style>

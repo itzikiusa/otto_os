@@ -6,17 +6,13 @@
   //   • Review    `#/skills-eval/review`    — multi-agent skill review
   //   • Evaluator `#/skills-eval/evaluator` — the Skills Evaluator (Runs /
   //                                            Golden Tasks / Matrix), unchanged
-  import { viewport } from '../../lib/stores/viewport.svelte';
   import { onTabKey } from '../../lib/tabKeys';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { router } from '../../lib/router.svelte';
   import { auth } from '../../lib/stores/auth.svelte';
-  import { skillsLabState } from '../../lib/stores/skillsLabState.svelte';
   import SkillsBrowser from './SkillsBrowser.svelte';
-  import type SkillReviewPanel from './SkillReviewPanel.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
   import { lazyComponent } from '../../lib/lazy-component.svelte';
-  import { ctxMenu } from '../../lib/contextmenu.svelte';
   import PageHeader from '../../lib/components/PageHeader.svelte';
   import PageBody from '../../lib/components/PageBody.svelte';
   import Icon from '../../lib/components/Icon.svelte';
@@ -79,70 +75,23 @@
     go('evaluator');
   }
 
-  // The page ⋯: Import on Skills, and — Skills Lab being the one home for
-  // skills — what used to be Settings → Skills (Install all bundled skills)
-  // and Settings → Skills evaluator (the defaults sheet, owned by
-  // SkillsEvalPage), behind the same settings-admin gate as those sections.
+  // The Evaluator's ⋯: Skills Lab being the one home for skills, what used
+  // to be Settings → Skills evaluator (the defaults sheet, owned by
+  // SkillsEvalPage), behind the same settings-admin gate as that section.
+  // (Skills' New, Import and Install all bundled live in its list pane.)
   const admin = $derived(auth.can('settings', 'admin'));
-  function pageMore(e: MouseEvent): void {
-    ctxMenu.show(e, tab === 'evaluator'
-      ? [{ label: 'Evaluator defaults…', icon: 'gear', action: () => evalPage?.openDefaults() }]
-      : [
-          { label: 'Import a skill (.zip)…', icon: 'download', action: () => browser?.openImport() },
-          ...(admin ? [{ label: 'Install all bundled skills…', icon: 'box', action: () => void browser?.installAllBundled() }] : []),
-        ]);
-  }
+  const pageMore = $derived(tab === 'evaluator' && admin ? () => [{ label: 'Evaluator defaults…', icon: 'gear' as const, action: () => evalPage?.openDefaults() }] : undefined);
 
   const wsId = $derived(ws.currentId ?? '');
-  let browser = $state<ReturnType<typeof SkillsBrowser> | null>(null);
-  let reviewPanel = $state<ReturnType<typeof SkillReviewPanel> | null>(null);
   // Review and the Evaluator are tabs most visits never open: their chunks
   // (run detail, matrix, start form) load on first open.
   const ReviewLazy = lazyComponent(() => import('./SkillReviewPanel.svelte'));
   const EvalLazy = lazyComponent(() => import('../skills-eval/SkillsEvalPage.svelte'));
-  let evalPage = $state<{ openDefaults(): void; back(): void } | null>(null);
-  let canCreate = $state(true);
-  let skillsPhoneDetail = $state(false);
-  let reviewPhoneDetail = $state(false);
-  let evalPhoneDetail = $state(false);
-  const listCollapsed = $derived(skillsLabState.listCollapsed);
-  // The Evaluator has a collapsible list on Runs and Matrix views.
-  let evalListable = $state(true);
-
-  const phoneBackLabel = $derived(
-    tab === 'skills'
-      ? 'Back to skills'
-      : tab === 'review'
-        ? 'Back to reviews'
-        : evalView === 'matrix'
-          ? 'Back to matrices'
-          : 'Back to evaluations',
-  );
-  const showPhoneBack = $derived(
-    viewport.isPhone &&
-      ((tab === 'skills' && skillsPhoneDetail) ||
-        (tab === 'review' && reviewPhoneDetail) ||
-        (tab === 'evaluator' && evalPhoneDetail)),
-  );
-  function onPhoneBack(): void {
-    if (tab === 'skills') void browser?.back();
-    else if (tab === 'review') reviewPanel?.back();
-    else evalPage?.back();
-  }
+  let evalPage = $state<{ openDefaults(): void } | null>(null);
 </script>
 
 <div class="skills-lab">
-  <PageHeader title="Skills Lab" subtitle={tab === 'skills' ? 'Every skill your agents can load, in one place' : undefined} tabsPlacement="below">
-    {#snippet leading()}
-      {#if (tab === 'skills' || tab === 'review' || (tab === 'evaluator' && evalListable)) && !viewport.isPhone}
-        {@const what = tab === 'skills' ? 'skills' : tab === 'review' ? 'reviews' : evalView === 'matrix' ? 'matrices' : 'evaluations'}
-        {@const targetId = tab === 'skills' ? 'skills-list-pane' : tab === 'review' ? 'reviews-list' : evalView === 'matrix' ? 'matrices-list' : 'evaluations-list'}
-        <button class="icon-btn" onclick={() => (skillsLabState.listCollapsed = !skillsLabState.listCollapsed)} aria-label={listCollapsed ? `Show ${what} list` : `Hide ${what} list`} title={listCollapsed ? `Show ${what} list` : `Hide ${what} list`} aria-expanded={!listCollapsed} aria-controls={targetId}><Icon name="sidebar" size={16} /></button>
-      {/if}
-      {#if showPhoneBack}
-        <button class="icon-btn" onclick={onPhoneBack} aria-label={phoneBackLabel} title={phoneBackLabel}><Icon name="chevronLeft" size={16} /></button>
-      {/if}
-    {/snippet}
+  <PageHeader title="Skills Lab" subtitle={tab === 'skills' ? 'Every skill your agents can load, in one place' : undefined} tabsPlacement="below" more={pageMore}>
     {#snippet tabs()}
       <div class="lab-tabs">
         <div class="segmented" role="tablist" aria-label="Skills Lab section" data-testid="lab-tabs" tabindex="-1" onkeydown={onTabKey}>
@@ -169,26 +118,16 @@
         {/if}
       </div>
     {/snippet}
-    {#snippet actions()}
-      {#if tab === 'skills' || (tab === 'evaluator' && admin)}
-        <button class="icon-btn" data-keep onclick={pageMore} aria-haspopup="menu" aria-label="More Skills Lab actions" title={tab === 'evaluator' ? 'More: evaluator defaults' : 'More: import a skill, install all bundled skills'} data-testid="lab-more"><Icon name="more" size={14} /></button>
-      {/if}
-      {#if tab === 'skills'}
-        {#if canCreate}
-          <button class="btn small primary" onclick={() => browser?.openNew()} data-testid="new-skill"><Icon name="plus" size={12} /> New skill…</button>
-        {/if}
-      {/if}
-    {/snippet}
   </PageHeader>
 
   <PageBody fill padded={false}>
   <div class="lab-body">
     {#if tab === 'skills'}
-      <SkillsBrowser {listCollapsed} bind:this={browser} onreview={reviewSkill} onevaluate={evaluateSkill} onopenrun={openRun} onempty={(empty) => (canCreate = !empty)} onphonedetail={(o) => (skillsPhoneDetail = o)} onopenreview={openReview} />
+      <SkillsBrowser onreview={reviewSkill} onevaluate={evaluateSkill} onopenrun={openRun} onopenreview={openReview} />
     {:else if tab === 'review'}
-      {#if ReviewLazy.component}{@const SkillReviewPanel = ReviewLazy.component}<SkillReviewPanel bind:this={reviewPanel} {wsId} {listCollapsed} initialTarget={reviewTarget} onconsumed={() => (reviewTarget = null)} initialReview={reviewOpen} onreviewconsumed={() => (reviewOpen = null)} onphonedetail={(o: boolean) => (reviewPhoneDetail = o)} />{:else}<LoadState what="the review" variant="page" empty loading={!ReviewLazy.error} error={ReviewLazy.error} onretry={() => ReviewLazy.retry()} />{/if}
+      {#if ReviewLazy.component}{@const SkillReviewPanel = ReviewLazy.component}<SkillReviewPanel {wsId} initialTarget={reviewTarget} onconsumed={() => (reviewTarget = null)} initialReview={reviewOpen} onreviewconsumed={() => (reviewOpen = null)} />{:else}<LoadState what="the review" variant="page" empty loading={!ReviewLazy.error} error={ReviewLazy.error} onretry={() => ReviewLazy.retry()} />{/if}
     {:else}
-      {#if EvalLazy.component}{@const SkillsEvalPage = EvalLazy.component}<SkillsEvalPage bind:this={evalPage} initialSkill={evalTarget} onconsumed={() => (evalTarget = null)} initialRun={runTarget} onrunconsumed={() => (runTarget = null)} {listCollapsed} onlistable={(v) => (evalListable = v)} onphonedetail={(o: boolean) => (evalPhoneDetail = o)} />{:else}<LoadState what="the evaluator" variant="page" empty loading={!EvalLazy.error} error={EvalLazy.error} onretry={() => EvalLazy.retry()} />{/if}
+      {#if EvalLazy.component}{@const SkillsEvalPage = EvalLazy.component}<SkillsEvalPage bind:this={evalPage} initialSkill={evalTarget} onconsumed={() => (evalTarget = null)} initialRun={runTarget} onrunconsumed={() => (runTarget = null)} />{:else}<LoadState what="the evaluator" variant="page" empty loading={!EvalLazy.error} error={EvalLazy.error} onretry={() => EvalLazy.retry()} />{/if}
     {/if}
   </div>
   </PageBody>
