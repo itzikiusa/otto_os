@@ -500,8 +500,8 @@
   .icm-right { flex: 1; min-inline-size: 0; min-block-size: 0; display: flex; flex-direction: column; overflow: hidden; }
   /* Stacked (phone): the sheet is as tall as the window allows and the diff (or
      the list step) fills all of it — no fixed 540 px box, no 76dvh cap. */
-  /* It also covers the sheet body's padding (4 px top, 16 px bottom, 16 px sides). */
-  .icm-root.compact { block-size: calc(100% + 20px); max-block-size: none; min-block-size: 0; margin-block: -4px -16px; margin-inline: -16px; border-block-end: 0; }
+  /* It also covers the phone sheet body's padding (Modal: 4 px top, 14 px bottom and sides). */
+  .icm-root.compact { block-size: calc(100% + 18px); max-block-size: none; min-block-size: 0; margin-block: -4px -14px; margin-inline: -14px; border-block-end: 0; }
   .icm-step-bar {
     display: flex; align-items: center; gap: 8px; flex-shrink: 0;
     min-block-size: 44px; padding-inline: 4px 8px; border-block-end: 1px solid var(--border);

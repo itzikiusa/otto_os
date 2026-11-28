@@ -75,7 +75,8 @@ async function bootIde(page: Page, scheme: 'dark' | 'light' = 'dark'): Promise<v
   );
   await page.goto('/#/ide');
   await expect(page.locator('.shell')).toBeVisible({ timeout: 20_000 });
-  await expect(page.getByTestId('ide-editor-area').or(page.getByTestId('ide-project-tree')).first()).toBeVisible({ timeout: 20_000 });
+  // Both stay mounted on a phone (the explorer is pushed away under the editor): wait for the one on screen.
+  await expect(page.getByTestId('ide-editor-area').or(page.getByTestId('ide-project-tree')).filter({ visible: true }).first()).toBeVisible({ timeout: 20_000 });
 }
 
 /** Two frames: layout, ResizeObservers and Svelte effects have run. */
@@ -263,7 +264,9 @@ test.describe('IDE on phones and tablets', () => {
       await expect(page.locator('.shell-main > .sidebar')).toHaveCount(0);
       await expect(page.locator('.statusbar')).toHaveCount(0);
       await expect(page.getByTestId('ide-agent')).toHaveCount(pane === 'agent' ? 1 : 0);
-      await expect(page.getByRole('button', { name: 'Open navigator' })).toBeVisible();
+      // ☰ on the list page (Files), "‹ Files" on a page pushed from it (design.md §7.11).
+      if (pane === 'files') await expect(page.getByRole('button', { name: 'Open navigator' })).toBeVisible();
+      else await expect(page.getByTestId('page-header').first().getByRole('button', { name: 'Back to Files' })).toBeVisible();
       await expectHeaderFits(page, `landscape from ${pane}`);
       if (pane === 'editor') {
         expect(await heightOf(page, '.ide-editor-area .cm-editor'), 'landscape editor height').toBeGreaterThanOrEqual(200);
@@ -280,6 +283,8 @@ test.describe('IDE on phones and tablets', () => {
 
     // The navigator drawer: rotation closes it; on its side it opens, carries
     // the palette + machine row the hidden bottom nav / status bar held, closes.
+    // ☰ is on the list page (the editor's header has "‹ Files").
+    await showPane(page, 'files');
     const drawer = page.getByRole('dialog', { name: 'Navigator' });
     await page.getByRole('button', { name: 'Open navigator' }).click();
     await expect(drawer).toBeVisible();
@@ -287,6 +292,8 @@ test.describe('IDE on phones and tablets', () => {
     await expect(drawer).toBeHidden();
     await page.getByRole('button', { name: 'Open navigator' }).click();
     await expect(drawer).toBeVisible();
+    // The whole drawer scrolls as one on a phone on its side (PhoneNavDrawer): scroll to the row.
+    await drawer.getByTestId('short-nav-extras').getByRole('button', { name: 'Commands' }).scrollIntoViewIfNeeded();
     await expectFullyInViewport(page, drawer.getByTestId('short-nav-extras').getByRole('button', { name: 'Commands' }), 'drawer Commands row');
     await shot(page, 'rotate--drawer-2-landscape');
     await page.keyboard.press('Escape');

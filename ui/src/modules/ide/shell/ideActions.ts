@@ -45,7 +45,7 @@ export interface IdeActionCtx {
   stack?: boolean;
   onShowPane?: (pane: 'tools') => void;
   onOpenScratches?: () => void;
-  /** A phone: the header's Security button lives in ⋯ (one ⋯ in the row). */
+  /** A phone or tablet: the header's Security button lives in ⋯ (one ⋯ in the row); set only then. */
   onOpenSecurity?: () => void;
 }
 
@@ -155,7 +155,7 @@ export const IDE_ACTIONS: readonly IdeAction[] = [
   { id: 'problems', title: 'Open problems', group: 'Tool windows', icon: 'warning', homes: PS, shortcut: 'problemsPanel', disabled: noTarget, run: (c) => showTool(c, 'problems') },
   { id: 'dbWatch', title: 'Open live DB watch', group: 'Tool windows', icon: 'db', homes: ['palette', 'search', 'more'], keywords: 'database testcontainers mysql postgres mongo redis clickhouse diff', label: () => 'Live DB watch', disabled: noTarget, run: (c) => showTool(c, 'dbwatch') },
   { id: 'mobileDevices', title: 'Open mobile devices & simulators', group: 'Tool windows', icon: 'phone', homes: ['palette', 'search', 'more'], keywords: 'ios android simulator emulator avd xcode logcat adb preview', label: () => 'Mobile devices', run: (c) => showTool(c, 'devices') },
-  { id: 'security', title: 'Open project security', group: 'Tool windows', icon: 'shield', homes: ['more'], label: () => 'Security', when: (c) => c.stack === true && Boolean(c.onOpenSecurity), run: (c) => c.onOpenSecurity?.() },
+  { id: 'security', title: 'Open project security', group: 'Tool windows', icon: 'shield', homes: ['more'], label: () => 'Security', when: (c) => Boolean(c.onOpenSecurity), run: (c) => c.onOpenSecurity?.() },
   { id: 'scratches', title: 'Open scratches', group: 'Tool windows', icon: 'workbench', homes: ['more'], label: () => 'Scratches', when: (c) => c.stack === true && Boolean(c.onOpenScratches), run: (c) => c.onOpenScratches?.() },
   // Settings
   { id: 'settings', title: 'Open settings…', group: 'Settings', icon: 'gear', homes: ['palette', 'search', 'more'], shortcut: 'settings', keywords: 'preferences project structure goroot jdk sdk', run: () => ide.openSettings('project.project') },

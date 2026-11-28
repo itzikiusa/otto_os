@@ -17,6 +17,7 @@
   import { plural } from '../../lib/plural';
   import { router } from '../../lib/router.svelte';
   import { ui } from '../../lib/stores/ui.svelte';
+  import { viewport } from '../../lib/stores/viewport.svelte';
   import { pageChrome } from '../../lib/stores/pageChrome.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { idePreferences } from '../../lib/idePreferences.svelte';
@@ -466,7 +467,8 @@
     {/snippet}
 
     {#snippet actions()}
-      {#if !stack && ide.activeProjectId && !ide.collabIsGuest && ide.target.kind === 'local'}
+      <!-- Security is a header button on a desktop; a phone or tablet has it under the one ⋯. -->
+      {#if !stack && viewport.isDesktop && ide.activeProjectId && !ide.collabIsGuest && ide.target.kind === 'local'}
         <button type="button" class="btn small ghost" data-icon="shield" onclick={() => { securityOpen = true; }}>
           <Icon name="shield" size={14} /> Security
         </button>
@@ -478,7 +480,7 @@
         onAttachFolder={() => (folderPickerMode = 'attach')}
         onShowPane={showPane}
         onOpenScratches={() => void openScratches()}
-        onOpenSecurity={ide.activeProjectId && ide.target.kind === 'local' ? () => (securityOpen = true) : undefined}
+        onOpenSecurity={(stack || !viewport.isDesktop) && ide.activeProjectId && ide.target.kind === 'local' ? () => (securityOpen = true) : undefined}
         onToggleAgentDock={toggleAgentDock}
       />{/if}
     {/snippet}
