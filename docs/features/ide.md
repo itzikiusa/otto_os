@@ -988,8 +988,9 @@ install needed).
    own ipykernel don't ask.
 
 Limits: local workspaces only (no Jupyter Server URLs, no SSH kernels); one
-kernel per open notebook, 12 at most, stopped when the tab closes or the daemon
-stops; widgets and JavaScript outputs are never run (their text form shows);
+kernel per open notebook, stopped when the tab closes or the daemon stops; 12 at
+most — a 13th notebook stops the least recently used idle kernel, and is refused
+("12 kernels are running…") only while all 12 run a cell; widgets and JavaScript outputs are never run (their text form shows);
 HTML outputs render in a script-less sandboxed iframe. **Debug Cell** runs the cell
 in an isolated Python process on the built-in kernel; on Jupyter kernels it is
 not available yet. The kernel env is the project's run environment only (the

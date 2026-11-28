@@ -296,6 +296,8 @@ struct KernelSlotInner {
     proc: TokioMutex<Option<KernelProc>>,
     pid: AtomicU32,
     jupyter: TokioMutex<Option<Arc<JupyterKernel>>>,
+    /// When the notebook last asked for its kernel (the cap evicts the oldest idle one).
+    last_used: StdMutex<Instant>,
 }
 
 impl KernelSlotInner {
@@ -304,7 +306,29 @@ impl KernelSlotInner {
             proc: TokioMutex::new(None),
             pid: AtomicU32::new(0),
             jupyter: TokioMutex::new(None),
+            last_used: StdMutex::new(Instant::now()),
         })
+    }
+
+    fn last_used(&self) -> Instant {
+        *self.last_used.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// No cell runs and no kernel starts: a locked kernel is in use.
+    fn is_idle(&self) -> bool {
+        let (Ok(_proc), Ok(jupyter)) = (self.proc.try_lock(), self.jupyter.try_lock()) else {
+            return false;
+        };
+        jupyter
+            .as_ref()
+            .is_none_or(|k| matches!(k.status().state.as_str(), "idle" | "dead"))
+    }
+
+    async fn stop(&self) {
+        if let Some(k) = self.jupyter.lock().await.take() {
+            k.shutdown(false, grace()).await;
+        }
+        clear_slot_kernel(self, &mut *self.proc.lock().await);
     }
 }
 
@@ -738,11 +762,7 @@ impl NotebookManager {
     pub async fn shutdown_session(&self, owner: &str, project_key: &str, notebook_path: &str) {
         let key = KernelKey::new(owner, project_key, notebook_path);
         if let Some(slot) = self.remove_slot(&key) {
-            if let Some(k) = slot.jupyter.lock().await.take() {
-                k.shutdown(false, grace()).await;
-            }
-            let mut slot_guard = slot.proc.lock().await;
-            clear_slot_kernel(&slot, &mut slot_guard);
+            slot.stop().await;
         }
         self.streams
             .lock()
@@ -765,20 +785,31 @@ impl NotebookManager {
     }
 
     /// Atomically returns the per-notebook slot so concurrent first runs
-    /// serialize kernel creation and share a single kernel process. The 13th
-    /// notebook is refused: kernels are never evicted behind the person's back.
+    /// serialize kernel creation and share a single kernel process. At the cap
+    /// the least recently used idle kernel (or a slot whose kernel never
+    /// started) is stopped to make room; a running cell is never stopped, so
+    /// with 12 busy kernels the 13th notebook is refused.
     async fn get_or_create_slot(&self, key: &KernelKey) -> Result<KernelSlot> {
         let mut guard = self
             .sessions
             .lock()
             .map_err(|_| Error::Internal("notebook session lock poisoned".into()))?;
         if let Some(existing) = guard.get(key) {
+            *existing.last_used.lock().unwrap_or_else(|e| e.into_inner()) = Instant::now();
             return Ok(Arc::clone(existing));
         }
         if guard.len() >= MAX_ACTIVE_KERNELS {
-            return Err(Error::Conflict(format!(
-                "{MAX_ACTIVE_KERNELS} kernels are running. Close a notebook to start another."
-            )));
+            let oldest_idle = guard
+                .iter()
+                .filter(|(_, slot)| slot.is_idle())
+                .min_by_key(|(_, slot)| slot.last_used())
+                .map(|(k, _)| k.clone());
+            let Some(evicted) = oldest_idle.and_then(|k| guard.remove(&k)) else {
+                return Err(Error::Conflict(format!(
+                    "{MAX_ACTIVE_KERNELS} kernels are running. Close a notebook to start another."
+                )));
+            };
+            tokio::spawn(async move { evicted.stop().await });
         }
         let fresh = KernelSlotInner::new();
         guard.insert(key.clone(), Arc::clone(&fresh));
@@ -786,7 +817,7 @@ impl NotebookManager {
     }
 }
 
-fn clear_slot_kernel(slot: &KernelSlot, slot_guard: &mut Option<KernelProc>) {
+fn clear_slot_kernel(slot: &KernelSlotInner, slot_guard: &mut Option<KernelProc>) {
     slot.pid.store(0, Ordering::Release);
     if let Some(mut proc) = slot_guard.take() {
         proc.terminate_tree();
@@ -1328,19 +1359,50 @@ mod tests {
             .await;
     }
 
-    #[tokio::test]
-    async fn the_13th_notebook_is_refused_with_the_cap_message() {
-        let mgr = NotebookManager::new();
+    async fn twelve_slots(mgr: &NotebookManager) -> Vec<KernelSlot> {
+        let mut slots = Vec::new();
         for i in 0..MAX_ACTIVE_KERNELS {
             let key = KernelKey::new("u", "p", &format!("{i}.ipynb"));
-            mgr.get_or_create_slot(&key).await.unwrap();
+            slots.push(mgr.get_or_create_slot(&key).await.unwrap());
+            tokio::time::sleep(Duration::from_millis(2)).await;
         }
+        slots
+    }
+
+    fn has_slot(mgr: &NotebookManager, path: &str) -> bool {
+        mgr.get_existing_slot("u", "p", path).is_some()
+    }
+
+    #[tokio::test]
+    async fn at_the_cap_the_least_recently_used_idle_kernel_makes_room() {
+        let mgr = NotebookManager::new();
+        let _slots = twelve_slots(&mgr).await;
+        // 0.ipynb is used again, so 1.ipynb is now the least recently used.
+        mgr.get_or_create_slot(&KernelKey::new("u", "p", "0.ipynb"))
+            .await
+            .unwrap();
+        mgr.get_or_create_slot(&KernelKey::new("u", "p", "13.ipynb"))
+            .await
+            .expect("an idle kernel makes room for the 13th notebook");
+        assert!(has_slot(&mgr, "13.ipynb") && has_slot(&mgr, "0.ipynb"));
+        assert!(
+            !has_slot(&mgr, "1.ipynb"),
+            "the least recently used idle slot goes"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_13th_notebook_is_refused_while_twelve_kernels_are_busy() {
+        let mgr = NotebookManager::new();
+        let slots = twelve_slots(&mgr).await;
+        // A running cell holds its slot's kernel lock.
+        let _busy: Vec<_> = slots.iter().map(|s| s.proc.try_lock().unwrap()).collect();
         let err = match mgr
             .get_or_create_slot(&KernelKey::new("u", "p", "13.ipynb"))
             .await
         {
             Err(e) => e,
-            Ok(_) => panic!("the 13th kernel must be refused"),
+            Ok(_) => panic!("a busy kernel is never stopped to make room"),
         };
         assert!(err
             .to_string()
