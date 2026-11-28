@@ -1,5 +1,5 @@
 {
-  "entry": 115801,
+  "entry": 143768,
   "page:agents": 207522,
   "page:api": 124748,
   "page:aws": 35133,
@@ -42,5 +42,5 @@
   "panel:info": 4610,
   "panel:outputs": 24336,
   "rightPanel": 9124,
-  "shell": 163163
+  "shell": 131128
 }

@@ -51,6 +51,14 @@ import { gzipSync } from 'node:zlib';
 const UI = join(dirname(fileURLToPath(import.meta.url)), '..');
 const DIST = join(UI, 'dist');
 const MANIFEST = join(DIST, '.vite', 'manifest.json');
+// rc6 (rc6-finish-ui): `entry` 115801 → 143768 B and `shell` 163163 → 131128 B
+// gzip were re-baselined by hand, only these two: the sidebar system's shared
+// blocks (lib/components/side, PageHeader, Tabs, PaneDivider, PaneControls,
+// the shell Drawer) moved out of every page into ONE always-loaded chunk
+// (vite.config.ts codeSplitting group 'side'), which sits in the entry's
+// closure. Net per document (entry + shell): 278964 → 274896 B against the old
+// budgets, and −13.2 KB against the branch before the group; every page
+// target shrank (no page budget was raised).
 const BUDGET = join(UI, 'scripts', 'bundle-budget.json');
 const PAGES = join(UI, 'src', 'shell', 'pages.svelte.ts');
 const RIGHT_PANEL = join(UI, 'src', 'shell', 'RightPanel.svelte');
