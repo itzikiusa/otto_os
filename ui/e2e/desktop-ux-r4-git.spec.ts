@@ -144,7 +144,7 @@ test('real linked worktree opens and registers its own tab without switching the
   const before = execFileSync('git', ['-C', repoDir, 'branch', '--show-current'], {encoding: 'utf8'}).trim();
   execFileSync('git', ['-C', repoDir, 'worktree', 'add', '-b', 'review/linked-checkout', worktreePath]);
   await openRepo(page);
-  await page.getByRole('button', {name: /WORKTREES/}).click();
+  await page.getByRole('button', {name: /^Worktrees/}).click();
   const row = page.locator('.ref-row.is-worktree').filter({hasText: 'review/linked-checkout'});
   await expect(row).toBeVisible();
   await row.click();

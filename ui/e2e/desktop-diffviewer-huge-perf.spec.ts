@@ -258,8 +258,8 @@ test('WIP diff of a 40k-line rewrite: large-file gate, windowed rows, capped hun
   await page.goto(`/#/git/${repoId}/graph`);
   await expect(page.locator('.rv-tabs')).toBeVisible({ timeout: 15_000 });
   const wipRow = page.locator('.wip-row');
-  await expect(wipRow).toBeVisible({ timeout: 15_000 });
-  await wipRow.click();
+  // History lands on the WIP row of a dirty tree.
+  await expect(wipRow).toHaveAttribute('aria-pressed', 'true', { timeout: 15_000 });
   const panel = page.locator('.wip-panel');
   await panel.locator('.wp-name', { hasText: 'big.ts' }).first().click();
   await expect(panel.locator('.wp-diff')).toBeVisible();

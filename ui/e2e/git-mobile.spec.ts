@@ -149,11 +149,16 @@ async function showGraph(page: Page): Promise<void> {
   await expect(graph).toBeVisible({ timeout: 25_000 });
 }
 
-/** History opens on the WIP row of a dirty tree: the WIP panel in the Detail
- *  pane (a sheet over the graph on a phone or a tablet). */
+/** A dirty tree's WIP panel in the Detail pane: a phone lands on it (a sheet
+ *  over the graph); a tablet, where it would be a sheet too, taps the WIP row. */
 async function openWip(page: Page): Promise<void> {
   await page.goto(`/#/git/${dirtyRepoId}/graph`);
-  await expect(page.locator('.wip-row')).toHaveAttribute('aria-pressed', 'true', { timeout: 25_000 });
+  const wip = page.locator('.wip-row');
+  if (!pushes(page)) {
+    await expect(wip).toBeVisible({ timeout: 25_000 });
+    await wip.tap();
+  }
+  await expect(wip).toHaveAttribute('aria-pressed', 'true', { timeout: 25_000 });
   await expect(page.locator('.wip-panel')).toBeVisible({ timeout: 15_000 });
 }
 

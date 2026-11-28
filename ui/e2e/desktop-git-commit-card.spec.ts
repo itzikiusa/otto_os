@@ -129,7 +129,8 @@ test('narrow pane: the diff toolbar fits in the Detail sheet and the branches st
   const r = await seedCardRepo('e2e-card-narrow');
   await stubForge(page);
   await openPage(page, 'git/' + r.id);
-  await expect(page.locator('.wip-row')).toHaveAttribute('aria-pressed', 'true', { timeout: 20_000 });
+  // No room beside the graph: History waits for the WIP row's click.
+  await page.locator('.wip-row').click();
   const sheet = page.getByRole('dialog', { name: 'Changes' });
   await expect(sheet).toBeVisible();
   await sheet.locator('.wp-name').first().click();
