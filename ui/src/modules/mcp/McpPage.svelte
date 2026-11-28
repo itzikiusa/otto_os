@@ -212,8 +212,9 @@
 
   <!-- The Otto-server panel is a readable page and takes the shared body
        gutter; the server and activity sections are full-bleed lists whose own
-       toolbars span the pane, so they manage their edges themselves. -->
-  <PageBody padded={section === 'otto' || section === 'profiles'}>
+       toolbars span the pane, so they manage their edges themselves. Home and
+       Profiles fill the body: a list pane / Detail pane beside their content. -->
+  <PageBody padded={section === 'otto'} fill={section === 'profiles' || section === 'home'}>
     {#key accessRevision}
       {#if section === 'home'}
         <McpHome

@@ -1,5 +1,6 @@
 import { test, expect, type Page } from '@playwright/test';
-import { apiCtx, seedWorkspace } from './seed';
+import { apiCtx, seedGitRepo, seedWorkspace } from './seed';
+import { enableMcpFixtureCatalog } from './mcp-catalog-fixture';
 import { expectNoHorizontalOverflow, openPage } from './helpers';
 
 // The rc.6 side surfaces of API, AWS, Kubernetes and MCP on the three sizes,
@@ -306,6 +307,228 @@ for (const s of ['light', 'dark'] as const) {
         await expect(page.getByTestId('athena-catalog').getByRole('treeitem', { name: /analytics/ })).toBeVisible();
         await shot(page, `aws-phone-athena-catalog-${s}`);
         await page.getByRole('button', { name: 'Back to Accounts', exact: true }).tap();
+        await page.getByTestId('open-navigator').tap();
+        await expect(page.getByRole('dialog', { name: 'Navigator' })).toBeVisible();
+        await page.keyboard.press('Escape');
+        await expect(page.getByTestId('open-side-panel')).toBeVisible();
+      });
+    });
+  });
+}
+
+// ── Kubernetes ───────────────────────────────────────────────────────────────
+const CAPS = { server_version: 'v1.30.3', metrics_server: true, argo_rollouts: true, argocd: false, checked_at: '' };
+const CLUSTER = { id: 'k-stg', name: 'Staging cluster', source: 'kubeconfig', context_name: 'stg', default_namespace: 'default', environment: 'staging', capabilities: CAPS, created_by: 'root', created_at: '', updated_at: '' };
+const PODS = ['checkout-api-7f8db5b4-abcde', 'billing-worker-5c9d8-xyz12', 'orders-api-6b7c9-qwe34'].map((name, i) => ({ name, namespace: 'default', kind: 'Pod', status: i === 1 ? 'CrashLoopBackOff' : 'Running', health: i === 1 ? 'bad' : 'ok', ready: i === 1 ? '0/1' : '1/1', restarts: i, age_seconds: 600 + i * 60, labels: { app: name.split('-')[0] }, extra: {}, images: ['registry.example.test/app:v1'] }));
+
+async function k8sFixture(page: Page): Promise<void> {
+  await legacyAccess(page);
+  await page.addInitScript(() => localStorage.setItem('otto_k8s_autorefresh', '0'));
+  await page.route('**/api/v1/k8s/**', async (r) => {
+    const path = new URL(r.request().url()).pathname;
+    if (r.request().method() !== 'GET') return r.fulfill({ status: 403, json: { code: 'forbidden', message: 'fixture' } });
+    let json: unknown = {};
+    if (path.endsWith('/status')) json = { kubectl: { installed: true, version: '1.30.3' }, k9s: { installed: false, version: null } };
+    else if (path.endsWith('/clusters')) json = [CLUSTER];
+    else if (path.endsWith('/capabilities')) json = CAPS;
+    else if (path.endsWith('/namespaces')) json = { namespaces: [{ name: 'default', status: 'Active' }, { name: 'payments', status: 'Active' }] };
+    else if (path.endsWith('/resources')) json = { kind: 'pods', items: PODS, has_metrics: false };
+    else if (path.endsWith('/resource')) json = { manifest: { metadata: { name: PODS[0].name }, spec: { containers: [{ name: 'app' }] } }, describe: 'Name: ' + PODS[0].name, events: [] };
+    else if (path.endsWith('/containers')) json = { containers: [{ name: 'app', image: 'app:v1', ready: true, state: 'running', restarts: 0, init: false }] };
+    else if (path.endsWith('/logs')) return r.fulfill({ contentType: 'text/plain', body: 'checkout started\n' });
+    return r.fulfill({ json });
+  });
+}
+
+for (const s of ['light', 'dark'] as const) {
+  test.describe(`Kubernetes side surfaces (${s})`, () => {
+    test.beforeEach(async ({ page }) => {
+      await scheme(page, s);
+      await k8sFixture(page);
+    });
+    test.describe('desktop', () => {
+      test.use({ viewport: DESKTOP, isMobile: false, hasTouch: false });
+      test('kinds pane, resource Detail pane, Hide / Show and ⌘B', async ({ page }) => {
+        await openPage(page, 'kubernetes/k-stg/pods');
+        const pane = page.getByTestId('k8s-kinds');
+        await expect(pane).toBeVisible({ timeout: 20_000 });
+        await expect(pane.getByRole('heading', { name: 'Resources', exact: true })).toBeVisible();
+        await expect(pane.getByRole('button', { name: /^Pods/ })).toHaveAttribute('aria-current', 'true');
+        await expect(page.getByTestId('k8s-row').first()).toBeVisible();
+        await shot(page, `k8s-desktop-${s}`);
+        await page.getByTestId('k8s-row').first().click();
+        const detail = page.getByTestId('k8s-drawer');
+        await expect(detail).toBeVisible();
+        await expect(detail.getByRole('tab', { name: 'Overview', exact: true })).toHaveAttribute('aria-selected', 'true');
+        await shot(page, `k8s-desktop-detail-${s}`);
+        await detail.getByRole('button', { name: 'Pod details actions' }).click();
+        await expect(page.getByRole('menuitem', { name: 'kubectl describe' })).toBeVisible();
+        await page.keyboard.press('Escape');
+        await page.getByRole('button', { name: 'Close Pod details' }).click();
+        await expect(detail).toBeHidden();
+        await pane.getByRole('button', { name: 'Resources actions' }).click();
+        await page.getByRole('menuitem', { name: /Hide Resources/ }).click();
+        await expect(pane).toBeHidden();
+        await page.getByTestId('show-list-pane').click();
+        await expect(pane).toBeVisible();
+        await pane.getByRole('button', { name: /^Pods/ }).focus();
+        await page.keyboard.press('ArrowDown');
+        await page.keyboard.press('Enter');
+        await expect(page).toHaveURL(/\/deployments$/);
+      });
+    });
+    test.describe('tablet', () => {
+      test.use({ viewport: TABLET, isMobile: true, hasTouch: true });
+      test('kinds pane beside the table; details as a sheet when there is no room', async ({ page }) => {
+        await openPage(page, 'kubernetes/k-stg/pods');
+        await expect(page.getByTestId('k8s-kinds')).toBeVisible({ timeout: 20_000 });
+        await expectNoHorizontalOverflow(page);
+        await shot(page, `k8s-tablet-${s}`);
+        await page.getByTestId('k8s-row').first().tap();
+        await expect(page.getByTestId('k8s-drawer')).toBeVisible();
+        await shot(page, `k8s-tablet-detail-${s}`);
+      });
+    });
+    test.describe('phone', () => {
+      test.use({ viewport: PHONE, isMobile: true, hasTouch: true });
+      test('push: kinds → table → Back → another kind; ☰ and the Side panel', async ({ page }) => {
+        await openPage(page, 'kubernetes/k-stg');
+        const pane = page.getByTestId('k8s-kinds');
+        await expect(pane.getByRole('button', { name: /^Deployments/ })).toBeVisible({ timeout: 20_000 });
+        await expect(page.getByRole('combobox', { name: 'Resource kind' })).toHaveCount(0);
+        await expectNoHorizontalOverflow(page);
+        await shot(page, `k8s-phone-list-${s}`);
+        await pane.getByRole('button', { name: /^Pods/ }).tap();
+        await expect(page.getByTestId('k8s-row').first()).toBeVisible();
+        const back = page.getByRole('button', { name: 'Back to Resources', exact: true });
+        await expect(back).toBeVisible();
+        await expectNoHorizontalOverflow(page);
+        await shot(page, `k8s-phone-content-${s}`);
+        await page.getByTestId('k8s-row').first().tap();
+        await expect(page.getByTestId('k8s-drawer')).toBeVisible();
+        await shot(page, `k8s-phone-detail-${s}`);
+        await page.getByRole('button', { name: 'Close Pod details' }).tap();
+        await back.tap();
+        await expect(pane.getByRole('button', { name: /^Pods/ })).toHaveAttribute('aria-current', 'true');
+        await pane.getByRole('button', { name: /^Deployments/ }).tap();
+        await expect(page).toHaveURL(/\/deployments$/);
+        await back.tap();
+        await page.getByTestId('open-navigator').tap();
+        await expect(page.getByRole('dialog', { name: 'Navigator' })).toBeVisible();
+        await page.keyboard.press('Escape');
+        await expect(page.getByTestId('open-side-panel')).toBeVisible();
+      });
+    });
+  });
+}
+
+// ── MCP ──────────────────────────────────────────────────────────────────────
+async function mcpWorkspace(withApproval: boolean): Promise<{ ws: string; title: string }> {
+  const { ctx, base } = await apiCtx();
+  const ws = await seedWorkspace(ctx, base);
+  let title = '';
+  if (withApproval) {
+    await enableMcpFixtureCatalog(ctx, base);
+    const { repoId } = await seedGitRepo(ctx, base, ws);
+    title = `Side approval ${Date.now()}`;
+    const r = await ctx.post(`${base}/api/v1/mcp/otto-tools/invoke`, {
+      data: { tool: 'otto.create_pr', arguments: { repo_id: repoId, title, description: 'Body', source_branch: `e2e/side-${Date.now()}`, target_branch: 'main' } },
+    });
+    expect(((await r.json()) as { decision: string }).decision).toBe('pending_approval');
+  }
+  await ctx.dispose();
+  return { ws, title };
+}
+
+for (const s of ['light', 'dark'] as const) {
+  test.describe(`MCP side surfaces (${s})`, () => {
+    test.describe('desktop', () => {
+      test.use({ viewport: DESKTOP, isMobile: false, hasTouch: false });
+      test('profiles list pane, Rules and the approval as Detail panes', async ({ page }) => {
+        test.setTimeout(90_000);
+        const { ws, title } = await mcpWorkspace(true);
+        await scheme(page, s);
+        await page.addInitScript((id) => localStorage.setItem('otto_workspace', id as string), ws);
+        await page.goto('/#/mcp');
+        const row = page.getByTestId('mcp-home-approval').filter({ hasText: title });
+        await expect(row).toBeVisible({ timeout: 30_000 });
+        await row.locator('.tr-main').click();
+        const approval = page.getByTestId('mcp-home-approval-detail');
+        await expect(approval).toBeVisible();
+        await expect(approval.getByText('Who asks')).toBeVisible();
+        await shot(page, `mcp-approval-desktop-${s}`);
+        await page.getByRole('button', { name: /^Close otto\.create_pr/ }).click();
+        await expect(approval).toBeHidden();
+        await page.goto('/#/mcp/profiles');
+        const pane = page.getByTestId('mcp-profiles').getByRole('complementary', { name: 'Profiles' });
+        await expect(pane).toBeVisible({ timeout: 20_000 });
+        const rows = pane.locator('.side-row');
+        await expect(rows.nth(1)).toBeVisible();
+        await rows.nth(1).click();
+        await expect(rows.nth(1).getByRole('button').first()).toHaveAttribute('aria-current', 'true');
+        await expect(page.getByTestId('mcp-profile-config')).toBeVisible();
+        await shot(page, `mcp-profiles-desktop-${s}`);
+        await pane.getByRole('button', { name: 'Profiles actions' }).click();
+        await page.getByRole('menuitem', { name: /Hide Profiles/ }).click();
+        await expect(pane).toBeHidden();
+        await page.getByTestId('show-list-pane').click();
+        await expect(pane).toBeVisible();
+        await page.goto('/#/mcp/servers');
+        await page.getByTestId('mcp-rules-btn').click();
+        const rules = page.getByTestId('mcp-rules-drawer');
+        await expect(rules).toBeVisible();
+        await shot(page, `mcp-rules-desktop-${s}`);
+        await page.getByRole('button', { name: 'Close Rules', exact: true }).click();
+        await expect(rules).toBeHidden();
+      });
+    });
+    test.describe('tablet', () => {
+      test.use({ viewport: TABLET, isMobile: true, hasTouch: true });
+      test('profiles pane beside the profile; Rules', async ({ page }) => {
+        const { ws } = await mcpWorkspace(false);
+        await scheme(page, s);
+        await page.addInitScript((id) => localStorage.setItem('otto_workspace', id as string), ws);
+        await page.goto('/#/mcp/profiles');
+        await expect(page.getByTestId('mcp-profile-config')).toBeVisible({ timeout: 20_000 });
+        await expectNoHorizontalOverflow(page);
+        await shot(page, `mcp-profiles-tablet-${s}`);
+        await page.goto('/#/mcp/servers');
+        await page.getByTestId('mcp-rules-btn').tap();
+        await expect(page.getByTestId('mcp-rules-drawer')).toBeVisible();
+        await shot(page, `mcp-rules-tablet-${s}`);
+      });
+    });
+    test.describe('phone', () => {
+      test.use({ viewport: PHONE, isMobile: true, hasTouch: true });
+      test('push: profiles → profile → Back → another; the approval sheet; ☰ and the Side panel', async ({ page }) => {
+        test.setTimeout(90_000);
+        const { ws, title } = await mcpWorkspace(true);
+        await scheme(page, s);
+        await page.addInitScript((id) => localStorage.setItem('otto_workspace', id as string), ws);
+        await page.goto('/#/mcp/profiles');
+        const rows = page.getByRole('complementary', { name: 'Profiles' }).locator('.side-row');
+        await expect(rows.nth(1)).toBeVisible({ timeout: 20_000 });
+        await expect(page.getByTestId('mcp-profile-config')).toBeHidden();
+        await expectNoHorizontalOverflow(page);
+        await shot(page, `mcp-phone-list-${s}`);
+        await rows.nth(1).getByRole('button').first().tap();
+        await expect(page.getByTestId('mcp-profile-config')).toBeVisible();
+        const back = page.getByRole('button', { name: 'Back to Profiles', exact: true });
+        await expect(back).toBeVisible();
+        await expectNoHorizontalOverflow(page);
+        await shot(page, `mcp-phone-content-${s}`);
+        await back.tap();
+        await expect(rows.nth(1).getByRole('button').first()).toHaveAttribute('aria-current', 'true');
+        await rows.nth(0).getByRole('button').first().tap();
+        await expect(page.getByTestId('mcp-profile-config')).toBeVisible();
+        await back.tap();
+        await page.goto('/#/mcp');
+        const row = page.getByTestId('mcp-home-approval').filter({ hasText: title });
+        await expect(row).toBeVisible({ timeout: 30_000 });
+        await row.locator('.tr-main').tap();
+        await expect(page.getByRole('dialog', { name: 'otto.create_pr' })).toBeVisible();
+        await shot(page, `mcp-phone-approval-${s}`);
+        await page.getByRole('button', { name: /^Close otto\.create_pr/ }).tap();
         await page.getByTestId('open-navigator').tap();
         await expect(page.getByRole('dialog', { name: 'Navigator' })).toBeVisible();
         await page.keyboard.press('Escape');
