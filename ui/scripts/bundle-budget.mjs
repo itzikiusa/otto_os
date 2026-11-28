@@ -38,6 +38,10 @@
 //                (e.g. a nested mermaid under @excalidraw/mermaid-to-excalidraw
 //                next to the top-level one) — pin it with package.json
 //                `overrides` instead of shipping both copies.
+//   page-header  PageHeader is on every page: what it imports must already be
+//                in the entry or the shell, so it adds no chunk but its own
+//                (a helper it took from lib/components/side/context.ts made
+//                that a chunk of its own on every page).
 
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
@@ -236,6 +240,16 @@ for (const [name, at] of pkgLocations) {
     ruleFailures.push(
       `duplicates: ${name} is bundled from ${at.size} copies (${[...at].join(', ')}) — dedupe with package.json "overrides"`,
     );
+  }
+}
+
+// ---- page-header: PageHeader adds no chunk but its own to a page ----
+const headerKey = Object.keys(manifest).find((k) => manifest[k].name === 'PageHeader' && manifest[k].file.endsWith('.js'));
+if (headerKey) {
+  const own = new Set([manifest[headerKey].file, ...(manifest[headerKey].css ?? [])]);
+  const extra = [...minus(closure(headerKey), base)].filter((f) => !own.has(f));
+  if (extra.length) {
+    ruleFailures.push(`page-header: PageHeader adds ${extra.join(', ')} to every page — take it from a module the shell already loads`);
   }
 }
 
