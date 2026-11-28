@@ -341,18 +341,13 @@
   "side-pane": {
     "src/modules/agents/AgentsThreadPane.svelte": 1,
     "src/modules/aws/AwsDrawer.svelte": 1,
-    "src/modules/browser/live/RemoteLiveView.svelte": 1,
     "src/modules/git/PrDetail.svelte": 1,
     "src/modules/ide/editor/IdeIntentionPopover.svelte": 2,
     "src/modules/ide/settings/IdeSettingsModal.svelte": 1,
     "src/modules/kubernetes/ClusterWorkspace.svelte": 1,
     "src/modules/kubernetes/ResourceDrawer.svelte": 1,
     "src/modules/mcp/RulesDrawer.svelte": 1,
-    "src/modules/personal-agents/AgentSidePanel.svelte": 1,
-    "src/modules/plugins/PluginFrame.svelte": 1,
-    "src/modules/skills-lab/SkillsBrowser.svelte": 3,
-    "src/modules/threads/ThreadPane.svelte": 1,
-    "src/modules/workflows/optimize/OptimizePage.svelte": 5
+    "src/modules/threads/ThreadPane.svelte": 1
   },
   "smooth-scroll": {},
   "status-as-text": {},
