@@ -416,4 +416,7 @@
   .dock-shell.stack .dock-header :global(.otabs) { block-size: auto; min-block-size: 44px; }
   .dock-shell.stack .dock-header :global(.otab) { min-block-size: 44px; }
   .dock-shell.stack .dock-act { block-size: var(--hit-min); inline-size: var(--hit-min); }
+  /* A phone's Tools: ONE row — the tabs scroll (with their fade) and ⋯ / back to the editor stay at its end. */
+  .dock-shell.stack .dock-header :global(.otabs.wrap-trailing) { flex-wrap: nowrap; }
+  .dock-shell.stack .dock-header :global(.otabs.wrap-trailing .otabs-row) { flex-basis: auto; }
 </style>
