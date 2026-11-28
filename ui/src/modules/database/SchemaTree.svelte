@@ -523,7 +523,8 @@
 <div class="schema-tree" bind:this={treeEl}>
   {#if !database.schemaLoading && database.schemaRoot.length > 0}
     <div class="tree-search">
-      <Icon name="search" size={12} />
+      <div class="side-search">
+      <Icon name="search" size={14} />
       <input dir="auto"
         class="tree-search-input"
         type="text"
@@ -548,6 +549,7 @@
       <button class="tree-search-clear" class:on={database.showCounts || database.objectSearchScope === 'all'} onclick={treeOptions} aria-haspopup="menu" aria-label="Schema tree options" title="Options — search scope, row counts" data-testid="schema-tree-options">
         <Icon name="filter" size={12} />
       </button>
+      </div>
     </div>
   {/if}
   {#if database.schemaLoading || database.activeConnStatus?.phase === 'connecting'}
@@ -928,32 +930,14 @@
   }
 
   /* Schema-tree filter bar */
+  /* The block's search row (design.md §7.15): the shared .side-search field. */
   .tree-search {
-    display: flex;
-    align-items: center;
-    gap: 4px;
-    padding: 4px 6px;
-    border-bottom: 1px solid color-mix(in srgb, var(--border) 60%, transparent);
-    color: var(--text-dim);
     flex-shrink: 0;
-  }
-  .tree-search-input {
-    flex: 1;
-    border: none;
-    background: transparent;
-    color: var(--text);
-    font-size: var(--fs-s);
-    outline: none;
-    min-width: 0;
-  }
-  /* The bare input drops its outline; the search row shows focus instead. */
-  .tree-search:focus-within {
-    box-shadow: inset 0 -2px 0 var(--accent-text);
-  }
-  .tree-search-input::placeholder {
-    color: var(--text-dim);
+    padding: 8px;
   }
   .tree-search-clear {
+    inline-size: 24px;
+    block-size: 24px;
     display: grid;
     place-items: center;
     border: none;
@@ -985,9 +969,6 @@
     .tree-loading,
     .tree-empty {
       font-size: var(--fs-m);
-    }
-    .tree-search-input {
-      font-size: var(--fs-l);
     }
   }
 </style>

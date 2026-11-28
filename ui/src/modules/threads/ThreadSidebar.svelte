@@ -472,7 +472,7 @@
   testid="threads-sidebar"
 >
   {#snippet searchRow()}
-    <div class="th-search">
+    <div class="side-search th-search">
       <Icon name="search" size={14} />
       <input
         bind:this={searchInputEl}
@@ -659,42 +659,6 @@
 
 <style>
   /* The pane's one search row: a field with the project filter at its end. */
-  .th-search {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    block-size: 28px;
-    padding-inline: 8px 2px;
-    border: 1px solid var(--control-border);
-    border-radius: var(--radius-s);
-    background: var(--surface);
-    color: var(--text-dim);
-  }
-  .th-search:focus-within {
-    color: var(--text);
-    border-color: var(--accent-text);
-  }
-  /* One clear button: ours, not WebKit's as well. */
-  .th-search input::-webkit-search-cancel-button {
-    display: none;
-  }
-  .th-search input {
-    flex: 1;
-    min-width: 0;
-    block-size: 100%;
-    border: 0;
-    padding: 0;
-    background: transparent;
-    color: var(--text);
-    font: inherit;
-    font-size: var(--fs-m);
-    outline: none;
-  }
-  @media (pointer: coarse) {
-    .th-search {
-      block-size: 36px;
-    }
-  }
   .th-on {
     color: var(--accent-text);
   }

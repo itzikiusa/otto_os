@@ -457,9 +457,11 @@
 >
   {#snippet searchRow()}
     <div class="pr-search-row">
+      <div class="side-search pr-search-field">
+      <Icon name="search" size={14} />
       <input
         dir="auto"
-        class="input pr-search"
+        class="pr-search"
         type="search"
         bind:value={query}
         placeholder="Search or label:bug"
@@ -472,6 +474,7 @@
           }
         }}
       />
+      </div>
       <button class="icon-btn pr-filters" class:on={activeFilterCount > 0} aria-haspopup="menu" onclick={filterMenu}
         title={activeFilterCount > 0 ? `${plural(activeFilterCount, 'filter')} on` : 'Filter pull requests'}
         aria-label={activeFilterCount > 0 ? `Filters (${activeFilterCount} on)` : 'Filters'}>
@@ -563,9 +566,8 @@
     align-items: center;
     gap: 4px;
   }
-  .pr-search {
+  .pr-search-field {
     flex: 1;
-    min-width: 0;
   }
   .pr-filters {
     position: relative;

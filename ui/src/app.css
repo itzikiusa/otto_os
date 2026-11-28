@@ -548,6 +548,51 @@ button.chip:focus-visible {
   padding-block: 0 8px;
   padding-inline: 8px;
 }
+/* The ONE list-pane search field (design.md §7.15): a bordered box with the
+   search glyph, a bare input and at most one clear (plus an options) control.
+   Put it in ListPane's `searchRow` (or a tree's own search row). */
+.side-search {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  block-size: 28px;
+  padding-inline: 8px 2px;
+  border: 1px solid var(--control-border);
+  border-radius: var(--radius-s);
+  background: var(--surface);
+  color: var(--text-dim);
+}
+.side-search:focus-within {
+  color: var(--text);
+  border-color: var(--accent-text);
+}
+.side-search input {
+  flex: 1;
+  min-width: 0;
+  block-size: 100%;
+  border: 0;
+  padding: 0;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: var(--fs-m);
+  outline: none;
+}
+.side-search input::placeholder {
+  color: var(--text-dim);
+}
+/* One clear button: ours, not WebKit's as well. */
+.side-search input::-webkit-search-cancel-button {
+  display: none;
+}
+/* Touch: finger-sized, with room for a 44 px clear button. */
+@media (pointer: coarse) {
+  .side-search {
+    block-size: 44px;
+    padding-inline-end: 0;
+  }
+}
 /* A phone list page: the header is the page's, so the first row needs its own top edge. */
 .side-pane-search:first-child,
 .side-pane-filters:first-child {

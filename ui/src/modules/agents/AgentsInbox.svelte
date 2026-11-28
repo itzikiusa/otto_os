@@ -477,7 +477,7 @@
   testid="agents-inbox"
 >
   {#snippet searchRow()}
-    <div class="ai-search">
+    <div class="side-search ai-search">
       <Icon name="search" size={14} />
       <input bind:this={searchEl} type="search" dir="auto" bind:value={query} placeholder="Filter sessions…" aria-label="Search sessions, branches, workspaces" data-testid="agents-search" />
       {#if query}
@@ -584,37 +584,6 @@
 
 <style>
   /* The pane's one search row (as Threads'): the field, Select and Show / sort at its end. */
-  .ai-search {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    block-size: 28px;
-    padding-inline: 8px 2px;
-    border: 1px solid var(--control-border);
-    border-radius: var(--radius-s);
-    background: var(--surface);
-    color: var(--text-dim);
-  }
-  .ai-search:focus-within {
-    color: var(--text);
-    border-color: var(--accent-text);
-  }
-  /* One clear button: ours, not WebKit's as well. */
-  .ai-search input::-webkit-search-cancel-button {
-    display: none;
-  }
-  .ai-search input {
-    flex: 1;
-    min-width: 0;
-    block-size: 100%;
-    border: 0;
-    padding: 0;
-    background: transparent;
-    color: var(--text);
-    font: inherit;
-    font-size: var(--fs-m);
-    outline: none;
-  }
   .ai-tool {
     flex: none;
   }
@@ -696,10 +665,6 @@
   }
   /* Touch: finger-sized Select / Show-sort / Clear (44 px, design review H8). */
   @media (pointer: coarse) {
-    .ai-search {
-      block-size: 46px;
-      padding-inline-end: 0;
-    }
     .ai-tool {
       inline-size: 44px;
       block-size: 44px;
