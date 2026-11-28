@@ -192,7 +192,7 @@ test('IDE Devices panel, Toolchains modal (iOS/Android/Flutter), and Browser↔I
   }
   await expect(devicesTab).toBeVisible();
   await devicesTab.click();
-  await expect(page.locator('[aria-label="Simulators and emulators"]')).toBeVisible({ timeout: 15_000 });
+  await expect(page.locator('aside[aria-label="Devices"]')).toBeVisible({ timeout: 15_000 });
   await assertZeroCutOff(page, 'ide devices tab');
 
   // Open and validate the IDE New Simulator / AVD modal (fits in viewport, platform toggle, submit validation).

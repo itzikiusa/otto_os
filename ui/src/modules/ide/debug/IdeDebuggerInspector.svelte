@@ -1,15 +1,21 @@
 <script lang="ts">
-  // Frames & Threads + Variables & Watches inspector columns for `IdeDebuggerPanel`.
+  // Frames & Threads + Variables & Watches inspector columns for `IdeDebuggerPanel`
+  // (two list panes in the Debug tool window, on the shared rows).
   // Variables keep their expansion across steps (open state keyed by path and
   // re-applied after every stop) and mark values that changed since the last stop.
   import { untrack, type Snippet } from 'svelte';
-  import Badge from '../../../lib/components/Badge.svelte';
   import Icon from '../../../lib/components/Icon.svelte';
   import PaneDivider from '../../../lib/components/PaneDivider.svelte';
+  import ListPane from '../../../lib/components/side/ListPane.svelte';
+  import PhoneBack from '../../../lib/components/side/PhoneBack.svelte';
+  import SideRow from '../../../lib/components/side/SideRow.svelte';
+  import SideSection from '../../../lib/components/side/SideSection.svelte';
+  import { LIST_PANE, loadPaneW, paneKey, paneStorage, type PaneRange } from '../../../lib/components/side/paneKeys';
   import { copyWithToast } from '../../../lib/clipboard';
-  import { loadPaneWidth } from '../../../lib/paneResizer';
+  import { ctxMenu, type MenuItem } from '../../../lib/contextmenu.svelte';
+  import { rowMenu } from '../../../lib/rowMenu';
+  import { viewport } from '../../../lib/stores/viewport.svelte';
   import { pushIdeNavLocation } from '../editor/ideEditorStoreBridge.svelte';
-  import { ideLayout } from '../shell/ideLayout.svelte';
   import {
     ide,
     ideBasename,
@@ -19,7 +25,7 @@
   } from '../ideStore.svelte';
   import { ideDockPrefs } from './ideDockPrefs.svelte';
   import IdeVarRows from './IdeVarRows.svelte';
-  import { activeThreadTitle, FRAMES_PANE, threadOptionLabel } from './ideDebugPanelModel';
+  import { activeThreadTitle, threadOptionLabel } from './ideDebugPanelModel';
   import { selectDebugThread } from './ideDebugThread';
   import { collectValues, reexpandOpenPaths, VarChangeTracker } from './ideVarTree';
 
@@ -29,6 +35,8 @@
     showVariables: boolean;
     hasTrailingConsole: boolean;
     quickEvalSlot?: Snippet;
+    /** A phone: a frame's variables are pushed over the Frames list (bound: the panel hides its console with them). */
+    phoneOpen?: boolean;
   }
 
   let {
@@ -37,12 +45,13 @@
     showVariables,
     hasTrailingConsole,
     quickEvalSlot,
+    phoneOpen = $bindable(false),
   }: Props = $props();
 
-  const LS_FRAMES_W = 'otto.ide.dbgFramesW';
-  const LS_VARS_W = 'otto.ide.dbgVarsW';
-  let framesW = $state(loadPaneWidth(LS_FRAMES_W, FRAMES_PANE.default, FRAMES_PANE.min, FRAMES_PANE.max));
-  let varsW = $state(loadPaneWidth(LS_VARS_W, 340, 200, 680));
+  // Frames is a list pane (the shared range); Variables keeps its own wider range. Old keys read once.
+  const VARS_PANE: PaneRange = { default: 340, min: 200, max: 680 };
+  let framesW = $state(loadPaneW(paneStorage(), 'ide', 'dbgFrames', LIST_PANE, { w: 'otto.ide.dbgFramesW' }, 280));
+  let varsW = $state(loadPaneW(paneStorage(), 'ide', 'dbgVars', VARS_PANE, { w: 'otto.ide.dbgVarsW' }));
   /** Open scopes by NAME and open variables by PATH: both outlive a stop. */
   let openScopes = $state<Record<string, boolean>>({});
   let openPaths = $state<Record<string, boolean>>({});
@@ -52,7 +61,7 @@
   let watchFormOpen = $state(false);
   let watchInputEl = $state<HTMLInputElement>();
 
-  const compact = $derived(ideLayout.stack);
+  const phone = $derived(viewport.isPhone);
   const isPaused = $derived(dbg.state === 'paused');
   const scopeKey = (s: IdeScope): string => `${s.name}:${s.variables_reference}`;
   const frameName = $derived(dbg.stack_frames.find((f) => f.id === dbg.active_frame_id)?.name ?? '');
@@ -116,6 +125,7 @@
   }
 
   function onSelectFrame(frame: IdeStackFrame): void {
+    phoneOpen = true;
     void ide.selectFrame(frame.id, dbg.active_thread_id ?? undefined);
     if (frame.path) {
       if (ide.activePath) pushIdeNavLocation(ide.activePath, ide.cursorInfo.line, ide.cursorInfo.col);
@@ -149,63 +159,84 @@
     if (!watchDraft.trim()) watchFormOpen = false;
   }
 
+  const variablesMenu = (): MenuItem[] => [
+    { label: 'Watches', checked: ideDockPrefs.dbgShowWatches, action: () => ideDockPrefs.toggleWatches() },
+  ];
+  const watchMenu = (w: (typeof ide.watches)[number]): MenuItem[] => [
+    { label: 'Copy Value', icon: 'copy', action: () => void copyWithToast(w.error || w.value, w.expression) },
+    { label: 'Remove Watch', icon: 'trash', action: () => ide.removeWatch(w.id) },
+  ];
+
   const showWatchForm = $derived(watchFormOpen || ide.watches.length === 0);
 </script>
 
+<!-- Two list panes inside the Debug tool window (standalone ListPanes: their
+     own headers; the page's list is the explorer): Frames (the processes of a
+     js-debug session, the thread picker, the frames) and Variables (scopes as
+     tree nodes, the Watches section, quick evaluate at the foot). A phone
+     pushes: the frames are the list; a tapped frame shows the variables (and
+     the console after them) with "‹ Frames". -->
 {#if showFrames}
   {@const fillFrames = !showVariables && !hasTrailingConsole}
   <section
     class="dbg-col"
-    class:is-fill={fillFrames}
-    class:is-compact={compact}
-    style:inline-size={!fillFrames && !compact ? `${framesW}px` : undefined}
+    class:is-fill={fillFrames || phone}
+    style:inline-size={!fillFrames && !phone ? `${framesW}px` : undefined}
+    hidden={phone && phoneOpen}
     aria-label="Threads and call stack"
     data-testid="ide-debug-frames-pane"
   >
-    <header class="dbg-col-head">
-      <h2 class="dbg-col-title">Frames</h2>
-      {#if dbg.threads.length > 1}
-        <select class="input dbg-thread-select" dir="ltr" aria-label="Active thread" title={activeThreadTitle(dbg.threads, { id: dbg.active_thread_id, reason: isPaused ? dbg.stopped_reason : null })} value={dbg.active_thread_id ?? dbg.threads[0]?.id} onchange={onThreadChange} data-testid="ide-debug-thread-select">
-          {#each dbg.threads as th (th.id)}
-            <option value={th.id}>{threadOptionLabel(th, { id: dbg.active_thread_id, reason: isPaused ? dbg.stopped_reason : null })}</option>
-          {/each}
-        </select>
-      {:else if dbg.threads.length === 1}
-        <span class="dbg-thread-one mono dim" dir="ltr" title={threadOptionLabel(dbg.threads[0], { id: dbg.active_thread_id, reason: isPaused ? dbg.stopped_reason : null })}>{dbg.threads[0].name}</span>
-      {/if}
-    </header>
-    <div class="dbg-scroll">
+    <ListPane name="Frames" count={dbg.stack_frames.length}>
+      {#snippet filterRow()}
+        {#if dbg.threads.length > 1}
+          <select class="input dbg-thread-select" dir="ltr" aria-label="Active thread" title={activeThreadTitle(dbg.threads, { id: dbg.active_thread_id, reason: isPaused ? dbg.stopped_reason : null })} value={dbg.active_thread_id ?? dbg.threads[0]?.id} onchange={onThreadChange} data-testid="ide-debug-thread-select">
+            {#each dbg.threads as th (th.id)}
+              <option value={th.id}>{threadOptionLabel(th, { id: dbg.active_thread_id, reason: isPaused ? dbg.stopped_reason : null })}</option>
+            {/each}
+          </select>
+        {:else if dbg.threads.length === 1}
+          <span class="dbg-thread-one mono dim" dir="ltr" title={threadOptionLabel(dbg.threads[0], { id: dbg.active_thread_id, reason: isPaused ? dbg.stopped_reason : null })}>{dbg.threads[0].name}</span>
+        {/if}
+      {/snippet}
       {#if dbg.targets?.length}
-        <ul class="dbg-targets" aria-label="Debugged processes" data-testid="ide-debug-targets">
+        <SideSection title="Processes" count={dbg.targets.length} testid="ide-debug-targets">
           {#each dbg.targets as t (t.id)}
-            <li class="dbg-target" class:is-error={!!t.error} title={t.error ? `${t.name}: not attached: ${t.error}` : t.name}>
-              <span class="dbg-target-name mono ellipsis" dir="ltr">{t.name}</span>
-              <span class="dbg-target-state">{t.error ? 'not attached' : t.paused ? 'paused' : 'running'}</span>
-            </li>
+            <div class="side-row dbg-target" title={t.error ? `${t.name}: not attached: ${t.error}` : t.name}>
+              <span class="side-row-main">
+                <span class="side-row-text"><span class="side-row-title mono" dir="ltr">{t.name}</span></span>
+                <span class="side-row-trailing" class:is-error={!!t.error}>{t.error ? 'not attached' : t.paused ? 'paused' : 'running'}</span>
+              </span>
+            </div>
           {/each}
-        </ul>
+        </SideSection>
       {/if}
       {#if dbg.stack_frames.length === 0}
         <p class="dbg-muted">{isPaused ? 'No stack frames reported.' : 'Pause execution or hit a breakpoint to inspect stack frames.'}</p>
       {:else}
         {#each dbg.stack_frames as frame (frame.id)}
-          <button
-            type="button"
-            class="dbg-frame"
-            class:is-selected={dbg.active_frame_id === frame.id}
-            aria-current={dbg.active_frame_id === frame.id ? 'true' : undefined}
-            onclick={() => onSelectFrame(frame)}
-          >
-            <span class="dbg-frame-fn mono ellipsis" dir="ltr" title={frame.name}>{frame.name}</span>
-            {#if frame.path}<span class="dbg-frame-loc mono ellipsis" dir="ltr" title={`${frame.path}:${frame.line}`}>{ideBasename(frame.path)}:{frame.line}</span>{/if}
-          </button>
+          {@const sel = dbg.active_frame_id === frame.id}
+          <div class="side-row" class:two-line={!!frame.path} class:selected={sel}>
+            <button
+              type="button"
+              class="side-row-main dbg-frame"
+              data-side-row
+              aria-current={sel ? 'true' : undefined}
+              title={frame.path ? `${frame.name} — ${frame.path}:${frame.line}` : frame.name}
+              onclick={() => onSelectFrame(frame)}
+            >
+              <span class="side-row-text">
+                <span class="side-row-title mono" dir="ltr">{frame.name}</span>
+                {#if frame.path}<span class="side-row-meta mono" dir="ltr">{ideBasename(frame.path)}:{frame.line}</span>{/if}
+              </span>
+            </button>
+          </div>
         {/each}
       {/if}
-    </div>
+    </ListPane>
   </section>
 
-  {#if (showVariables || hasTrailingConsole) && !compact}
-    <PaneDivider bind:width={framesW} storageKey={LS_FRAMES_W} min={FRAMES_PANE.min} max={FRAMES_PANE.max} defaultWidth={FRAMES_PANE.default} label="Resize Frames column" />
+  {#if (showVariables || hasTrailingConsole) && !phone}
+    <PaneDivider bind:width={framesW} storageKey={paneKey('ide', 'dbgFrames', 'w')} min={LIST_PANE.min} max={LIST_PANE.max} defaultWidth={280} label="Resize Frames" />
   {/if}
 {/if}
 
@@ -214,147 +245,112 @@
   <section
     class="dbg-col"
     class:is-fill={fillVars}
-    class:is-compact={compact}
-    style:inline-size={!fillVars && !compact ? `${varsW}px` : undefined}
+    class:is-stacked={phone}
+    style:inline-size={!fillVars && !phone ? `${varsW}px` : undefined}
+    hidden={phone && showFrames && !phoneOpen}
     aria-label="Variables and watches"
     data-testid="ide-debug-variables-pane"
   >
-    <header class="dbg-col-head">
-      <h2 class="dbg-col-title">Variables{ideDockPrefs.dbgShowWatches ? ' & watches' : ''}</h2>
-      <div class="dbg-head-actions">
-        <button
-          type="button"
-          class="dbg-pane-btn"
-          class:is-on={ideDockPrefs.dbgShowWatches}
-          aria-pressed={ideDockPrefs.dbgShowWatches}
-          title={ideDockPrefs.dbgShowWatches ? 'Hide Watches section' : 'Show Watches section'}
-          onclick={() => ideDockPrefs.toggleWatches()}
-          data-testid="ide-debug-toggle-watches"
-        >Watches{ide.watches.length > 0 ? ` (${ide.watches.length})` : ''}</button>
-        {#if ideDockPrefs.dbgShowWatches && ide.watches.length > 0}
-          <button type="button" class="icon-btn" aria-label="Refresh watches" title="Refresh watches" disabled={!isPaused} onclick={() => void ide.refreshWatches()}>
-            <Icon name="refresh" size={12} />
-          </button>
-        {/if}
-      </div>
-    </header>
-    <div class="dbg-scroll" role="list" aria-label="Variables">
-      {#if dbg.scopes.length === 0}
-        <p class="dbg-muted">{isPaused ? 'No variable scopes in this frame.' : 'Variables populate when paused at a breakpoint.'}</p>
-      {:else}
-        {#each dbg.scopes as scope (scopeKey(scope))}
-          {@const isOpen = Boolean(openScopes[scope.name])}
-          {@const vars = ide.expandedVariables[scope.variables_reference] ?? []}
-          <div class="dbg-scope" role="listitem">
-            <button type="button" class="dbg-scope-head" aria-expanded={isOpen} onclick={() => void toggleScope(scope)}>
-              <Icon name={isOpen ? 'chevronDown' : 'chevronRight'} size={12} />
-              <span class="dbg-scope-name">{scope.name}</span>
-              {#if scope.expensive}<Badge tone="neutral" variant="outline" label="expensive" />{/if}
-            </button>
-            {#if isOpen}
-              {#if loadingRefs[scope.variables_reference] && vars.length === 0}
-                <div class="dbg-var-empty dim"><span class="spinner" style="--spinner-size: 12px" aria-hidden="true"></span><span>Inspecting scope…</span></div>
-              {:else if vars.length === 0}
-                <div class="dbg-var-empty dim">No variables in {scope.name}</div>
-              {:else}
-                <div role="list" aria-label={`${scope.name} variables`}>
-                  <IdeVarRows vars={vars} root={scope.name} parentRef={scope.variables_reference} {openPaths} onsetopen={setOpen} changed={isChanged} />
-                </div>
+    {#if phone && showFrames}<div class="dbg-back"><PhoneBack label="Frames" onclick={() => (phoneOpen = false)} testid="ide-debug-frames-back" /></div>{/if}
+    <ListPane name="Variables" menu={variablesMenu}>
+      <div role="list" aria-label="Variables">
+        {#if dbg.scopes.length === 0}
+          <p class="dbg-muted">{isPaused ? 'No variable scopes in this frame.' : 'Variables populate when paused at a breakpoint.'}</p>
+        {:else}
+          {#each dbg.scopes as scope (scopeKey(scope))}
+            {@const isOpen = Boolean(openScopes[scope.name])}
+            {@const vars = ide.expandedVariables[scope.variables_reference] ?? []}
+            <div role="listitem">
+              <SideRow title={scope.name} expanded={isOpen} ontoggle={() => void toggleScope(scope)} onclick={() => void toggleScope(scope)}>
+                {#snippet trailing()}{#if scope.expensive}expensive{/if}{/snippet}
+              </SideRow>
+              {#if isOpen}
+                {#if loadingRefs[scope.variables_reference] && vars.length === 0}
+                  <div class="dbg-var-empty dim"><span class="spinner" style="--spinner-size: 12px" aria-hidden="true"></span><span>Inspecting scope…</span></div>
+                {:else if vars.length === 0}
+                  <div class="dbg-var-empty dim">No variables in {scope.name}</div>
+                {:else}
+                  <div role="list" aria-label={`${scope.name} variables`}>
+                    <IdeVarRows vars={vars} root={scope.name} parentRef={scope.variables_reference} {openPaths} onsetopen={setOpen} changed={isChanged} depth={1} />
+                  </div>
+                {/if}
               {/if}
-            {/if}
-          </div>
-        {/each}
-      {/if}
-
-      {#if ideDockPrefs.dbgShowWatches}
-        <div class="dbg-watches" role="listitem">
-          <div class="dbg-subhead">
-            <span>Watches</span>
-            {#if !showWatchForm}
-              <button type="button" class="icon-btn" aria-label="Add watch" title="Add watch" onclick={() => void openWatchForm()} data-testid="ide-debug-add-watch">
-                <Icon name="plus" size={12} />
-              </button>
-            {/if}
-          </div>
-          {#if showWatchForm}
-            <form class="dbg-inline-form" onsubmit={onAddWatch}>
-              <input bind:this={watchInputEl} class="input dbg-inline-input" type="text" dir="ltr" aria-label="Add watch expression" placeholder="Add watch expression…" bind:value={watchDraft} onblur={onWatchBlur} />
-              <button type="submit" class="btn small" disabled={!watchDraft.trim()}><Icon name="plus" size={12} /><span>Watch</span></button>
-            </form>
-          {/if}
-          {#each ide.watches as w (w.id)}
-            <div class="dbg-watch-row reveal-host">
-              <span class="dbg-var-name mono" dir="ltr">{w.expression}</span>
-              <span class="dbg-var-eq dim">=</span>
-              {#if w.error}
-                <span class="dbg-watch-err mono ellipsis" dir="ltr" title={w.error}>{w.error}</span>
-              {:else}
-                <span class="dbg-var-val mono ellipsis" dir="ltr" title={w.value}>{w.value}</span>
-              {/if}
-              {#if w.var_type}<span class="dbg-var-type mono ellipsis" dir="ltr">{w.var_type}</span>{/if}
-              <button type="button" class="icon-btn reveal-on-hover" aria-label={`Copy watch ${w.expression}`} title={`Copy watch ${w.expression}`} onclick={() => void copyWithToast(w.error || w.value, w.expression)}>
-                <Icon name="copy" size={12} />
-              </button>
-              <button type="button" class="icon-btn reveal-on-hover" aria-label={`Remove watch ${w.expression}`} title={`Remove watch ${w.expression}`} onclick={() => ide.removeWatch(w.id)}>
-                <Icon name="trash" size={12} />
-              </button>
             </div>
           {/each}
-        </div>
-      {/if}
-    </div>
+        {/if}
+
+        {#if ideDockPrefs.dbgShowWatches}
+          <div role="listitem">
+            <SideSection title="Watches" count={ide.watches.length} foldable={false}>
+              {#snippet actions()}
+                {#if ide.watches.length > 0}
+                  <button type="button" class="icon-btn" aria-label="Refresh watches" title="Refresh watches" disabled={!isPaused} onclick={() => void ide.refreshWatches()}><Icon name="refresh" size={12} /></button>
+                {/if}
+                {#if !showWatchForm}
+                  <button type="button" class="icon-btn" aria-label="Add watch" title="Add watch" onclick={() => void openWatchForm()} data-testid="ide-debug-add-watch"><Icon name="plus" size={12} /></button>
+                {/if}
+              {/snippet}
+              {#if showWatchForm}
+                <form class="dbg-inline-form" onsubmit={onAddWatch}>
+                  <input bind:this={watchInputEl} class="input dbg-inline-input" type="text" dir="ltr" aria-label="Add watch expression" placeholder="Add watch expression…" bind:value={watchDraft} onblur={onWatchBlur} />
+                  <button type="submit" class="btn small" disabled={!watchDraft.trim()}><Icon name="plus" size={12} /><span>Watch</span></button>
+                </form>
+              {/if}
+              {#each ide.watches as w (w.id)}
+                <div class="side-row">
+                  <button
+                    type="button"
+                    class="side-row-main dbg-watch-main"
+                    data-side-row
+                    title={w.error || w.value}
+                    onclick={(e) => ctxMenu.showAt(e.currentTarget as HTMLElement, watchMenu(w))}
+                    oncontextmenu={(e) => { e.preventDefault(); ctxMenu.show(e, watchMenu(w)); }}
+                    use:rowMenu
+                  >
+                    <span class="dbg-var-name mono" dir="ltr">{w.expression}</span>
+                    <span class="dim">=</span>
+                    {#if w.error}
+                      <span class="dbg-watch-err mono ellipsis" dir="ltr">{w.error}</span>
+                    {:else}
+                      <span class="dbg-var-val mono ellipsis" dir="ltr">{w.value}</span>
+                    {/if}
+                    {#if w.var_type}<span class="side-row-trailing mono" dir="ltr">{w.var_type}</span>{/if}
+                  </button>
+                  <button type="button" class="icon-btn side-row-more" tabindex="-1" aria-label={`Watch ${w.expression} actions`} title="More" onclick={(e) => ctxMenu.showAt(e.currentTarget as HTMLElement, watchMenu(w), { align: 'end' })}>
+                    <Icon name="more" size={14} />
+                  </button>
+                </div>
+              {/each}
+            </SideSection>
+          </div>
+        {/if}
+      </div>
+    </ListPane>
     {#if quickEvalSlot}{@render quickEvalSlot()}{/if}
   </section>
 
-  {#if hasTrailingConsole && !compact}
-    <PaneDivider bind:width={varsW} storageKey={LS_VARS_W} min={200} max={680} defaultWidth={340} label="Resize Variables column" />
+  {#if hasTrailingConsole && !phone}
+    <PaneDivider bind:width={varsW} storageKey={paneKey('ide', 'dbgVars', 'w')} min={VARS_PANE.min} max={VARS_PANE.max} defaultWidth={VARS_PANE.default} label="Resize Variables" />
   {/if}
 {/if}
 
 <style>
-  .dbg-col { display: flex; flex-direction: column; flex-shrink: 0; min-block-size: 0; min-inline-size: 160px; border-inline-end: 1px solid var(--border); }
-  .dbg-col.is-fill { flex: 1; flex-shrink: 1; border-inline-end: 0; }
-  .dbg-col.is-compact { inline-size: 100%; border-inline-end: 0; border-block-end: 1px solid var(--border); min-block-size: 150px; }
-  .dbg-col-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; block-size: 28px; min-block-size: 28px; padding-inline: 10px; border-block-end: 1px solid var(--border); background: var(--surface-2); flex-shrink: 0; }
-  .dbg-col-title, .dbg-subhead { margin: 0; font-size: var(--fs-xs); font-weight: 600; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.06em; }
-  .dbg-subhead { display: flex; align-items: center; justify-content: space-between; gap: 6px; padding: 4px 10px; }
-  .dbg-head-actions { display: flex; align-items: center; gap: 4px; }
-  .dbg-pane-btn {
-    display: inline-flex; align-items: center; gap: 4px; block-size: 22px; padding-inline: 6px;
-    border: 1px solid var(--border); border-radius: var(--radius-s);
-    background: var(--surface-2); color: var(--text-dim); font-size: var(--fs-xs); white-space: nowrap; cursor: pointer;
-  }
-  .dbg-pane-btn:hover { background: var(--hover); color: var(--text); }
-  .dbg-pane-btn.is-on { border-color: var(--accent-line); background: var(--accent-soft); color: var(--accent-text); }
-  .dbg-thread-select { block-size: 22px; font-size: var(--fs-xs); flex: 0 1 auto; max-inline-size: 75%; min-inline-size: 0; }
-  .dbg-thread-one { font-size: var(--fs-xs); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-inline-size: 0; }
-  .dbg-scroll { flex: 1; min-block-size: 0; overflow-y: auto; padding-block: 4px; }
-  .dbg-muted { margin: 0; padding: 12px; font-size: var(--fs-xs); color: var(--text-dim); }
-  .dbg-targets { margin: 0; padding: 0 0 4px; list-style: none; border-block-end: 1px solid var(--separator); }
-  .dbg-target { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 4px 10px; font-size: var(--fs-xs); }
-  .dbg-target-name { flex: 1; min-inline-size: 0; }
-  .dbg-target-state { flex-shrink: 0; color: var(--text-dim); }
-  .dbg-target.is-error .dbg-target-state { color: var(--danger); }
-  .dbg-frame { display: flex; align-items: center; justify-content: space-between; gap: 8px; inline-size: 100%; padding: 4px 10px; border: 0; background: transparent; color: var(--text); text-align: start; cursor: pointer; font-size: var(--fs-xs); }
-  .dbg-frame:hover { background: var(--hover); }
-  .dbg-frame.is-selected { background: var(--accent-soft); color: var(--accent-text); }
-  /* The name keeps at least ~14ch; a long file:line gives way first (both have a title). */
-  .dbg-frame-fn { flex: 1 0 min(14ch, 60%); min-inline-size: 0; font-size: var(--fs-xs); }
-  .dbg-frame-loc { flex: 0 1 auto; min-inline-size: 0; font-size: var(--fs-xs); color: var(--text-dim); font-variant-numeric: tabular-nums; }
-  .dbg-scope { border-block-end: 1px solid var(--separator); }
-  .dbg-scope-head { display: flex; align-items: center; gap: 6px; inline-size: 100%; padding: 4px 8px; border: 0; background: transparent; color: var(--text); font-size: var(--fs-s); font-weight: 500; text-align: start; cursor: pointer; }
-  .dbg-scope-head:hover { background: var(--hover); }
-  .dbg-scope-name { flex: 1; }
-  .dbg-watch-row { display: flex; align-items: center; gap: 4px; min-block-size: 24px; padding-block: 2px; padding-inline: 12px 6px; font-size: var(--fs-xs); }
-  .dbg-watch-row:hover { background: var(--hover); }
-  .dbg-var-name { color: var(--accent-text); font-size: var(--fs-xs); flex-shrink: 0; }
-  .dbg-var-eq { font-size: var(--fs-xs); flex-shrink: 0; }
-  .dbg-var-val { flex: 1; min-inline-size: 0; color: var(--text); font-size: var(--fs-xs); }
-  .dbg-var-type { color: var(--text-dim); font-size: var(--fs-xs); max-inline-size: 110px; }
-  .dbg-var-empty { display: flex; align-items: center; gap: 6px; padding: 4px 24px; font-size: var(--fs-xs); }
-  .dbg-watches { padding-block-start: 6px; }
+  .dbg-col { display: flex; flex-direction: column; flex-shrink: 0; min-block-size: 0; min-inline-size: 160px; }
+  .dbg-col.is-fill { flex: 1; flex-shrink: 1; }
+  .dbg-col.is-stacked { flex: 1 0 auto; inline-size: 100%; min-block-size: 50%; }
+  .dbg-col[hidden] { display: none; }
+  .dbg-col :global(.side-list) { flex: 1; block-size: auto; }
+  .dbg-back { display: flex; align-items: center; flex-shrink: 0; padding-inline: 4px; border-block-end: 1px solid var(--separator); background: var(--bg-sidebar); }
+  .dbg-thread-select { block-size: 24px; inline-size: 100%; font-size: var(--fs-xs); }
+  .dbg-thread-one { display: block; font-size: var(--fs-xs); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding-inline: 8px; }
+  .dbg-muted { margin: 0; padding: 12px 8px; font-size: var(--fs-s); color: var(--text-dim); }
+  .dbg-target .side-row-main { cursor: default; }
+  .dbg-target .is-error { color: var(--danger); }
+  .dbg-var-name { color: var(--accent-text); font-size: var(--fs-s); flex-shrink: 0; }
+  .dbg-var-val { flex: 1; min-inline-size: 0; color: var(--text); font-size: var(--fs-s); }
+  .dbg-watch-main { gap: 4px; }
+  .dbg-var-empty { display: flex; align-items: center; gap: 6px; padding-block: 4px; padding-inline: 32px 8px; font-size: var(--fs-xs); }
   .dbg-inline-form { display: flex; align-items: center; gap: 6px; padding: 4px 8px; }
   .dbg-inline-input { flex: 1; min-inline-size: 0; block-size: 24px; font-size: var(--fs-xs); }
-  .dbg-watch-err { flex: 1; color: var(--danger); font-size: var(--fs-xs); }
-  .dbg-col.is-compact .dbg-frame { min-block-size: var(--hit-min); }
+  .dbg-watch-err { flex: 1; color: var(--danger); font-size: var(--fs-s); }
 </style>

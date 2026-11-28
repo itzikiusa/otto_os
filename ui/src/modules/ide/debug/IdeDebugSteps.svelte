@@ -1,7 +1,7 @@
 <script lang="ts">
   // The Debug All step line under the debugger toolbar: the step that runs now,
   // a result chip per other step (click: its place in the console), and at the
-  // end the run's summary with up to 5 failed tests, each with Debug.
+  // end the run's summary with up to 5 failed tests (shared side rows), each with Debug.
   import { tick } from 'svelte';
   import { ide, type IdeDebugSessionSnapshot } from '../ideStore.svelte';
   import {
@@ -62,8 +62,11 @@
   {#if failed.length > 0}
     <ul class="steps-failed" aria-label="Failed tests">
       {#each failed as t (t.key)}
-        <li>
-          <span class="steps-failed-name mono" title={`${t.name} · ${t.step}`}>{t.name}</span>
+        <li class="side-row">
+          <span class="side-row-main steps-failed-main" title={`${t.name} · ${t.step}`}>
+            <span class="side-row-text"><span class="side-row-title mono steps-failed-name">{t.name}</span></span>
+            <span class="side-row-trailing">failed</span>
+          </span>
           <button
             type="button"
             class="btn small ghost"
@@ -91,7 +94,8 @@
   .steps-chip.is-failed .steps-mark { color: var(--danger); }
   .steps-chip.is-error .steps-mark { color: var(--warning); }
   .steps-failed { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
-  .steps-failed li { display: flex; align-items: center; gap: 6px; min-inline-size: 0; }
-  .steps-failed-name { flex: 1; min-inline-size: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--danger); }
+  /* The failed tests are shared side rows (one look with every list); a status word, not colour alone. */
+  .steps-failed-main { cursor: default; }
+  .steps-failed-name { color: var(--danger); }
   :global(.dbg-root.is-compact) .steps-chip { min-block-size: 36px; }
 </style>

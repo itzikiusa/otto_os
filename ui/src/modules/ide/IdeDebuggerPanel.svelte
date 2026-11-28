@@ -12,6 +12,7 @@
   import { ctxMenu, type MenuItem } from '../../lib/contextmenu.svelte';
   import { idePreferences } from '../../lib/idePreferences.svelte';
   import { pollWhileVisible } from '../../lib/poll';
+  import { viewport } from '../../lib/stores/viewport.svelte';
   import type { BadgeTone } from '../../lib/status';
   import {
     ide,
@@ -50,6 +51,10 @@
 
   const dbg = $derived(ide.activeDebug);
   const compact = $derived(ideLayout.stack);
+  // A phone: the Frames list is the tool until a frame is opened (the inspector pushes;
+  // the console goes with the variables).
+  let framesPushed = $state(false);
+  const consoleHidden = $derived(viewport.isPhone && ideDockPrefs.dbgShowFrames && !framesPushed);
 
   // Output chunks → lines. Sequence numbers come from the daemon (`seq`), else
   // from a client counter that follows the window as the daemon trims it.
@@ -375,6 +380,7 @@
       <div class="dbg-flex">
         <IdeDebuggerInspector
           {dbg}
+          bind:phoneOpen={framesPushed}
           showFrames={ideDockPrefs.dbgShowFrames}
           showVariables={true}
           hasTrailingConsole={false}
@@ -387,6 +393,7 @@
     <div class="dbg-flex" data-testid="ide-debug-split-grid">
       <IdeDebuggerInspector
         {dbg}
+        bind:phoneOpen={framesPushed}
         showFrames={ideDockPrefs.dbgShowFrames}
         showVariables={ideDockPrefs.dbgShowVariables}
         hasTrailingConsole={ideDockPrefs.dbgShowConsole}
@@ -397,7 +404,7 @@
       </IdeDebuggerInspector>
 
       {#if ideDockPrefs.dbgShowConsole}
-        <section class="dbg-console-col" aria-label="Debug console and evaluate" data-testid="ide-debug-console-pane">
+        <section class="dbg-console-col" aria-label="Debug console and evaluate" hidden={consoleHidden} data-testid="ide-debug-console-pane">
           <IdeConsoleView
             sessionKey={dbg.id}
             lines={consoleLines}
@@ -444,6 +451,7 @@
   .dbg-pane-btn:hover { background: var(--hover); color: var(--text); }
   .dbg-sep { inline-size: 1px; block-size: 14px; background: var(--border); margin-inline: 2px; flex-shrink: 0; }
   .dbg-empty-wrap { flex: 1; min-block-size: 0; overflow-y: auto; display: flex; align-items: center; justify-content: center; }
+  .dbg-console-col[hidden] { display: none; }
   .dbg-full-console, .dbg-console-col { flex: 1; min-block-size: 0; min-inline-size: 0; display: flex; flex-direction: column; }
   .dbg-flex { flex: 1; min-block-size: 0; min-inline-size: 0; display: flex; overflow: hidden; }
   .dbg-quick-repl { display: flex; align-items: center; gap: 6px; padding: 4px 8px; border-block-start: 1px solid var(--separator); background: var(--surface-2); font-size: var(--fs-xs); }

@@ -1,16 +1,21 @@
 <script lang="ts">
-  // GoLand-style Local Changes pane inside the IDE Git dock: resizable staged &
-  // unstaged/untracked file lists + commit composer on the left, and Otto's real
-  // `DiffViewer.svelte` (with hunk-level stage/unstage/discard) on the right.
+  // GoLand-style Local Changes inside the IDE Git dock: a list pane (Staged and
+  // Changes sections, the commit composer as its footer) beside Otto's real
+  // `DiffViewer.svelte` (hunk-level stage/unstage/discard).
   import EmptyState from '../../../lib/components/EmptyState.svelte';
   import Icon from '../../../lib/components/Icon.svelte';
   import LoadState from '../../../lib/components/LoadState.svelte';
   import PaneDivider from '../../../lib/components/PaneDivider.svelte';
+  import ListPane from '../../../lib/components/side/ListPane.svelte';
+  import PhoneBack from '../../../lib/components/side/PhoneBack.svelte';
+  import SideSection from '../../../lib/components/side/SideSection.svelte';
+  import { LIST_PANE, loadPaneW, paneKey, paneStorage } from '../../../lib/components/side/paneKeys';
+  import { ctxMenu, type MenuItem } from '../../../lib/contextmenu.svelte';
+  import { rowMenu as rowMenuAction } from '../../../lib/rowMenu';
   import { api, isAbortError } from '../../../lib/api/client';
   import type { DiffResp, FileChange, Repo, RepoStatusResp } from '../../../lib/api/types';
   import { confirmer } from '../../../lib/confirm.svelte';
   import { loadErrorText } from '../../../lib/loadError';
-  import { loadPaneWidth } from '../../../lib/paneResizer';
   import { plural } from '../../../lib/plural';
   import { git } from '../../../lib/stores/git.svelte';
   import { viewport } from '../../../lib/stores/viewport.svelte';
@@ -31,8 +36,10 @@
   // Touch devices have no ⌘ to press: no shortcut hint in the commit box there.
   const coarsePointer = typeof window !== 'undefined' && Boolean(window.matchMedia?.('(pointer: coarse)').matches);
 
-  const LS_GIT_LEFT_W = 'otto.ide.gitChangesW';
-  let leftW = $state(loadPaneWidth(LS_GIT_LEFT_W, 320, 220, 560));
+  // The shared list range and key; the old key is read once.
+  let leftW = $state(loadPaneW(paneStorage(), 'ide', 'gitChanges', LIST_PANE, { w: 'otto.ide.gitChangesW' }, 320));
+  const phone = $derived(viewport.isPhone);
+  let phoneOpen = $state(false);
 
   let selectedPath = $state<string | null>(null);
   let selectedSection = $state<'staged' | 'unstaged'>('unstaged');
@@ -153,6 +160,14 @@
     void ide.openFile(abs, { preview: false });
   }
 
+  // A row's actions past its stage / unstage button (⋯, right-click, long-press).
+  function rowMenu(c: FileChange, section: 'staged' | 'unstaged'): MenuItem[] {
+    const items: MenuItem[] = [];
+    if (c.kind !== 'deleted') items.push({ label: 'Open in Editor', icon: 'external', action: () => openInEditor(c.path) });
+    items.push({ label: c.kind === 'untracked' ? 'Delete File…' : 'Discard Changes…', icon: 'undo', danger: true, disabled: busyAction, action: () => void confirmDiscard(c, section === 'staged') });
+    return items;
+  }
+
   async function stageFiles(paths: string[], stage: boolean): Promise<void> {
     if (paths.length === 0 || busyAction) return;
     busyAction = true;
@@ -224,143 +239,119 @@
 {#snippet fileRow(c: FileChange, section: 'staged' | 'unstaged')}
   {@const isSel = selectedPath === c.path && selectedSection === section}
   {@const dirPart = c.path.includes('/') ? c.path.slice(0, c.path.lastIndexOf('/')) : ''}
-  <div class="gc-row reveal-host" class:is-selected={isSel}>
+  <div class="side-row reveal-host" class:selected={isSel}>
     <button
       type="button"
-      class="gc-file-btn"
+      class="side-row-main"
+      data-side-row
       dir="ltr"
-      onclick={() => { selectedPath = c.path; selectedSection = section; }}
+      aria-current={isSel ? 'true' : undefined}
+      onclick={() => { selectedPath = c.path; selectedSection = section; phoneOpen = true; }}
       ondblclick={() => openInEditor(c.path)}
+      oncontextmenu={(e) => { e.preventDefault(); ctxMenu.show(e, rowMenu(c, section)); }}
+      use:rowMenuAction
       title={c.path}
     >
       <span class={`gc-status mono ${badgeClass(c)}`}>{badgeLetter(c)}</span>
-      <span class={`gc-name ${badgeClass(c)}`}>{ideBasename(c.path)}</span>
-      {#if dirPart}<span class="gc-dir dim ellipsis">{dirPart}</span>{/if}
+      <span class="side-row-text">
+        <span class="side-row-title"><span class={badgeClass(c)}>{ideBasename(c.path)}</span>{#if dirPart}<span class="gc-dir"> {dirPart}</span>{/if}</span>
+      </span>
     </button>
-    <div class="gc-row-actions">
-      {#if section === 'staged'}
-        <button type="button" class="icon-btn" aria-label={`Unstage ${c.path}`} title="Unstage file" disabled={busyAction} onclick={() => void stageFiles([c.path], false)}><Icon name="minus" size={12} /></button>
-      {:else}
-        <button type="button" class="icon-btn" aria-label={`Stage ${c.path}`} title="Stage file" disabled={busyAction} onclick={() => void stageFiles([c.path], true)}><Icon name="plus" size={12} /></button>
-      {/if}
-      {#if c.kind !== 'deleted'}
-        <button type="button" class="icon-btn reveal-on-hover" aria-label={`Open ${c.path} in editor`} title="Open file in editor" onclick={() => openInEditor(c.path)}><Icon name="external" size={12} /></button>
-      {/if}
-      <button type="button" class="icon-btn reveal-on-hover" aria-label={`Discard changes to ${c.path}`} title="Discard changes…" disabled={busyAction} onclick={() => void confirmDiscard(c, section === 'staged')}><Icon name="undo" size={12} /></button>
-    </div>
+    {#if section === 'staged'}
+      <button type="button" class="icon-btn" aria-label={`Unstage ${c.path}`} title="Unstage file" disabled={busyAction} onclick={() => void stageFiles([c.path], false)}><Icon name="minus" size={14} /></button>
+    {:else}
+      <button type="button" class="icon-btn" aria-label={`Stage ${c.path}`} title="Stage file" disabled={busyAction} onclick={() => void stageFiles([c.path], true)}><Icon name="plus" size={14} /></button>
+    {/if}
+    <button type="button" class="icon-btn side-row-more" tabindex="-1" aria-label={`${c.path} actions`} title="More" onclick={(e) => ctxMenu.showAt(e.currentTarget as HTMLElement, rowMenu(c, section), { align: 'end' })}><Icon name="more" size={14} /></button>
   </div>
 {/snippet}
 
 <div class="gc-split" data-testid="ide-git-changes-view">
-  <section
-    class="gc-left"
-    style:inline-size={!viewport.isPhone ? `${leftW}px` : undefined}
-    aria-label="Local working tree changes"
-  >
-    <div class="gc-lists">
-      {#if statusError && !status}
-        <div class="gc-pad">
-          <LoadState what="working tree status" error={statusError} empty={true} onretry={() => void ideGit.refreshActive()} variant="compact" />
-        </div>
-      {:else if !status}
-        <div class="gc-pad"><LoadState what="working tree status" loading={true} variant="compact" rows={3} /></div>
-      {:else if changes.length === 0}
-        {#if statusError}
-          <div class="gc-pad">
-            <LoadState what="working tree status" error={statusError} empty={true} onretry={() => void ideGit.refreshActive()} variant="compact" />
-          </div>
-        {/if}
-        <div class="gc-empty">
-          <EmptyState
-            icon="check"
-            title="Working tree clean"
-            body={`No uncommitted changes on ${status.branch || 'HEAD'}.`}
-            headingLevel={3}
-          />
-        </div>
-      {:else}
-        {#if statusError}
-          <div class="gc-pad">
-            <LoadState what="working tree status" error={statusError} empty={true} onretry={() => void ideGit.refreshActive()} variant="compact" />
-          </div>
-        {/if}
-        {#if stagedList.length > 0}
-          <div class="gc-sec-head">
-            <span class="gc-sec-title">Staged ({stagedList.length})</span>
-            <button
-              type="button"
-              class="btn small ghost gc-mini-btn"
-              disabled={busyAction}
-              onclick={() => void stageFiles(stagedList.map((c) => c.path), false)}
-              data-testid="ide-git-unstage-all"
-            >Unstage all</button>
-          </div>
-          {#each stagedList as c (`s:${c.path}`)}
-            {@render fileRow(c, 'staged')}
-          {/each}
-        {/if}
-
-        <div class="gc-sec-head">
-          <span class="gc-sec-title">Changes ({unstagedList.length})</span>
-          {#if unstagedList.length > 0}
-            <button
-              type="button"
-              class="btn small ghost gc-mini-btn"
-              disabled={busyAction}
-              onclick={() => void stageFiles(unstagedList.filter((c) => c.kind !== 'conflicted').map((c) => c.path), true)}
-              data-testid="ide-git-stage-all"
-            >Stage all</button>
-          {/if}
-        </div>
-        {#each unstagedList as c (`u:${c.path}`)}
-          {@render fileRow(c, 'unstaged')}
-        {/each}
+  <!-- A list pane inside the tool window: a standalone ListPane (its own
+       header; the page's list is the explorer). A phone pushes: a tapped file
+       shows its diff with "‹ Changes". -->
+  <div class="gc-left" class:phone style:inline-size={phone ? undefined : `${leftW}px`} hidden={phone && phoneOpen}>
+    <ListPane
+      name="Changes"
+      count={status ? changes.length : null}
+      loading={!status && !statusError}
+      error={!status ? statusError : null}
+      onretry={() => void ideGit.refreshActive()}
+    >
+      {#if statusError}
+        <LoadState what="working tree status" error={statusError} empty={true} onretry={() => void ideGit.refreshActive()} variant="compact" />
       {/if}
-    </div>
+      {#if status && changes.length === 0}
+        <EmptyState icon="check" title="Working tree clean" body={`No uncommitted changes on ${status.branch || 'HEAD'}.`} headingLevel={3} />
+      {:else if status}
+        {#if stagedList.length > 0}
+          <SideSection title="Staged" count={stagedList.length}>
+            {#snippet actions()}
+              <button type="button" class="btn small ghost gc-mini-btn" disabled={busyAction} onclick={() => void stageFiles(stagedList.map((c) => c.path), false)} data-testid="ide-git-unstage-all">Unstage all</button>
+            {/snippet}
+            {#each stagedList as c (`s:${c.path}`)}
+              {@render fileRow(c, 'staged')}
+            {/each}
+          </SideSection>
+        {/if}
+        <SideSection title="Changes" count={unstagedList.length}>
+          {#snippet actions()}
+            {#if unstagedList.length > 0}
+              <button type="button" class="btn small ghost gc-mini-btn" disabled={busyAction} onclick={() => void stageFiles(unstagedList.filter((c) => c.kind !== 'conflicted').map((c) => c.path), true)} data-testid="ide-git-stage-all">Stage all</button>
+            {/if}
+          {/snippet}
+          {#each unstagedList as c (`u:${c.path}`)}
+            {@render fileRow(c, 'unstaged')}
+          {/each}
+        </SideSection>
+      {/if}
+      {#snippet footer()}
+        <form class="gc-composer" onsubmit={(e) => void submitCommit(e)}>
+          <textarea
+            bind:this={commitBoxEl}
+            class="input gc-msg"
+            rows={2}
+            dir="auto"
+            aria-label="Commit message"
+            placeholder={coarsePointer ? 'Commit message…' : 'Commit message (⌘Enter to commit)…'}
+            bind:value={commitMessage}
+            onkeydown={onComposerKeydown}
+            data-testid="ide-git-commit-input"
+          ></textarea>
+          <div class="gc-composer-bar">
+            <label class="gc-amend">
+              <input type="checkbox" bind:checked={amend} />
+              <span>Amend</span>
+            </label>
+            <span class="grow"></span>
+            <button
+              type="submit"
+              class="btn small primary"
+              disabled={committing || !commitMessage.trim() || (stagedList.length === 0 && !amend)}
+              title={stagedList.length === 0 && !amend ? 'Stage at least one file to commit' : `Commit ${plural(stagedList.length, 'staged file')}`}
+              data-testid="ide-git-commit-btn"
+            >
+              <Icon name="commit" size={12} />
+              <span>{committing ? 'Committing…' : stagedList.length > 0 ? `Commit (${stagedList.length})` : 'Commit'}</span>
+            </button>
+          </div>
+        </form>
+      {/snippet}
+    </ListPane>
+  </div>
 
-    <form class="gc-composer" onsubmit={(e) => void submitCommit(e)}>
-      <textarea
-        bind:this={commitBoxEl}
-        class="input gc-msg"
-        rows={2}
-        dir="auto"
-        aria-label="Commit message"
-        placeholder={coarsePointer ? 'Commit message…' : 'Commit message (⌘Enter to commit)…'}
-        bind:value={commitMessage}
-        onkeydown={onComposerKeydown}
-        data-testid="ide-git-commit-input"
-      ></textarea>
-      <div class="gc-composer-bar">
-        <label class="gc-amend">
-          <input type="checkbox" bind:checked={amend} />
-          <span>Amend</span>
-        </label>
-        <span class="grow"></span>
-        <button
-          type="submit"
-          class="btn small primary"
-          disabled={committing || !commitMessage.trim() || (stagedList.length === 0 && !amend)}
-          title={stagedList.length === 0 && !amend ? 'Stage at least one file to commit' : `Commit ${plural(stagedList.length, 'staged file')}`}
-          data-testid="ide-git-commit-btn"
-        >
-          <Icon name="commit" size={12} />
-          <span>{committing ? 'Committing…' : stagedList.length > 0 ? `Commit (${stagedList.length})` : 'Commit'}</span>
-        </button>
-      </div>
-    </form>
-  </section>
-
-  {#if !viewport.isPhone}
-    <PaneDivider bind:width={leftW} storageKey={LS_GIT_LEFT_W} min={220} max={560} defaultWidth={320} label="Resize local changes list" />
+  {#if !phone}
+    <PaneDivider bind:width={leftW} storageKey={paneKey('ide', 'gitChanges', 'w')} min={LIST_PANE.min} max={LIST_PANE.max} defaultWidth={320} label="Resize changes" />
   {/if}
 
-  <section class="gc-right" aria-label="Selected file diff">
+  <section class="gc-right" aria-label="Selected file diff" hidden={phone && !phoneOpen}>
     {#if !selectedPath}
       <div class="gc-empty">
         <p class="dim">Select a modified file to inspect its diff.</p>
       </div>
     {:else}
       <header class="gc-diff-bar">
+        {#if phone}<PhoneBack label="Changes" onclick={() => (phoneOpen = false)} testid="ide-git-changes-back" />{/if}
         <span class="mono gc-diff-path ellipsis" dir="ltr" title={selectedPath}>{selectedPath}</span>
         <span class="gc-target-label dim">{selTarget === 'staged' ? 'staged' : 'working tree'}</span>
         <span class="grow"></span>
@@ -409,40 +400,25 @@
 
 <style>
   .gc-split { flex: 1; min-block-size: 0; min-inline-size: 0; display: flex; overflow: hidden; background: var(--surface); }
-  .gc-left { display: flex; flex-direction: column; flex-shrink: 0; min-block-size: 0; min-inline-size: 220px; border-inline-end: 1px solid var(--border); }
-  .gc-lists { flex: 1; min-block-size: 0; overflow-y: auto; overflow-x: hidden; padding-block: 4px; }
+  .gc-left { display: flex; flex-direction: column; flex-shrink: 0; min-block-size: 0; }
+  .gc-left.phone { flex: 1; }
+  .gc-left[hidden], .gc-right[hidden] { display: none; }
   .gc-pad { padding: 12px; }
   .gc-empty { flex: 1; display: flex; align-items: center; justify-content: center; padding: 16px; font-size: var(--fs-xs); }
-  .gc-sec-head {
-    display: flex; align-items: center; justify-content: space-between; gap: 6px;
-    padding-block: 4px; padding-inline: 10px 6px; background: var(--surface-2);
-    border-block: 1px solid var(--separator);
-  }
-  .gc-sec-title { font-size: var(--fs-xs); font-weight: 600; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.06em; }
   .gc-mini-btn { block-size: 22px; padding-block: 0; }
-  .gc-row { display: flex; align-items: center; padding-inline-end: 4px; min-block-size: 24px; }
-  .gc-row:hover { background: var(--hover); }
-  .gc-row.is-selected { background: var(--accent-soft); }
-  .gc-file-btn {
-    flex: 1; min-inline-size: 0; display: flex; align-items: center; gap: 6px;
-    padding-block: 2px; padding-inline: 10px 4px; border: 0; background: transparent;
-    color: var(--text); font-size: var(--fs-xs); text-align: start; cursor: pointer;
-  }
   .gc-status { inline-size: 14px; text-align: center; font-size: var(--fs-xs); font-weight: 600; flex-shrink: 0; }
-  .gc-status.is-mod, .gc-name.is-mod { color: var(--info); }
-  .gc-status.is-add, .gc-name.is-add { color: var(--success); }
-  .gc-status.is-del, .gc-name.is-del { color: var(--danger); }
-  .gc-status.is-untracked, .gc-name.is-untracked { color: var(--warning); }
-  .gc-name { flex-shrink: 1; min-inline-size: 0; max-inline-size: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .gc-dir { flex: 1; min-inline-size: 0; font-size: var(--fs-xs); }
-  .gc-row-actions { display: flex; align-items: center; gap: 2px; flex-shrink: 0; }
-  .gc-composer { display: flex; flex-direction: column; gap: 6px; padding: 8px; border-block-start: 1px solid var(--border); background: var(--surface-2); flex-shrink: 0; }
+  .is-mod { color: var(--info); }
+  .is-add { color: var(--success); }
+  .is-del { color: var(--danger); }
+  .is-untracked { color: var(--warning); }
+  .gc-dir { font-size: var(--fs-xs); color: var(--text-dim); font-weight: 400; }
+  .gc-composer { flex: 1; display: flex; flex-direction: column; gap: 6px; padding-block: 8px; }
   .gc-msg { resize: none; font-size: var(--fs-xs); min-block-size: 44px; padding: 6px 8px; }
   .gc-composer-bar { display: flex; align-items: center; gap: 8px; }
   .gc-amend { display: inline-flex; align-items: center; gap: 4px; font-size: var(--fs-xs); color: var(--text-dim); cursor: pointer; }
   .gc-right { flex: 1; min-block-size: 0; min-inline-size: 0; display: flex; flex-direction: column; overflow: hidden; }
   .gc-diff-bar {
-    display: flex; align-items: center; gap: 8px; block-size: 28px; min-block-size: 28px;
+    display: flex; align-items: center; gap: 8px; min-block-size: 28px;
     padding-inline: 10px; border-block-end: 1px solid var(--border); background: var(--surface-2); flex-shrink: 0;
   }
   .gc-diff-path { font-size: var(--fs-xs); font-weight: 500; }
@@ -452,8 +428,4 @@
      the diff sideways rather than wrapping a hunk header (`@@ -1,6 +1,3 @@`) over 4 lines. */
   .gc-diff-scroll :global(.hunk-header) { white-space: nowrap; }
   .gc-diff-bar .gc-mini-btn { flex-shrink: 0; white-space: nowrap; }
-  @media (max-width: 640px) {
-    .gc-split { flex-direction: column; overflow-y: auto; }
-    .gc-left { inline-size: 100%; border-inline-end: 0; border-block-end: 1px solid var(--border); max-block-size: 260px; }
-  }
 </style>
