@@ -116,7 +116,7 @@ test('Settings sections remain reachable and titled at desktop and phone widths'
       // that holds its own list (Access groups, Context library) shows that
       // list's name there, so the title is checked where it always shows.
       if (width <= 640) await expect(back).toBeVisible();
-      else await expect(page.locator('.settings-body h1.ph-title')).toHaveText(label);
+      else await expect(page.locator('.settings h1.ph-title .ph-title-text')).toHaveText(label);
     }
   }
 });

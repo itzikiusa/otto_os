@@ -45,6 +45,9 @@
     loading?: boolean;
     error?: string | null;
     onretry?: () => void;
+    /** false: no header row — the page header across the page names the pane
+     *  and carries its ⋯ (Settings on desktop, design.md §7.16). */
+    head?: boolean;
     /** `nav` for a section nav (Settings), else a labelled aside. */
     as?: 'aside' | 'nav';
     /** Rows selector for the keyboard walk (default [data-side-row]). */
@@ -52,7 +55,7 @@
     testid?: string;
     children: Snippet;
   }
-  let { name, count = null, primary, menu, views, selection, searchRow, filterRow, footer, loading = false, error = null, onretry, as = 'aside', rows, testid, children }: Props = $props();
+  let { name, count = null, primary, menu, views, selection, searchRow, filterRow, footer, loading = false, error = null, onretry, head = true, as = 'aside', rows, testid, children }: Props = $props();
 
   const ld = getContext<ListDetailCtx | null | undefined>(LIST_HOST);
   const label = $derived(name ?? ld?.name ?? '');
@@ -73,7 +76,7 @@
 <svelte:element this={as} class="side-list" aria-label={label} data-testid={testid}>
   {#if selection}
     <header class="side-pane-head selecting">{@render selection()}</header>
-  {:else if ld?.phoneList}
+  {:else if ld?.phoneList || !head}
     <!-- The page header carries name · count · primary · ⋯ (one row on a phone). -->
   {:else}
     <header class="side-pane-head" class:views={!!views}>

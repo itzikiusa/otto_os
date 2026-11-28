@@ -15,7 +15,7 @@
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import LazyMount from '../../lib/components/LazyMount.svelte';
   import { lazyComponent, type LazyComponent } from '../../lib/lazy-component.svelte';
-  import type { Component } from 'svelte';
+  import { setContext, type Component, type Snippet } from 'svelte';
   import {
     SETTINGS_GROUPS,
     availableSections,
@@ -33,6 +33,7 @@
   import ListDetail from '../../lib/components/side/ListDetail.svelte';
   import ListPane from '../../lib/components/side/ListPane.svelte';
   import PhoneBack from '../../lib/components/side/PhoneBack.svelte';
+  import { HEADER_HOST, pageNav, type HeaderHost } from '../../lib/components/side/pageNav.svelte';
   import type { MenuItem } from '../../lib/contextmenu.svelte';
   import { daemonStatus } from './daemonStatus.svelte';
   import { settingsUi } from './settingsUiState.svelte';
@@ -60,6 +61,27 @@
     if (sheet) settingsUi.sheetPage = id;
     else router.go(`settings/${id}`);
   }
+  // Desktop / tablet: ONE header across the page (design.md §7.16) — the
+  // section's own PageHeader is drawn above the nav and the section as
+  // "Settings / <section>", with the nav's ⋯ rows in its ⋯; the nav starts
+  // with its filter. A phone keeps the two levels (and a sheet its own head).
+  let hostedBar = $state.raw<Snippet | null>(null);
+  setContext<HeaderHost>(HEADER_HOST, {
+    get active() {
+      return !viewport.navDrawer && !sheet;
+    },
+    crumbs: [{ label: 'Settings', onclick: () => router.go('settings') }],
+    more: () => [
+      ...(pageNav.show ? [] : [{ label: 'Hide Settings', icon: 'sidebar' as const, hint: '⌘B', action: () => pageNav.toggle?.() }]),
+      ...paneMenu(),
+    ],
+    claim(bar) {
+      hostedBar = bar;
+      return () => {
+        if (hostedBar === bar) hostedBar = null;
+      };
+    },
+  });
   /** The nav's ⋯ (after Hide Settings ⌘B). */
   function paneMenu(): MenuItem[] {
     return sheet ? [] : [{ label: 'Close settings', icon: 'x', hint: '⌘⇧←', action: exit }];
@@ -289,17 +311,17 @@
          Side panel (the section's own PageHeader is hidden with it). -->
     <PageHeader title="Settings" />
   {/if}
+  {#if hostedBar && !viewport.navDrawer && !sheet}{@render hostedBar()}{/if}
   <ListDetail module="settings" name="Settings" open={phoneOpen} onback={() => (phoneOpen = false)} defaultWidth={240}>
     {#snippet list()}
       <div class="settings-nav">
-        <ListPane as="nav" menu={paneMenu} testid="settings-nav">
+        <ListPane as="nav" menu={paneMenu} head={viewport.navDrawer || !!sheet} testid="settings-nav">
           {#snippet searchRow()}
-            <label class="settings-nav-filter">
-              <Icon name="search" size={12} />
+            <label class="side-search settings-nav-filter">
+              <Icon name="search" size={14} />
               <input dir="ltr"
                 bind:this={filterEl}
                 bind:value={settingsUi.query}
-                class="settings-filter-input"
                 type="search"
                 placeholder={sheet ? 'Search settings  /' : 'Filter settings…'}
                 aria-label="Filter settings"
@@ -388,40 +410,6 @@
     min-height: 0;
   }
   /* Filter field: a quiet search box pinned above the (scrolling) list. */
-  .settings-nav-filter {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    padding-inline: 8px;
-    height: 28px;
-    border-radius: var(--radius-s);
-    border: 1px solid var(--border);
-    background: var(--surface-2);
-    color: var(--text-dim);
-    transition: border-color var(--dur-fast) ease-out, box-shadow var(--dur-fast) ease-out;
-  }
-  .settings-nav-filter:focus-within {
-    border-color: var(--accent-text);
-    box-shadow: 0 0 0 3px var(--accent-soft-strong);
-  }
-  .settings-filter-input {
-    flex: 1;
-    min-width: 0;
-    height: 100%;
-    border: none;
-    outline: none;
-    background: transparent;
-    color: var(--text);
-    font-size: var(--fs-m);
-  }
-  .settings-filter-input::placeholder {
-    color: var(--text-dim);
-  }
-  @media (pointer: coarse) {
-    .settings-nav-filter {
-      height: 36px;
-    }
-  }
   .settings-nav-detail,
   .settings-nav-scope {
     flex-shrink: 0;
@@ -466,9 +454,4 @@
     margin-top: 0;
   }
 
-  @media (prefers-reduced-motion: reduce) {
-    .settings-nav-filter {
-      transition: none;
-    }
-  }
 </style>

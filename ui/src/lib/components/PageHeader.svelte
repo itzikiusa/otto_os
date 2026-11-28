@@ -37,7 +37,7 @@
   // page's list is empty, the EmptyState owns the "New …" CTA and the header
   // omits it.
   import type { Snippet } from 'svelte';
-  import { onMount, tick } from 'svelte';
+  import { getContext, onMount, tick } from 'svelte';
   import Icon, { type IconName } from './Icon.svelte';
   import { ui, isTauri } from '../stores/ui.svelte';
   import { viewport } from '../stores/viewport.svelte';
@@ -51,7 +51,7 @@
   import { ctxMenu, type MenuItem } from '../contextmenu.svelte';
   import { FitGate, StyleWriter, WidthCache, nodeSig } from './headerFit';
   import HeaderChrome from './side/HeaderChrome.svelte';
-  import { listPageMenu, pageNav } from './side/pageNav.svelte';
+  import { HEADER_HOST, listPageMenu, pageNav, type HeaderHost } from './side/pageNav.svelte';
 
   interface Props {
     title: string;
@@ -129,8 +129,7 @@
   // ‹ Back on a page pushed from it (pageNav, from ListDetail). History arrows
   // and the bell stay in the Rail / Navigator / drawer. A narrow Mac window
   // keeps the shell bar for its traffic lights.
-  // The shell's centre column (App's data-shell-center): a static marker, so
-  // the answer never waits for the compact layout's classes after a resize.
+  // The shell's centre column: a static marker, never a class a resize toggles.
   const inCenter = $derived(!!rootEl?.closest('[data-shell-center]'));
   const compactRow = $derived(pageTop && inCenter && !viewport.isDesktop && !isTauri);
   const phoneRow = $derived(compactRow && viewport.navDrawer);
@@ -142,9 +141,12 @@
   // The page's own `more` rows follow the pane's in that ⋯, and its `tabs`
   // (sections that hold the list: Containers | Images …) stay on the row below.
   const listPage = $derived(phoneRow ? pageNav.listPage : null);
-  // …and on a pushed item the item's own title, when its ListDetail names it.
   const itemTitle = $derived(phoneRow ? back?.title : undefined);
-  const moreItems = $derived(listPage ? listPageMenu(listPage.menu, more) : more);
+  // A page hosting this header at its top (Settings, design.md §7.16) draws the bar there.
+  const host = getContext<HeaderHost | undefined>(HEADER_HOST);
+  const hosted = $derived(!!host?.active);
+  $effect(() => (hosted ? host!.claim(bar) : undefined));
+  const moreItems = $derived(listPage ? listPageMenu(listPage.menu, more) : hosted ? listPageMenu(more, host!.more) : more);
   // Desktop / tablet: a hidden list pane's "Show <name>" (design.md §7.3).
   const showPane = $derived(pageTop && !viewport.navDrawer ? pageNav.show : null);
   // A pop-out window's traffic lights live in its own title strip (shell).
@@ -421,6 +423,7 @@
   }
 </script>
 
+{#snippet bar()}
 <header
   bind:this={rootEl}
   class="page-header-bar chrome-material {klass}"
@@ -448,7 +451,7 @@
         <div class="ph-title-line">
           {#if listPage?.views}<div class="ph-views">{@render listPage.views()}</div>{:else}
           <h1 class="ph-title" title={listPage?.name ?? itemTitle ?? title} bind:this={titleEl}>
-            {#each listPage ? [] : crumbs as c (c.label)}
+            {#each listPage ? [] : hosted ? [...host!.crumbs, ...crumbs] : crumbs as c (c.label)}
               <button class="ph-crumb" onclick={c.onclick}>{c.label}</button><span class="ph-sep" aria-hidden="true">/</span>
             {/each}
             <span class="ph-title-text">{#if listPage}{listPage.name}{:else if itemTitle}{itemTitle}{:else if titleContent}{@render titleContent()}{:else}{title}{/if}</span>
@@ -495,6 +498,8 @@
   {/if}
   {#if hostsBar}<AgentDrivingBar />{/if}
 </header>
+{/snippet}
+{#if !hosted}{@render bar()}{/if}
 
 <style>
   .page-header-bar {
@@ -757,6 +762,9 @@
   .ph-tabs-below::-webkit-scrollbar {
     display: none;
   }
+  /* A page's sections (Tabs, design.md §7.14) sit on the header's hairline; sub-tabs wrap below. */
+  .ph-tabs-below:has(> :global(.otabs)) { padding: 0; flex-wrap: wrap; }
+  .ph-tabs-below > :global(.otabs) { flex: 1 1 100%; border-block-end: 0; }
   @media (max-width: 640px) {
     .ph-row {
       padding-block: 0; padding-inline: 14px 10px;

@@ -6,10 +6,21 @@
 // groups) gets the Back first and the outer list's Back after it. Depth, not
 // registration order: Svelte runs a child's $effect before its parent's, so a
 // nested ListDetail mounted with the page claims first.
-import { untrack } from 'svelte';
+import { untrack, type Snippet } from 'svelte';
 import { keyContext } from '../../keys';
 import type { MenuItem } from '../../contextmenu.svelte';
 import type { PaneHeader } from './context';
+/** A page whose content draws its own PageHeader (Settings' sections) hosts
+ *  that header at its top, across the list pane and the content (design.md
+ *  §7.16): the content's PageHeader hands its bar to the nearest HEADER_HOST
+ *  while it is `active`, with the host's crumbs first and its ⋯ rows last. */
+export const HEADER_HOST = Symbol('header-host');
+export interface HeaderHost {
+  readonly active: boolean;
+  readonly crumbs: { label: string; onclick: () => void }[];
+  readonly more?: () => MenuItem[];
+  claim(bar: Snippet): () => void;
+}
 export interface PaneBack {
   label: string;
   onclick: () => void;

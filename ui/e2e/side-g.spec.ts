@@ -79,9 +79,24 @@ for (const s of ['light', 'dark'] as const) {
       await expect(nav.locator('.settings-nav-item[aria-current="page"] .settings-nav-label')).toHaveText('Appearance');
       expect(Math.round((await nav.boundingBox())!.width)).toBe(240);
       await shot(page, `settings-desktop-${s}`);
-      await hideShow(page, 'settings-nav', 'Settings');
+      // ONE header across the page (design.md §7.16): "Settings / Appearance"
+      // above the nav and the section; the nav starts with its filter and its
+      // ⋯ rows (Hide Settings first) are in the page header's ⋯.
+      const header = page.locator('.settings > [data-testid="page-header"]');
+      await expect(header.locator('h1.ph-title')).toHaveText(/Settings\s*\/\s*Appearance/);
+      await expect(page.locator('[data-testid="page-header"]')).toHaveCount(1);
+      await expect(nav.locator('.side-pane-head')).toHaveCount(0);
+      await header.getByRole('button', { name: 'More actions' }).click();
+      await page.getByRole('menuitem', { name: /Hide Settings/ }).click();
+      await expect(nav).toBeHidden();
+      await page.getByTestId('show-list-pane').click();
+      await expect(nav).toBeVisible();
+      await page.keyboard.press('Meta+b');
+      await expect(nav).toBeHidden();
+      await page.keyboard.press('Meta+b');
+      await expect(nav).toBeVisible();
       await nav.locator('.settings-nav-item', { hasText: 'Notifications' }).click();
-      await expect(page.locator('.settings-body h1.ph-title')).toHaveText('Notifications');
+      await expect(header.locator('.ph-title-text')).toHaveText('Notifications');
     });
 
     test('Insights: reports pane opens on a report', async ({ page }) => {

@@ -24,7 +24,7 @@ async function toPhone(page: Page): Promise<void> {
 test('a nested Settings section opened on desktop keeps one header row and its Back at phone width', async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
   await page.goto('/#/settings/access-groups');
-  await expect(page.locator('.settings-body h1.ph-title').first()).toBeVisible();
+  await expect(page.locator('.settings h1.ph-title').first()).toBeVisible();
   await toPhone(page);
   const back = page.getByRole('button', { name: 'Back to Settings' });
   await expect(back).toBeVisible();
