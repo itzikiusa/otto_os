@@ -57,14 +57,7 @@ pub(crate) fn spec_only_module(module: &str) -> bool {
 /// Whether a reported case is the test at `path`: Surefire names it `a/b/c`, Gradle by its
 /// display name (`c`, `It: c`, `Then: c`, `should c`, …).
 fn names_test(case: &str, path: &[String]) -> bool {
-    const PREFIXES: [&str; 6] = [
-        "It: ",
-        "Then: ",
-        "Scenario: ",
-        "Expect: ",
-        "should ",
-        "Test: ",
-    ];
+    const PREFIXES: [&str; 5] = ["It: ", "Then: ", "Scenario: ", "Expect: ", "should "];
     let leaf = path.last().map_or("", String::as_str);
     let shown = PREFIXES
         .iter()
