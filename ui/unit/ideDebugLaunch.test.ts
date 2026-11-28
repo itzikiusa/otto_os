@@ -184,21 +184,28 @@ describe('I2-01 the controller launches what the selector shows', () => {
   });
 });
 
-describe('BUG-30 Karma / Playwright configs are run-only', () => {
+describe('Karma / Playwright configs: Angular Karma and Playwright debug, plain Karma stays Run-only', () => {
+  // rc6 restored Debug for Playwright tests and Angular CLI Karma specs (js-debug, one child DAP
+  // connection per process); BUG-30's blanket refusal is gone. Plain `karma start` is still Run-only.
   const karma = { id: 'auto:karma', name: 'Karma / Angular Test', runner: 'karma', command: 'npx', args: ['--no-install', 'ng', 'test', '--watch=false'], env_overrides: {}, target_path: 'package.json', auto_detected: true };
   const pw = { id: 'auto:pw', name: 'Playwright E2E', runner: 'playwright', command: 'npx', args: ['--no-install', 'playwright', 'test'], env_overrides: {}, target_path: 'package.json', auto_detected: true };
-  const daemonSrc = readFileSync(new URL('../../crates/otto-ide/src/dap/adapters_jvm_js.rs', import.meta.url), 'utf8');
+  const plain = { id: 'auto:k', name: 'Karma', runner: 'karma', command: 'npx', args: ['--no-install', 'karma', 'start'], env_overrides: {}, target_path: 'karma.conf.js', auto_detected: true };
 
-  for (const [cfg, tool] of [[karma, 'Karma'], [pw, 'Playwright']] as const) {
-    it(`toolbar Debug on "${cfg.name}" is refused with the daemon's text, whatever tab is focused`, async () => {
-      const m = modules({ post: async () => { throw new Error('must not launch'); } });
-      // A Python tab is focused: the request would otherwise go to the Python adapter.
+  for (const cfg of [karma, pw]) {
+    it(`toolbar Debug on "${cfg.name}" asks the daemon for a debug session`, async () => {
+      const posted: string[] = [];
+      const m = modules({ post: async (url: string) => { posted.push(url); throw new Error('stop here'); } });
       await m.ctl.launchDebugSession(debugHost({ runConfigs: [cfg], selectedConfigId: cfg.id }), {}, null, () => {});
-      const message = m.launch.ideDebugLaunch.startError?.message ?? '';
-      assert.match(message, new RegExp(`^Debug is not supported for ${tool}`));
-      assert.ok(daemonSrc.includes(JSON.stringify(message).slice(1, -1)), `daemon refusal differs: ${message}`);
+      assert.ok(posted.some((u) => u.includes('/ide/debug/sessions')), `posted: ${posted.join(', ')}`);
+      assert.doesNotMatch(m.launch.ideDebugLaunch.startError?.message ?? '', /not supported|Run-only/);
     });
   }
+
+  it('toolbar Debug on a plain Karma config is refused before any adapter', async () => {
+    const m = modules({ post: async () => { throw new Error('must not launch'); } });
+    await m.ctl.launchDebugSession(debugHost({ runConfigs: [plain], selectedConfigId: plain.id }), {}, null, () => {});
+    assert.match(m.launch.ideDebugLaunch.startError?.message ?? '', /^Debug supports Karma in Angular CLI projects/);
+  });
 });
 
 describe('I2-03 one live debug session, never an orphan', () => {

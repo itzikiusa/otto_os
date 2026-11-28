@@ -60,7 +60,7 @@ async function shot(page: Page, name: string): Promise<void> {
   mkdirSync(join(out, 'side-foundation'), { recursive: true });
   for (const scheme of ['light', 'dark'] as const) {
     await page.emulateMedia({ colorScheme: scheme });
-    await page.waitForTimeout(150);
+    await page.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r))));
     await page.screenshot({ path: join(out, 'side-foundation', `${name}-${scheme}.png`), animations: 'disabled' });
   }
   await page.emulateMedia({ colorScheme: 'light' });

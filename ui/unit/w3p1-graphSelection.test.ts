@@ -29,6 +29,8 @@ function viewport(n: number) {
     svelte,
     '../../../lib/listWindow.svelte': listWindow,
     '../graph-lanes': lanes,
+    // Desktop rows (32 px); a phone's are 46.
+    '../../../lib/stores/viewport.svelte': { viewport: { isDesktop: true } },
   }, {
     window: {},
     requestAnimationFrame: (fn: () => void) => { frames.push(fn); return frames.length; },
@@ -98,7 +100,9 @@ function selection(opts: { mobile?: boolean; loaded?: (sha: string) => boolean }
     '../graph-commit-diff.svelte': { prefetchCommitSummary: (_r: string, sha: string) => { log.push(`prefetch ${sha}`); return () => log.push(`abort ${sha}`); } },
   });
   const host = {
-    repoId: 'r1', status: { changes: [] }, isMobile: !!opts.mobile, commitsOpen: true,
+    // A phone is compact (the Detail pane is a sheet) and pushes the graph (ListDetail).
+    repoId: 'r1', status: { changes: [] }, compact: !!opts.mobile, phone: !!opts.mobile,
+    showGraph: async () => {},
     refs: null, commits, commitsLoading: false, bySha, firstParentChild: new Map(),
     has: (sha: string) => bySha.has(sha),
     loadUntil: async (sha: string) => { log.push(`loadUntil ${sha}`); return (opts.loaded ?? ((s) => bySha.has(s)))(sha); },
@@ -114,8 +118,8 @@ test('a sidebar branch click pages history in, selects the tip with its diff def
   t.mock.timers.enable({ apis: ['setTimeout'] });
   const { sel, log, mod } = selection();
   sel.selectBranchRow({ name: 'topic', sha: 's40', remote: false });
-  await new Promise<void>((r) => queueMicrotask(r));
-  await new Promise<void>((r) => queueMicrotask(r));
+  // showGraph (a phone's push) is awaited first, then the history pages in.
+  for (let i = 0; i < 4; i++) await new Promise<void>((r) => queueMicrotask(r));
   assert.equal(sel.selectedSha, 's40');
   assert.deepEqual(log, ['loadUntil s40', 'prefetch s40', 'scroll s40']);
   // The diff waits out the double-click window, then loads.
@@ -148,21 +152,17 @@ test('an unreachable ref says so and leaves the selection alone', async () => {
   assert.equal(sel.revealBusy, '');
 });
 
-test('on a phone, selecting folds the commit list and closing re-opens it; a second click deselects', () => {
-  const { sel, host, commits } = selection({ mobile: true });
+test('on a phone a second click deselects, and WIP selects and clears (the push itself is ListDetail\'s)', () => {
+  const { sel, commits } = selection({ mobile: true });
   sel.selectCommit(commits[1]);
-  assert.equal(host.commitsOpen, false);
   assert.equal(sel.diffSha, 's1');
   sel.selectCommit(commits[1]);
   assert.equal(sel.selectedSha, null);
   assert.equal(sel.diffSha, null);
-  assert.equal(host.commitsOpen, true);
   sel.selectWip();
   assert.equal(sel.wipSelected, true);
-  assert.equal(host.commitsOpen, false);
   sel.clearSelection();
   assert.equal(sel.wipSelected, false);
-  assert.equal(host.commitsOpen, true);
 });
 
 test('closing the detail pane hands focus to the row it described (the WIP row for WIP)', () => {
